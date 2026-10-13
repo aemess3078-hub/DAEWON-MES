@@ -19,6 +19,7 @@ import type { DateOnly } from "@/lib/mrp/types"
 import { MaterialRows } from "./material-rows"
 import { PeriodRequirementTable } from "./period-requirement-table"
 import { PeriodSelector } from "./period-selector"
+import { PurchaseSuggestionPanel } from "./purchase-suggestion-panel"
 
 const fmt = (n: number) => n.toLocaleString("ko-KR", { maximumFractionDigits: 3 })
 
@@ -62,7 +63,7 @@ const TABLE_HEADERS_RECEIPTS: Header[] = [
 ]
 
 type Kpi = { label: string; value: string; hint: string; tone?: "danger" | "warn" }
-type ViewMode = "shortage" | "requirement"
+type ViewMode = "shortage" | "requirement" | "purchase"
 
 export function OrderMrpPanel() {
   const [selection, setSelection] = useState<PeriodSelection>({ mode: "ALL" })
@@ -127,7 +128,8 @@ export function OrderMrpPanel() {
     const t = qt && isDateOnly(qt) ? qt : null
     const draft = q.get("draft") === "1"
     const receipts = q.get("receipts") !== "0"
-    const mode: ViewMode = q.get("view") === "requirement" ? "requirement" : "shortage"
+    const mode: ViewMode =
+      q.get("view") === "requirement" ? "requirement" : q.get("view") === "purchase" ? "purchase" : "shortage"
     setViewMode(mode)
     setIncludeDraft(draft)
     setIncludeReceipts(receipts)
@@ -333,6 +335,7 @@ export function OrderMrpPanel() {
               [
                 { id: "shortage", label: "결품예측", hint: "재고 대비 부족 시점과 원인 수주" },
                 { id: "requirement", label: "기간 예상소요량", hint: "이 기간에 어떤 자재가 얼마나 필요한가" },
+                { id: "purchase", label: "발주제안", hint: "부족 자재를 공급업체별 구매발주(DRAFT)로 변환" },
               ] as const
             ).map((t) => (
               <Button
@@ -350,10 +353,23 @@ export function OrderMrpPanel() {
               </Button>
             ))}
             <span className="text-[13px] text-muted-foreground ml-2">
-              {viewMode === "shortage" ? "재고 대비 부족 시점과 원인 수주" : "이 기간에 어떤 자재가 얼마나 필요한가"}
+              {viewMode === "shortage"
+                ? "재고 대비 부족 시점과 원인 수주"
+                : viewMode === "requirement"
+                  ? "이 기간에 어떤 자재가 얼마나 필요한가"
+                  : "부족 자재를 공급업체별 구매발주(DRAFT)로 변환 — 자동 발주확정 없음"}
             </span>
           </div>
 
+          {viewMode === "purchase" && (
+            <PurchaseSuggestionPanel
+              params={{ from: view.params.from, to: view.params.to, includeDraft: view.params.includeDraft }}
+              refreshKey={payload!.calculatedAt}
+            />
+          )}
+
+          {viewMode !== "purchase" && (
+            <>
           {/* KPI */}
           <div
             className={`grid grid-cols-2 gap-4 ${
@@ -585,6 +601,8 @@ export function OrderMrpPanel() {
                 </table>
               </div>
             </div>
+          )}
+            </>
           )}
         </>
       )}

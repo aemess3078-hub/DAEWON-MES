@@ -144,3 +144,78 @@ export async function loadStockRows(
   })) as InventoryBalanceRow[]
   return { stockRows, queried: true }
 }
+
+/**
+ * 현재 유효한 구매단가(ItemPrice PURCHASE) 일괄 조회 — 발주제안용 (Phase 5C)
+ *  - 선택 규칙은 기존 발주 화면(getItemPrice)과 같다: priceType=PURCHASE, effectiveFrom ≤ 기준시각,
+ *    (effectiveTo 없음 또는 ≥ 기준시각), effectiveFrom 최신 1건. 공급업체(partnerId)가 같은 가격만 사용한다.
+ *  - 쿼리 1회(품목 × 공급업체 조합 수와 무관). 결과 key = `${itemId}|${supplierId}`
+ */
+export async function loadCurrentPurchasePrices(
+  db: Pick<PrismaClient, "itemPrice">,
+  tenantId: string,
+  itemIds: readonly string[],
+  supplierIds: readonly string[],
+  now: Date
+): Promise<{ prices: Map<string, { unitPrice: number; currency: string; effectiveFrom: string }>; queried: boolean }> {
+  const prices = new Map<string, { unitPrice: number; currency: string; effectiveFrom: string }>()
+  if (itemIds.length === 0 || supplierIds.length === 0) return { prices, queried: false }
+  const rows = await db.itemPrice.findMany({
+    where: {
+      tenantId,
+      priceType: "PURCHASE",
+      itemId: { in: Array.from(new Set(itemIds)) },
+      partnerId: { in: Array.from(new Set(supplierIds)) },
+      effectiveFrom: { lte: now },
+      OR: [{ effectiveTo: null }, { effectiveTo: { gte: now } }],
+    },
+    select: { itemId: true, partnerId: true, unitPrice: true, currency: true, effectiveFrom: true },
+    orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
+  })
+  for (const r of rows) {
+    const key = `${r.itemId}|${r.partnerId}`
+    if (prices.has(key)) continue // 정렬상 첫 행 = 최신 유효 단가
+    const unitPrice = Number(r.unitPrice)
+    if (!Number.isFinite(unitPrice)) continue
+    prices.set(key, {
+      unitPrice,
+      currency: r.currency,
+      effectiveFrom: new Date(r.effectiveFrom).toISOString().slice(0, 10),
+    })
+  }
+  return { prices, queried: true }
+}
+
+/**
+ * DRAFT 구매발주의 미입고 수량(참고용) — MRP 예정입고/재고에는 가산하지 않는다(Phase 5B 정책: ORDERED/PARTIAL_RECEIVED 만).
+ * 외주발주(OS- / [OUTSOURCING] / 공정 연결 행)는 제외한다.
+ */
+export async function loadDraftOpenQuantities(
+  db: Pick<PrismaClient, "purchaseOrderItem">,
+  tenantId: string,
+  itemIds: readonly string[]
+): Promise<{ byItem: Map<string, number>; queried: boolean }> {
+  const byItem = new Map<string, number>()
+  if (itemIds.length === 0) return { byItem, queried: false }
+  const rows = await db.purchaseOrderItem.findMany({
+    where: {
+      itemId: { in: Array.from(new Set(itemIds)) },
+      item: { tenantId },
+      purchaseOrder: { tenantId, status: "DRAFT" },
+    },
+    select: {
+      itemId: true,
+      qty: true,
+      receivedQty: true,
+      workOrderOperationId: true,
+      purchaseOrder: { select: { orderNo: true, note: true } },
+    },
+  })
+  for (const r of rows) {
+    const po = r.purchaseOrder
+    if (po.orderNo.startsWith("OS-") || (po.note ?? "").includes("[OUTSOURCING]") || r.workOrderOperationId) continue
+    const open = Math.max(0, Number(r.qty) - Number(r.receivedQty))
+    if (open > 0) byItem.set(r.itemId, (byItem.get(r.itemId) ?? 0) + open)
+  }
+  return { byItem, queried: true }
+}

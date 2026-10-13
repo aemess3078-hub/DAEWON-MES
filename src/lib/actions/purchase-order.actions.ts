@@ -8,6 +8,7 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
+import { allocatePurchaseOrderNumbers } from "@/lib/services/purchase-order-number.service"
 import {
   closePurchaseOrderRemainder as closePurchaseOrderRemainderCore,
   type PurchaseOrderCloseResult,
@@ -149,17 +150,8 @@ export async function getItemPrice(
 
 // ─── Business Logic ───────────────────────────────────────────────────────────
 
-async function generatePurchaseOrderNo(tenantId: string): Promise<string> {
-  const { year } = kstDateParts()
-  const prefix = `PO-${year}-`
-  const last = await prisma.purchaseOrder.findFirst({
-    where: { tenantId, orderNo: { startsWith: prefix } },
-    orderBy: { orderNo: "desc" },
-    select: { orderNo: true },
-  })
-  const seq = last ? (parseInt(last.orderNo.split("-")[2] ?? "0", 10) || 0) + 1 : 1
-  return `${prefix}${String(seq).padStart(3, "0")}`
-}
+// 발주번호는 purchase-order-number.service.ts 에서 트랜잭션 안에서 확보한다(Phase 5C):
+// 연도별 숫자 최대값 + 1, 6자리 이상 순번, (tenant, 연도) advisory lock.
 
 async function assertPurchaseOrderHasNoOperationalHistory(
   db: Pick<
@@ -236,8 +228,9 @@ export async function createPurchaseOrder(
   )
 
   await withUniqueBusinessNumberRetry(async () => {
-    const orderNo = await generatePurchaseOrderNo(tenantId)
     await prisma.$transaction(async (tx) => {
+    // 번호 확보와 생성을 같은 트랜잭션에서 수행한다(채번 잠금이 생성까지 유지된다)
+    const [orderNo] = await allocatePurchaseOrderNumbers(tx, tenantId, 1, { year: kstDateParts().year })
     const created = await tx.purchaseOrder.create({
       data: {
         tenantId,
