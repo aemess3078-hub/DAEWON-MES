@@ -32,6 +32,7 @@
     "test:pop-worktime-operator": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-pop-worktime-operator.ts",
     "test:quality-release-gate": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-quality-release-gate.ts",
     "test:equipment-result-attribution": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-equipment-result-attribution.ts",
+    "test:order-mrp-engine": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-order-mrp-engine.ts",
     "test:bom-material-sufficiency": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-bom-material-sufficiency.ts",
     "test:inventory-concurrency-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-inventory-concurrency-integrity.ts",
     "dev:set-pop-pin": "ts-node --project tsconfig.scripts.json scripts/set-pop-pin-dev.ts",
