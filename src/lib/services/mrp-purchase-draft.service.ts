@@ -14,10 +14,17 @@
  *  - 헤더 expectedDate = 사용자가 확인한 공급업체 그룹 날짜, 없으면 그룹 라인 필요일 중 가장 빠른 날짜(보수적).
  *    임의 "오늘 + N일"은 사용하지 않는다. 날짜가 없으면 생성하지 않고 입력을 요구한다.
  *  - 발주번호는 purchase-order-number.service 로 같은 트랜잭션에서 연속 확보한다(advisory lock + 숫자 최대값).
+ *
+ * Phase 5D
+ *  - MOQ / 발주배수는 서버가 ItemSupplier 에서 다시 읽어 최종 발주수량을 재검증한다(클라이언트가 보낸 조건은 없음).
+ *    수량 < MOQ 이거나 발주배수의 배수가 아니면 DRAFT 를 만들지 않는다(예외 승인 기능 없음).
+ *  - 리드타임은 헤더 입고예정일을 바꾸지 않는다(입고예정일 = 목표 입고일). 리드타임은 "언제 발주해야 하는가"만 계산하며
+ *    감사로그에 라인별 발주 필요일을 남기고, 발주 필요일이 지난 건수는 결과에 알린다(생성은 막지 않는다).
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client"
 import { isDateOnly, toDateOnly } from "../mrp/period"
+import { computeOrderByDate, daysBetween, describeTermsViolation, validateQtyAgainstTerms } from "../mrp/purchase-policy"
 import type { DateOnly } from "../mrp/types"
 import { loadSupplierPolicies } from "./item-supplier.service"
 import { loadCurrentPurchasePrices } from "./mrp-loaders"
@@ -58,6 +65,10 @@ export type DraftPoCreated = {
   totalAmount: number | null
   currency: string
   unpricedCount: number
+  /** 표준 리드타임 기준 발주 필요일이 이미 지난 라인 수(생성은 허용 — 납기협의/긴급조달 필요) */
+  leadTimeOverdueLineCount: number
+  /** 리드타임이 등록되지 않아 발주 필요일을 계산하지 못한 라인 수 */
+  leadTimeMissingLineCount: number
 }
 
 export type DraftPoErrorCode =
@@ -65,6 +76,7 @@ export type DraftPoErrorCode =
   | "INVALID_REFERENCE"
   | "MISSING_EXPECTED_DATE"
   | "CURRENCY_MISMATCH"
+  | "SUPPLIER_TERMS_VIOLATION"
   | "NO_SITE"
   | "FAILED"
 
@@ -73,6 +85,7 @@ export const DRAFT_PO_ERROR_MESSAGES: Record<DraftPoErrorCode, string> = {
   INVALID_REFERENCE: "유효하지 않은 참조가 포함되어 있습니다. 품목관리 > 공급업체 관리에서 공급업체 등록 상태를 확인해 주세요.",
   MISSING_EXPECTED_DATE: "입고예정일을 확인할 수 없는 공급업체가 있습니다. 목표 입고일을 입력해 주세요.",
   CURRENCY_MISMATCH: "한 공급업체 발주에 서로 다른 통화의 단가가 섞여 있습니다. 통화별로 나누어 생성해 주세요.",
+  SUPPLIER_TERMS_VIOLATION: "공급업체 구매조건(MOQ/발주배수)을 만족하지 않는 수량이 있습니다.",
   NO_SITE: "등록된 공장(사이트)이 없습니다.",
   FAILED: "발주 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
 }
@@ -168,7 +181,8 @@ export async function createDraftPurchaseOrdersFromSuggestions(
   if (!normalized.ok) return fail("INVALID_INPUT")
   const { lines, groupDates } = normalized
   const year = Number(toDateOnly(now).slice(0, 4))
-  const orderDate = new Date(`${toDateOnly(now)}T00:00:00.000Z`)
+  const today = toDateOnly(now)
+  const orderDate = new Date(`${today}T00:00:00.000Z`)
 
   const run = () =>
     deps.db.$transaction(async (tx) => {
@@ -176,17 +190,35 @@ export async function createDraftPurchaseOrdersFromSuggestions(
       const itemIds = Array.from(new Set(lines.map((l) => l.itemId)))
       const items = await tx.item.findMany({
         where: { tenantId, id: { in: itemIds } },
-        select: { id: true, code: true, name: true },
+        select: { id: true, code: true, name: true, safetyStock: true },
       })
       if (items.length !== itemIds.length) throw new DraftFailure("INVALID_REFERENCE")
+      const itemById = new Map(items.map((i) => [i.id, i]))
 
       // 2) 공급업체: ACTIVE ItemSupplier 관계 + ACTIVE SUPPLIER/BOTH 거래처인 (품목, 공급업체) 쌍만 허용
       const policies = await loadSupplierPolicies(tx, tenantId, itemIds)
       const supplierName = new Map<string, string>()
+      const termsByPair = new Map<string, { moq: number | null; orderMultiple: number | null; leadTimeDays: number | null }>()
+      const violations: string[] = []
       for (const l of lines) {
         const match = policies.get(l.itemId)?.suppliers.find((s) => s.supplierId === l.supplierId)
         if (!match) throw new DraftFailure("INVALID_REFERENCE")
         supplierName.set(l.supplierId, match.supplierName)
+        // 구매조건은 서버가 읽은 ItemSupplier 가 기준이다(클라이언트 값 불신): 수량 ≥ MOQ, 발주배수의 배수
+        const terms = { moq: match.moq, orderMultiple: match.orderMultiple, leadTimeDays: match.leadTimeDays }
+        termsByPair.set(`${l.itemId}|${l.supplierId}`, terms)
+        const v = validateQtyAgainstTerms(l.qty, terms)
+        if (!v.ok) {
+          const code = itemById.get(l.itemId)?.code ?? l.itemId
+          violations.push(`${code}(${match.supplierName}): ${describeTermsViolation(v, l.qty)}`)
+        }
+      }
+      if (violations.length > 0) {
+        const shown = violations.slice(0, 3).join(" / ")
+        throw new DraftFailure(
+          "SUPPLIER_TERMS_VIOLATION",
+          `${DRAFT_PO_ERROR_MESSAGES.SUPPLIER_TERMS_VIOLATION} ${shown}${violations.length > 3 ? ` 외 ${violations.length - 3}건` : ""}`
+        )
       }
 
       // 3) 사이트(tenant 소유)
@@ -207,7 +239,6 @@ export async function createDraftPurchaseOrdersFromSuggestions(
       })
       const stockByItem = new Map<string, number>()
       for (const b of balances) stockByItem.set(b.itemId, (stockByItem.get(b.itemId) ?? 0) + Number(b.qtyOnHand))
-      const itemById = new Map(items.map((i) => [i.id, i]))
 
       // 5) 공급업체별 그룹 + 입고예정일/통화 확정
       type Group = { supplierId: string; lines: Merged[]; expectedDate: DateOnly; currency: string }
@@ -245,6 +276,10 @@ export async function createDraftPurchaseOrdersFromSuggestions(
         const orderNo = orderNos[i]
         const itemRows = g.lines.map((l) => {
           const price = prices.get(`${l.itemId}|${g.supplierId}`) ?? null
+          const terms = termsByPair.get(`${l.itemId}|${g.supplierId}`)
+          const target = l.requiredDate ?? g.expectedDate
+          const orderBy = computeOrderByDate(target, terms?.leadTimeDays ?? null)
+          const diff = orderBy ? daysBetween(today, orderBy) : null
           return {
             itemId: l.itemId,
             qty: l.qty,
@@ -252,6 +287,15 @@ export async function createDraftPurchaseOrdersFromSuggestions(
             stockAtOrder: stockByItem.get(l.itemId) ?? 0,
             note: price ? null : "단가 미등록(MRP 발주제안)",
             priced: price !== null,
+            // 감사 요약(Phase 5D): 구매조건과 필요일/발주 필요일
+            moq: terms?.moq ?? null,
+            orderMultiple: terms?.orderMultiple ?? null,
+            leadTimeDays: terms?.leadTimeDays ?? null,
+            safetyStock: Number((itemById.get(l.itemId) as { safetyStock?: unknown } | undefined)?.safetyStock ?? 0) || 0,
+            requiredReceiptDate: target,
+            orderByDate: orderBy,
+            leadTimeOverdue: diff !== null && diff < 0,
+            leadTimeMissing: terms?.leadTimeDays === null || terms?.leadTimeDays === undefined,
           }
         })
         const unpricedCount = itemRows.filter((r) => !r.priced).length
@@ -302,7 +346,20 @@ export async function createDraftPurchaseOrdersFromSuggestions(
               totalAmount,
               currency: g.currency,
               unpricedCount,
-              items: itemRows.slice(0, 50).map((r) => ({ itemId: r.itemId, qty: r.qty, unitPrice: r.unitPrice, priced: r.priced })),
+              items: itemRows.slice(0, 50).map((r) => ({
+                itemId: r.itemId,
+                qty: r.qty,
+                unitPrice: r.unitPrice,
+                priced: r.priced,
+                safetyStock: r.safetyStock,
+                moq: r.moq,
+                orderMultiple: r.orderMultiple,
+                leadTimeDays: r.leadTimeDays,
+                requiredReceiptDate: r.requiredReceiptDate,
+                orderByDate: r.orderByDate,
+              })),
+              leadTimeOverdueLineCount: itemRows.filter((r) => r.leadTimeOverdue).length,
+              leadTimeMissingLineCount: itemRows.filter((r) => r.leadTimeMissing).length,
             } as Prisma.InputJsonValue,
             menuName: "MRP 발주제안",
           },
@@ -318,6 +375,8 @@ export async function createDraftPurchaseOrdersFromSuggestions(
           totalAmount,
           currency: g.currency,
           unpricedCount,
+          leadTimeOverdueLineCount: itemRows.filter((r) => r.leadTimeOverdue).length,
+          leadTimeMissingLineCount: itemRows.filter((r) => r.leadTimeMissing).length,
         })
       }
       return { orders: created, siteId: site.id }

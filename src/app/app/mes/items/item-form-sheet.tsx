@@ -72,6 +72,7 @@ const DEFAULT_FORM_VALUES: ItemFormValues = {
   manualLotPolicy: "ALLOWED",
   status:          "ACTIVE",
   defaultWarehouseId: null,
+  safetyStock:     0,
 }
 
 const UOM_OPTIONS = [
@@ -96,6 +97,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   NOT_FOUND:               "품목을 찾을 수 없습니다.",
   FORBIDDEN:               "권한이 없습니다.",
   INVALID_WAREHOUSE:       "선택한 기본 입고창고를 찾을 수 없습니다.",
+  INVALID_SAFETY_STOCK:    "안전재고는 0 이상 숫자(소수 6자리 이하)여야 합니다.",
 }
 
 const itemTypeBadgeClass: Record<string, string> = {
@@ -192,6 +194,8 @@ export function ItemFormSheet({
         form.setError("categoryId", { type: "manual", message: msg })
       } else if (key === "INVALID_GROUP" || key === "GROUP_CATEGORY_MISMATCH") {
         form.setError("itemGroupId", { type: "manual", message: msg })
+      } else if (key === "INVALID_SAFETY_STOCK") {
+        form.setError("safetyStock", { type: "manual", message: msg })
       } else if (key === "LOT_PREFIX_REQUIRED") {
         form.setError("lotPrefix", { type: "manual", message: "생산 Prefix형은 Prefix를 입력해야 합니다." })
       } else if (key === "INVALID_LOT_PREFIX") {
@@ -362,6 +366,36 @@ export function ItemFormSheet({
               </FormItem>
             )}
           />
+
+          {/* 재고 정책 */}
+          <div className="pt-4 border-t">
+            <p className="text-[15px] font-medium text-foreground mb-4">재고 정책</p>
+            <FormField
+              control={form.control}
+              name="safetyStock"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="text-[14px]">안전재고</FormLabel>
+                  <FormControl>
+                    <Input
+                      inputMode="decimal"
+                      placeholder="0"
+                      className="text-[14px]"
+                      name={field.name}
+                      ref={field.ref}
+                      onBlur={field.onBlur}
+                      value={field.value === undefined || field.value === null ? "" : String(field.value)}
+                      onChange={(event) => field.onChange(event.target.value)}
+                    />
+                  </FormControl>
+                  <p className="text-[13px] text-muted-foreground">
+                    MRP 발주제안에서 유지할 최소 가용재고 기준입니다. 현재 재고를 차감하지 않으며, 예상 재고가 이 값 아래로 내려가면 구매를 제안합니다.
+                  </p>
+                  <FormMessage className="text-[13px]" />
+                </FormItem>
+              )}
+            />
+          </div>
 
           {/* 추적 설정 */}
           <div className="pt-4 border-t">

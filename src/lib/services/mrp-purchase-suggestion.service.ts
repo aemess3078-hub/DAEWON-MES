@@ -9,7 +9,14 @@
  */
 
 import type { PrismaClient } from "@prisma/client"
-import { buildPurchaseSuggestionRows, type PurchaseSuggestionRow, type SupplierCandidateInput } from "../mrp/purchase-suggestion"
+import {
+  AUTO_SUGGEST_KINDS,
+  buildPurchaseSuggestionRows,
+  classifyByPolicy,
+  minProjectedBalanceOf,
+  type PurchaseSuggestionLine,
+  type SupplierCandidateInput,
+} from "../mrp/purchase-suggestion"
 import type { DateOnly } from "../mrp/types"
 import { loadSupplierPolicies } from "./item-supplier.service"
 import { loadCurrentPurchasePrices, loadDraftOpenQuantities } from "./mrp-loaders"
@@ -27,7 +34,7 @@ export type PurchaseSuggestionPayload = {
   site: { id: string; name: string } | null
   /** 단가 정보 표시 권한 여부 */
   priceVisible: boolean
-  rows: PurchaseSuggestionRow[]
+  rows: PurchaseSuggestionLine[]
   summary: {
     finalShortageCount: number
     temporaryShortageCount: number
@@ -35,6 +42,17 @@ export type PurchaseSuggestionPayload = {
     noSupplierCount: number
     /** 제안 대상 중 최우선 공급업체가 불명확(동률/Default 중복)한 자재 수 */
     ambiguousSupplierCount: number
+  }
+  /** Phase 5D 정책 요약(구매 필요 / 안전재고 / 발주 필요일 경과 / 리드타임 미등록) */
+  policySummary: {
+    /** 신규 구매가 필요한(자동 제안 대상) 자재 수 */
+    purchaseNeededCount: number
+    /** 안전재고 기준으로 포함된 자재 수(안전재고 부족 + 일시 미달) */
+    safetyStockCount: number
+    /** 자동 제안 대상 중 표준 리드타임 기준 발주 필요일이 지난 자재 수 */
+    orderOverdueCount: number
+    /** 자동 제안 대상 중 추천 공급업체의 리드타임이 없어 발주 필요일을 계산하지 못한 자재 수 */
+    leadTimeMissingCount: number
   }
   /** 예정일이 지나 가산하지 않은 미입고 발주 건수(제안 수량에 영향을 줄 수 있는 참고 정보) */
   overdueReceiptCount: number
@@ -53,7 +71,17 @@ export async function loadPurchaseSuggestions(
   const view = mrp.view
 
   // 제안 대상 자재(최종 부족 / 일시 결품)만 정책·단가·DRAFT 를 조회한다
-  const targetIds = view.materials.filter((m) => m.shortageQty > 0 || m.temporaryShortage).map((m) => m.componentItemId)
+  // (Phase 5D) 안전재고 정책 기준: 최종 미달/일시 미달 자재(안전재고 0 이면 5C 와 같은 결품 자재)
+  const targetIds = view.materials
+    .filter(
+      (m) =>
+        classifyByPolicy({
+          safetyStock: m.safetyStock ?? 0,
+          finalBalance: m.finalBalance,
+          minProjectedBalance: minProjectedBalanceOf(m),
+        }).kind !== null
+    )
+    .map((m) => m.componentItemId)
 
   const policies = targetIds.length > 0 ? await loadSupplierPolicies(db, tenantId, targetIds) : new Map()
   if (targetIds.length > 0) queryCount += 1
@@ -114,6 +142,14 @@ export async function loadPurchaseSuggestions(
       temporaryShortageCount: rows.filter((r) => r.kind === "TEMPORARY_SHORTAGE").length,
       noSupplierCount: rows.filter((r) => r.supplierReason === "NONE").length,
       ambiguousSupplierCount: rows.filter((r) => r.supplierReason === "AMBIGUOUS_PRIORITY").length,
+    },
+    policySummary: {
+      purchaseNeededCount: rows.filter((r) => AUTO_SUGGEST_KINDS.includes(r.kind)).length,
+      safetyStockCount: rows.filter((r) => r.kind === "SAFETY_STOCK_SHORTAGE" || r.kind === "SAFETY_STOCK_TEMPORARY").length,
+      orderOverdueCount: rows.filter((r) => AUTO_SUGGEST_KINDS.includes(r.kind) && r.orderTiming === "OVERDUE").length,
+      leadTimeMissingCount: rows.filter(
+        (r) => AUTO_SUGGEST_KINDS.includes(r.kind) && r.recommendedSupplierId !== null && r.orderTiming === "LEAD_TIME_MISSING"
+      ).length,
     },
     overdueReceiptCount: view.kpi.overdueReceiptCount,
     diagnostics: { queryCount },

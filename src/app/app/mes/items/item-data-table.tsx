@@ -111,6 +111,7 @@ export function ItemDataTable({ items, categories, itemGroups, warehouses, tenan
       manualLotPolicy:    item.manualLotPolicy,
       status:             item.status,
       defaultWarehouseId: item.defaultWarehouseId ?? null,
+      safetyStock:        item.safetyStock ?? 0,
     }
   }
 
@@ -181,6 +182,7 @@ export function ItemDataTable({ items, categories, itemGroups, warehouses, tenan
         manualLotPolicy: editingItem.manualLotPolicy,
         status:          editingItem.status,
         defaultWarehouseId: editingItem.defaultWarehouseId ?? null,
+        safetyStock:     editingItem.safetyStock ?? 0,
       }
     : undefined
 

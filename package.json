@@ -40,6 +40,8 @@
     "test:mrp-scheduled-receipt-ui": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-mrp-scheduled-receipt-ui.tsx",
     "test:mrp-purchase-suggestion": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-purchase-suggestion.ts",
     "test:mrp-purchase-suggestion-ui": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-mrp-purchase-suggestion-ui.tsx",
+    "test:mrp-purchase-policy": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-purchase-policy.ts",
+    "test:mrp-purchase-policy-ui": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-mrp-purchase-policy-ui.tsx",
     "test:purchase-order-close": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-purchase-order-close.ts",
     "test:item-price-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-item-price-security.ts",
     "test:item-supplier": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-item-supplier.ts",

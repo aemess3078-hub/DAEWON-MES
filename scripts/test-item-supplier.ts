@@ -506,7 +506,9 @@ async function main() {
     ok(!/DROP |TRUNCATE|DELETE FROM|ALTER TABLE "(?!ItemSupplier)/.test(sql), "migration is additive (no DROP/TRUNCATE/other tables)")
     const schema = readFileSync(join(root, "prisma", "schema.prisma"), "utf8")
     ok(/model ItemSupplier \{/.test(schema), "schema has ItemSupplier")
-    ok(!/^s+safetyStocks/m.test(schema), "safetyStock field NOT added in Phase 5A (Phase 5D)")
+    // 안전재고는 공급업체마다 다른 값이 아니므로 ItemSupplier 에 두지 않는다(Phase 5D 에서 Item.safetyStock 으로 추가됨)
+    const supplierModel = /model ItemSupplier \{[\s\S]*?\n\}/.exec(schema.replace(/\r/g, ""))?.[0] ?? ""
+    ok(supplierModel.length > 0 && !/^\s+safetyStock\s/m.test(supplierModel), "safetyStock 은 ItemSupplier 필드가 아니다")
     const actions = readFileSync(join(root, "src", "lib", "actions", "item-supplier.actions.ts"), "utf8")
     ok(/requireResourcePermission\("ITEM", "UPDATE"\)/.test(actions), "actions: mutations require ITEM UPDATE")
     ok(/requireResourcePermission\("ITEM", "DELETE"\)/.test(actions), "actions: physical delete requires ITEM DELETE")

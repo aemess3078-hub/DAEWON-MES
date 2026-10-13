@@ -68,6 +68,8 @@ export type BomRow = {
       spec: string | null
       uom: string
       itemType: string
+      /** Phase 5D 품목 안전재고(없으면 0). MRP 물리 재고 계산에는 사용하지 않는다. */
+      safetyStock?: unknown
     }
   }>
 }
@@ -300,6 +302,8 @@ export type OrderMrpMaterialView = {
   overdueReceiptCount: number
   /** 입고/수요 이벤트 시간축(예정입고를 반영한 경우에만) */
   timeline: OrderMrpTimelineEventView[]
+  /** Phase 5D: 품목 안전재고(구매정책 목표 하한, 0 이상). 물리 재고 계산에는 영향이 없다. */
+  safetyStock?: number
 }
 
 export type OrderMrpTimelineEventView = {
@@ -443,7 +447,10 @@ export type BuildViewArgs = {
   result: OrderMrpResult
   demandRows: readonly SalesOrderItemRow[]
   /** 모든 BOM 구성품 메타 (itemId → 정보) */
-  componentMeta: ReadonlyMap<string, { code: string; name: string; spec: string | null; uom: string; itemType: string }>
+  componentMeta: ReadonlyMap<
+    string,
+    { code: string; name: string; spec: string | null; uom: string; itemType: string; safetyStock?: unknown }
+  >
   stock: ReadonlyMap<string, StockAggregate>
   /** 수요 품목별 BOM 문제 유형 */
   bomIssues: ReadonlyMap<string, BomIssueCode>
@@ -574,6 +581,10 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
       shortageRecoveredAt: m.hadShortage && m.finalBalance >= 0 ? m.shortageRecoveredAt : null,
       overdueReceiptQty: overdueByItem.get(m.componentItemId)?.qty ?? 0,
       overdueReceiptCount: overdueByItem.get(m.componentItemId)?.count ?? 0,
+      safetyStock: (() => {
+        const v = toNum(meta?.safetyStock)
+        return Number.isFinite(v) && v > 0 ? v : 0
+      })(),
       timeline: m.timeline.map<OrderMrpTimelineEventView>((ev) => {
         if (ev.type === "SCHEDULED_RECEIPT") {
           return {
@@ -735,7 +746,10 @@ export function runOrderMrpFromRows(args: RunAdapterArgs): OrderMrpView {
   })
 
   // 반제품 구성품의 BOM 문제는 계산을 중단시키지 않고 경고로 노출
-  const componentMeta = new Map<string, { code: string; name: string; spec: string | null; uom: string; itemType: string }>()
+  const componentMeta = new Map<
+    string,
+    { code: string; name: string; spec: string | null; uom: string; itemType: string; safetyStock?: unknown }
+  >()
   selected.forEach((bom) => {
     for (const bi of bom.bomItems) componentMeta.set(bi.componentItemId, bi.componentItem)
   })

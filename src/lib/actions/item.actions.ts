@@ -8,6 +8,7 @@ import { Prisma, ItemStatus, UOM, LotNumberingType, ManualLotPolicy } from "@pri
 import { ItemFormValues } from "@/app/app/mes/items/item-form-schema"
 import { checkItemReferencesForBulk } from "./reference-check.server"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { normalizeSafetyStock } from "@/lib/item-safety-stock"
 
 /** 선택 일괄삭제 권한: ADMIN 이상, 또는 role 계층과 무관한 개발자 계정(loginId='test'). */
 async function requireBulkDeletePermission(): Promise<CurrentUser> {
@@ -171,6 +172,7 @@ export async function createItem(data: ItemFormValues) {
     data.defaultWarehouseId,
   )
   const lotNumberingSettings = resolveLotNumberingSettings(data)
+  const safetyStock = normalizeSafetyStock(data.safetyStock)
 
   const item = await prisma.item.create({
     data: {
@@ -187,6 +189,7 @@ export async function createItem(data: ItemFormValues) {
       ...lotNumberingSettings,
       status:          data.status as ItemStatus,
       defaultWarehouseId: resolvedDefaultWarehouseId,
+      safetyStock,
     },
   })
   await prisma.auditLog.create({
@@ -197,7 +200,7 @@ export async function createItem(data: ItemFormValues) {
       entityType: "Item",
       entityId: item.id,
       action: "CREATE",
-      afterData: { code: item.code, name: item.name, itemType: item.itemType, status: item.status },
+      afterData: { code: item.code, name: item.name, itemType: item.itemType, status: item.status, safetyStock: item.safetyStock },
       menuName: "품목정보",
     },
   }).catch(() => {})
@@ -227,6 +230,7 @@ export async function updateItem(id: string, data: ItemFormValues) {
     data.defaultWarehouseId,
   )
   const lotNumberingSettings = resolveLotNumberingSettings(data)
+  const safetyStock = normalizeSafetyStock(data.safetyStock)
 
   const updated = await prisma.item.update({
     where: { id },
@@ -243,6 +247,7 @@ export async function updateItem(id: string, data: ItemFormValues) {
       ...lotNumberingSettings,
       status:          data.status as ItemStatus,
       defaultWarehouseId: resolvedDefaultWarehouseId,
+      safetyStock,
     },
   })
   await prisma.auditLog.create({
@@ -253,8 +258,8 @@ export async function updateItem(id: string, data: ItemFormValues) {
       entityType: "Item",
       entityId: id,
       action: "UPDATE",
-      beforeData: { code: owned.code, name: owned.name, status: owned.status },
-      afterData: { code: data.code, name: data.name, status: data.status },
+      beforeData: { code: owned.code, name: owned.name, status: owned.status, safetyStock: owned.safetyStock },
+      afterData: { code: data.code, name: data.name, status: data.status, safetyStock },
       menuName: "품목정보",
     },
   }).catch(() => {})

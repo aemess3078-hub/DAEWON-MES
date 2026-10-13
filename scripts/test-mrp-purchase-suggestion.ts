@@ -542,14 +542,20 @@ async function main() {
     ok(!/PO-MRP|Date\.now|\* 24 \* 60 \* 60|14 \*/.test(draft), "신규 생성 경로: PO-MRP / Date.now / 임의 +14일 없음")
     ok(/status: "DRAFT"/.test(draft) && !/status: "(ORDERED|PARTIAL_RECEIVED|RECEIVED)"/.test(draft), "생성 상태는 DRAFT 고정(자동 확정 없음)")
     ok(!/businessPartner\.findFirst|partnerType:\s*\{\s*in/.test(draft + suggestion), "tenant 첫 공급업체/전체 거래처에서 자동 선택하지 않음")
-    ok(!/leadTimeDays\s*[-+*]|moq\s*[-+*]|orderMultiple\s*[-+*/]|safetyStock/.test(draft + suggestion), "Phase 5D(LT/MOQ/배수/안전재고) 계산 미사용")
+    // (Phase 5D 로 LT/MOQ/배수/안전재고가 도입되어 5C 의 "미사용" 경계 검사는 "반제품 netting 미사용"으로 갱신했다)
+    ok(!/netting|semiFinishedStock/i.test(draft + suggestion), "Phase 5E(반제품 netting) 미사용")
     const actions = read("src", "lib", "actions", "mrp-purchase-suggestion.actions.ts")
     ok(/requireResourcePermission\("MRP", "READ"\)/.test(actions), "조회 권한 MRP READ")
     ok(/requireResourcePermission\("MRP", "CREATE"\)/.test(actions) && /requireResourcePermission\("PURCHASE_ORDER", "CREATE"\)/.test(actions), "생성 권한 MRP CREATE + PURCHASE_ORDER CREATE")
     ok(!/export async function \w+\([^)]*tenantId/.test(actions), "액션 시그니처에 tenantId 없음")
     const poActions = read("src", "lib", "actions", "purchase-order.actions.ts")
     ok(/allocatePurchaseOrderNumbers\(tx, tenantId, 1/.test(poActions) && !/generatePurchaseOrderNo/.test(poActions), "일반 발주 생성: 트랜잭션 내 새 채번 사용, 기존 문자열 정렬 채번 제거")
-    ok(readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n)).length === 3, "migration 3건 그대로(Phase 5C 추가 없음)")
+    // 5C 는 migration 을 추가하지 않았다. 이후 Phase 5D 의 migration(20261014010000_add_item_safety_stock)만 더해졌다.
+    const migrations = readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n))
+    ok(
+      migrations.filter((n) => n < "20261014010000").length === 3,
+      "5C 시점 migration 3건(Phase 5C 가 추가한 migration 없음)"
+    )
     ok(/pg_advisory_xact_lock/.test(read("src", "lib", "services", "purchase-order-number.service.ts")), "운영 채번 잠금: pg_advisory_xact_lock")
   }
 

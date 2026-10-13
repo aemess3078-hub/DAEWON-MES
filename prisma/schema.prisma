@@ -767,6 +767,10 @@ model Item {
   manualLotPolicy    ManualLotPolicy  @default(ALLOWED)
   status             ItemStatus       @default(ACTIVE)
   defaultWarehouseId String?
+  // MRP 발주제안의 목표 하한(Phase 5D). 물리 재고를 차감하지 않는 정책값이며 0 이상(DB CHECK).
+  // Float(DOUBLE PRECISION): Item 행은 서버→클라이언트 props 로 광범위하게 그대로 전달되는데 Decimal 객체는
+  // RSC 직렬화가 불가능하다. MRP 계산은 이미 Number 로 수행하며 입력은 소수 6자리/상한을 애플리케이션이 검증한다.
+  safetyStock        Float            @default(0)
   createdAt          DateTime         @default(now())
   updatedAt          DateTime         @updatedAt
 

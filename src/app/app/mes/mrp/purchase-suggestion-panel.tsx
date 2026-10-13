@@ -16,7 +16,12 @@ import {
   createDraftPurchaseOrdersFromMrpSuggestions,
   getPurchaseSuggestions,
 } from "@/lib/actions/mrp-purchase-suggestion.actions"
-import type { PurchaseSuggestionRow } from "@/lib/mrp/purchase-suggestion"
+import { describeTermsViolation, validateQtyAgainstTerms } from "@/lib/mrp/purchase-policy"
+import {
+  AUTO_SUGGEST_KINDS,
+  deriveForSupplier,
+  type PurchaseSuggestionLine,
+} from "@/lib/mrp/purchase-suggestion"
 import type { DraftPoCreated } from "@/lib/services/mrp-purchase-draft.service"
 import type { PurchaseSuggestionPayload } from "@/lib/services/mrp-purchase-suggestion.service"
 import { parseQty, PurchaseSuggestionTable, type SuggestionRowEdit } from "./purchase-suggestion-table"
@@ -32,9 +37,16 @@ type Props = {
 type GroupPreview = {
   supplierId: string
   supplierName: string
-  lines: Array<{ row: PurchaseSuggestionRow; qty: number; requiredDate: string }>
+  lines: Array<{
+    row: PurchaseSuggestionLine
+    qty: number
+    requiredDate: string
+    orderByDate: string | null
+    timing: "OK" | "DUE_TODAY" | "OVERDUE" | "LEAD_TIME_MISSING" | "NO_TARGET_DATE"
+    overdueDays: number
+  }>
   defaultDate: string | null
-  /** 같은 통화 단가가 모두 있을 때의 예상금액(통화별 구분) */
+  /** 같은 통화 단가가 모두 있을 때의 예상금액(통화별 구분) — 구매조건(MOQ/배수) 적용 후 수량 기준 */
   amounts: Array<{ currency: string; amount: number }>
   mixedCurrency: boolean
   unpricedCount: number
@@ -88,7 +100,22 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
   )
 
   const patch = (id: string, p: Partial<SuggestionRowEdit>) =>
-    setEdits((cur) => ({ ...cur, [id]: { ...cur[id], ...p } }))
+    setEdits((cur) => {
+      const prev = cur[id]
+      if (!prev) return cur
+      const next: SuggestionRowEdit = { ...prev, ...p }
+      // 사용자가 수량 칸을 직접 고치면 이후 공급업체를 바꿔도 덮어쓰지 않는다
+      if (p.qty !== undefined) next.qtyEdited = true
+      if (p.supplierId !== undefined && p.supplierId !== prev.supplierId && !next.qtyEdited) {
+        const row = payload?.rows.find((r) => r.componentItemId === id)
+        if (row) {
+          const supplier = row.suppliers.find((s) => s.supplierId === p.supplierId) ?? null
+          const derived = deriveForSupplier(row, supplier)
+          next.qty = derived.qty > 0 ? String(derived.qty) : ""
+        }
+      }
+      return { ...cur, [id]: next }
+    })
 
   const toggleAll = (selected: boolean) =>
     setEdits((cur) => {
@@ -102,7 +129,7 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
       const next = { ...cur }
       for (const r of payload?.rows ?? []) {
         const e = next[r.componentItemId]
-        const eligible = r.kind === "FINAL_SHORTAGE" && e.supplierId !== null && parseQty(e.qty) !== null
+        const eligible = AUTO_SUGGEST_KINDS.includes(r.kind) && e.supplierId !== null && parseQty(e.qty) !== null
         next[r.componentItemId] = { ...e, selected: eligible }
       }
       return next
@@ -128,12 +155,29 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
       blockers.push(`${r.code}: 선택한 공급업체가 이 품목에 등록되어 있지 않습니다.`)
       continue
     }
+    // 구매조건 사전 점검(서버가 최종 재검증한다): 수량 ≥ MOQ, 발주배수의 배수
+    const violation = validateQtyAgainstTerms(qty, { moq: supplier.moq, orderMultiple: supplier.orderMultiple })
+    if (!violation.ok) {
+      blockers.push(`${r.code}(${supplier.supplierName}): ${describeTermsViolation(violation, qty)}`)
+      continue
+    }
+    const derived = deriveForSupplier({ ...r, requiredDate: e.requiredDate || null }, supplier)
     let g = groups.get(supplier.supplierId)
     if (!g) {
       g = { supplierId: supplier.supplierId, supplierName: supplier.supplierName, lines: [], defaultDate: null, amounts: [], mixedCurrency: false, unpricedCount: 0 }
       groups.set(supplier.supplierId, g)
     }
-    g.lines.push({ row: r, qty, requiredDate: e.requiredDate })
+    g.lines.push({
+      row: r,
+      qty,
+      requiredDate: e.requiredDate,
+      orderByDate:
+        derived.timing.status === "OK" || derived.timing.status === "DUE_TODAY" || derived.timing.status === "OVERDUE"
+          ? derived.timing.orderByDate
+          : null,
+      timing: derived.timing.status,
+      overdueDays: derived.timing.status === "OVERDUE" ? derived.timing.overdueDays : 0,
+    })
     if (e.requiredDate && (g.defaultDate === null || e.requiredDate < g.defaultDate)) g.defaultDate = e.requiredDate
     if (supplier.price) {
       const existing = g.amounts.find((a) => a.currency === supplier.price!.currency)
@@ -151,6 +195,9 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
   const dateMissing = groupList.some((g) => !effectiveDate(g))
   const mixed = groupList.some((g) => g.mixedCurrency)
   const canCreate = selectedRows.length > 0 && blockers.length === 0 && !dateMissing && !mixed && payload?.site != null
+  const overdueLines = groupList.flatMap((g) => g.lines.filter((l) => l.timing === "OVERDUE"))
+  const maxOverdueDays = overdueLines.reduce((m, l) => Math.max(m, l.overdueDays), 0)
+  const leadTimeMissingLines = groupList.flatMap((g) => g.lines.filter((l) => l.timing === "LEAD_TIME_MISSING"))
 
   async function submit() {
     if (!payload || !canCreate) return
@@ -197,6 +244,12 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
                 <span className="font-mono text-[13px]">{o.orderNo}</span> · {o.supplierName} · {o.itemCount}품목 · 입고예정{" "}
                 {o.expectedDate}
                 {o.unpricedCount > 0 && <span className="text-amber-700"> · 단가 미등록 {o.unpricedCount}건(0으로 저장됨)</span>}
+                {o.leadTimeOverdueLineCount > 0 && (
+                  <span className="text-red-700"> · 발주 필요일 경과 {o.leadTimeOverdueLineCount}건(납기협의/긴급조달 필요)</span>
+                )}
+                {o.leadTimeMissingLineCount > 0 && (
+                  <span className="text-muted-foreground"> · 리드타임 미등록 {o.leadTimeMissingLineCount}건</span>
+                )}
               </li>
             ))}
           </ul>
@@ -215,8 +268,10 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
           기존 확정 발주의 입고예정은 이미 반영되어 중복 공급되지 않습니다. 현재 MRP 기준이며 생성 시점의 재고/수주 변동은 자동 반영되지 않습니다.
         </p>
         <p className="text-[13px] text-muted-foreground">
-          MOQ·발주배수·안전재고·리드타임은 아직 적용하지 않습니다. 구매발주는 DRAFT 로만 생성되며 자동 발주확정되지 않습니다.
-          일시 결품 자재는 새 발주 대신 기존 발주 납기 당김/긴급조달을 먼저 검토하세요.
+          <strong>안전재고</strong>는 물리 재고를 차감하지 않고 예상 잔량이 유지해야 할 목표 하한으로만 쓰입니다. 제안수량은 선택한 공급업체의
+          구매조건(MOQ → 발주배수 올림)을 적용하며, 공급업체를 바꾸면 해당 공급업체의 MOQ·배수·리드타임·단가로 다시 계산됩니다.
+          발주 필요일은 목표 입고일에서 리드타임(달력일)을 뺀 값이며 입고예정일(헤더)을 바꾸지 않습니다.
+          구매발주는 DRAFT 로만 생성되며 자동 발주확정되지 않습니다. 일시 결품·일시 미달 자재는 새 발주 대신 기존 발주 납기 당김/긴급조달을 먼저 검토하세요.
         </p>
       </div>
 
@@ -231,12 +286,26 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
 
       {payload && (
         <>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
             {[
               { label: "최종 부족", value: payload.summary.finalShortageCount, tone: payload.summary.finalShortageCount > 0 ? "danger" : "" },
-              { label: "일시 결품(검토)", value: payload.summary.temporaryShortageCount, tone: payload.summary.temporaryShortageCount > 0 ? "warn" : "" },
-              { label: "공급업체 미지정", value: payload.summary.noSupplierCount, tone: payload.summary.noSupplierCount > 0 ? "warn" : "" },
-              { label: "공급업체 불명확", value: payload.summary.ambiguousSupplierCount, tone: payload.summary.ambiguousSupplierCount > 0 ? "warn" : "" },
+              {
+                label: "안전재고 부족",
+                value: payload.rows.filter((r) => r.kind === "SAFETY_STOCK_SHORTAGE").length,
+                tone: payload.rows.some((r) => r.kind === "SAFETY_STOCK_SHORTAGE") ? "warn" : "",
+              },
+              {
+                label: "일시 결품·미달(검토)",
+                value: payload.rows.filter((r) => !AUTO_SUGGEST_KINDS.includes(r.kind)).length,
+                tone: payload.rows.some((r) => !AUTO_SUGGEST_KINDS.includes(r.kind)) ? "warn" : "",
+              },
+              {
+                label: "공급업체 미지정·불명확",
+                value: payload.summary.noSupplierCount + payload.summary.ambiguousSupplierCount,
+                tone: payload.summary.noSupplierCount + payload.summary.ambiguousSupplierCount > 0 ? "warn" : "",
+              },
+              { label: "발주 필요일 경과", value: payload.policySummary.orderOverdueCount, tone: payload.policySummary.orderOverdueCount > 0 ? "danger" : "" },
+              { label: "리드타임 미등록", value: payload.policySummary.leadTimeMissingCount, tone: payload.policySummary.leadTimeMissingCount > 0 ? "warn" : "" },
               { label: "선택", value: selectedRows.length, tone: "" },
             ].map((k) => (
               <div
@@ -364,6 +433,7 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
                       <th className="py-1.5">품목</th>
                       <th className="py-1.5 text-right">수량</th>
                       <th className="py-1.5 text-right">목표입고일</th>
+                      <th className="py-1.5 text-right">발주 필요일</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -377,6 +447,13 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
                           {l.row.uom}
                         </td>
                         <td className="py-1.5 text-right">{l.requiredDate || "-"}</td>
+                        <td className={`py-1.5 text-right ${l.timing === "OVERDUE" ? "text-red-600" : ""}`}>
+                          {l.timing === "LEAD_TIME_MISSING"
+                            ? "리드타임 미등록"
+                            : l.orderByDate
+                              ? l.orderByDate + (l.timing === "OVERDUE" ? ` (${fmt(l.overdueDays)}일 경과)` : l.timing === "DUE_TODAY" ? " (오늘)" : "")
+                              : "-"}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -389,6 +466,20 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
             제안수량은 현재 MRP 기준이며, 생성 시점의 재고/수주 변동은 자동 반영되지 않습니다. 같은 부족에 대해 다시 생성하면 중복 발주될 수 있으니
             DRAFT 발주 존재 여부를 확인하세요.
           </p>
+          {overdueLines.length > 0 && (
+            <div className="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[14px] text-red-800">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <p>
+                표준 리드타임 기준 발주 필요일이 최대 {fmt(maxOverdueDays)}일 경과한 품목이 {fmt(overdueLines.length)}건 있습니다.
+                공급업체 납기협의 또는 긴급조달이 필요합니다. (생성은 가능합니다)
+              </p>
+            </div>
+          )}
+          {leadTimeMissingLines.length > 0 && (
+            <p className="text-[13px] text-muted-foreground">
+              리드타임이 등록되지 않은 품목 {fmt(leadTimeMissingLines.length)}건은 발주 필요일을 계산하지 못했습니다(품목관리 &gt; 공급업체 관리에서 등록).
+            </p>
+          )}
           {dateMissing && <p className="text-[14px] text-destructive">입고예정일을 입력하지 않은 공급업체가 있습니다.</p>}
           {createError && <p className="text-[14px] text-destructive">{createError}</p>}
 

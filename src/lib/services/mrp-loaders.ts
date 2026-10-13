@@ -45,7 +45,8 @@ export async function loadDefaultBomRows(
             qtyPer: true,
             scrapRate: true,
             componentItem: {
-              select: { code: true, name: true, spec: true, uom: true, itemType: true },
+              // safetyStock(Phase 5D)은 같은 쿼리에서 함께 읽는다(자재별 추가 조회 없음)
+              select: { code: true, name: true, spec: true, uom: true, itemType: true, safetyStock: true },
             },
           },
         },
