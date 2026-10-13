@@ -4,6 +4,7 @@ import { getTenantId, requireRole } from "@/lib/auth"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { prisma } from "@/lib/db/prisma"
 import { BOMStatus } from "@prisma/client"
+import { decideImportDefaultFlags } from "@/lib/bom-default-policy"
 import { revalidatePath } from "next/cache"
 
 const MAX_ROWS = 1000
@@ -320,7 +321,10 @@ export async function validateBomExcelRows(
 
 export async function importValidatedBoms(
   groups: ValidatedBomGroup[]
-): Promise<{ success: true; importedBomCount: number; importedItemCount: number } | { success: false; error: string }> {
+): Promise<
+  | { success: true; importedBomCount: number; importedItemCount: number; defaultAssignedCount: number }
+  | { success: false; error: string }
+> {
   const tenantId = await getTenantId()
   const actor = await requireRole("OPERATOR")
   await requireResourcePermission("BOM", "CREATE")
@@ -340,17 +344,30 @@ export async function importValidatedBoms(
   }
 
   let importedItemCount = 0
+  let defaultAssignedCount = 0
   const bomKeys: string[] = []
 
   try {
     await prisma.$transaction(async (tx) => {
+      // MRP 는 tenant 일치 + ACTIVE + isDefault 인 BOM 만 사용한다.
+      // 이미 ACTIVE Default 가 있는 품목에는 Default 를 추가로 만들지 않는다(중복 Default 방지).
+      const existingDefaults = await tx.bOM.findMany({
+        where: { tenantId, status: BOMStatus.ACTIVE, isDefault: true, itemId: { in: parentItemIds } },
+        select: { itemId: true },
+      })
+      const defaultFlags = decideImportDefaultFlags(
+        groups.map((g) => ({ key: g.key, parentItemId: g.parentItemId, status: g.status })),
+        new Set(existingDefaults.map((b) => b.itemId))
+      )
       for (const group of groups) {
+        const isDefault = defaultFlags.get(group.key) === true
+        if (isDefault) defaultAssignedCount += 1
         await tx.bOM.create({
           data: {
             tenantId,
             itemId: group.parentItemId,
             version: group.version,
-            isDefault: false,
+            isDefault,
             status: group.status,
             bomItems: {
               create: group.items.map((item) => ({
@@ -378,6 +395,7 @@ export async function importValidatedBoms(
             source: "EXCEL_UPLOAD",
             importedBomCount: groups.length,
             importedItemCount,
+            defaultAssignedCount,
             bomKeys: bomKeys.slice(0, 20),
           },
           menuName: "BOM",
@@ -386,7 +404,7 @@ export async function importValidatedBoms(
     })
 
     revalidatePath("/app/mes/bom")
-    return { success: true, importedBomCount: groups.length, importedItemCount }
+    return { success: true, importedBomCount: groups.length, importedItemCount, defaultAssignedCount }
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : "BOM 등록 중 오류가 발생했습니다." }
   }

@@ -117,7 +117,10 @@ export function BomExcelUploadDialog({ open, onOpenChange }: BomExcelUploadDialo
     startTransition(async () => {
       const result = await importValidatedBoms(validGroups)
       if (result.success) {
-        setImportMsg(`BOM ${result.importedBomCount}개 (자재 ${result.importedItemCount}행)를 등록했습니다.`)
+        setImportMsg(
+          `BOM ${result.importedBomCount}개 (자재 ${result.importedItemCount}행)를 등록했습니다.` +
+            ` 기본(Default) BOM 으로 지정된 ${result.defaultAssignedCount}개만 MRP 에 사용됩니다.`
+        )
         setStep("done")
         router.refresh()
       } else {
