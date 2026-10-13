@@ -1,0 +1,4 @@
+# Prisma migration 은 줄바꿈이 바뀌면 체크섬이 달라질 수 있으므로 항상 LF 로 고정한다.
+prisma/migrations/** text eol=lf
+*.sql text eol=lf
+prisma/migrations/migration_lock.toml text eol=lf

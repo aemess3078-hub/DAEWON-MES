@@ -1,0 +1,3588 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  // 애플리케이션 런타임: Supabase Transaction Pooler(6543, pgbouncer=true)
+  url       = env("DATABASE_URL")
+  // Prisma Migrate(CLI) 전용: Session Pooler/Direct(5432). 트랜잭션 풀러는 migrate 의 advisory lock 등과 맞지 않는다.
+  // PrismaClient 런타임은 이 값을 사용하지 않는다.
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum TenantStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MANAGER
+  OPERATOR
+  VIEWER
+}
+
+enum SiteType {
+  FACTORY
+  WAREHOUSE
+  OFFICE
+}
+
+enum PartnerType {
+  CUSTOMER
+  SUPPLIER
+  BOTH
+}
+
+enum PartnerStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ItemType {
+  RAW_MATERIAL
+  SEMI_FINISHED
+  FINISHED
+  CONSUMABLE
+}
+
+enum ItemStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
+}
+
+enum LotNumberingType {
+  DEFAULT
+  MANUAL
+  RAW_DATE_SEQ
+  PREFIX_MONTH_SEQ
+}
+
+enum ManualLotPolicy {
+  ALLOWED
+  REQUIRED
+  DISABLED
+}
+
+enum UOM {
+  EA
+  KG
+  G
+  L
+  ML
+  M
+  CM
+  MM
+  BOX
+  SET
+}
+
+enum BOMStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+}
+
+enum RoutingStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+}
+
+enum RoutingScope {
+  COMMON
+  ITEM_SPECIFIC
+}
+
+enum WorkCenterKind {
+  ASSEMBLY
+  MACHINING
+  INSPECTION
+  PACKAGING
+  STORAGE
+}
+
+enum EquipmentType {
+  MACHINE
+  TOOL
+  JIG
+  FIXTURE
+  VEHICLE
+}
+
+enum EquipmentStatus {
+  ACTIVE
+  INACTIVE
+  MAINTENANCE
+  // 청운커팅 사업계획서 "설비관리 > 공구관리" — 폐기된 공구/치공구를 나타낸다.
+  // 기존 ACTIVE/INACTIVE/MAINTENANCE와 달리 되돌릴 수 없는 종료 상태로 취급한다
+  // (tool.actions.ts에서 DISCARDED → 다른 상태로의 역행 전이를 차단).
+  DISCARDED
+}
+
+enum WorkOrderStatus {
+  DRAFT
+  RELEASED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum OperationStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+}
+
+enum ReservationStatus {
+  PENDING
+  PARTIAL
+  FULFILLED
+  CANCELLED
+}
+
+enum LotStatus {
+  ACTIVE
+  QUARANTINE
+  ON_HOLD
+  CONSUMED
+  EXPIRED
+}
+
+enum LotReservationStatus {
+  RESERVED
+  CONSUMED
+  RELEASED
+  EXPIRED
+}
+
+enum TransactionType {
+  RECEIPT
+  ISSUE
+  TRANSFER
+  ADJUST
+  RETURN
+  SCRAP
+  // 공급사 반품 전용(정상 입고되어 재고화된 자재를 공급사로 반품). 재고 방향은
+  // outbound(-)다. 기존 RETURN(inbound, +재고)과는 의미가 반대이므로 별도 enum으로
+  // 분리한다 — RETURN은 하위호환을 위해 절대 변경/재사용하지 않는다.
+  SUPPLIER_RETURN
+}
+
+enum WipUnitStatus {
+  WAITING
+  IN_PROCESS
+  ON_HOLD
+  OUTSOURCED
+  IN_TRANSIT
+  RECEIVED
+  COMPLETED
+  SCRAPPED
+  REWORK
+}
+
+enum WipMovementType {
+  CREATED
+  STARTED
+  MOVED
+  HOLD
+  RELEASED
+  SPLIT
+  MERGE
+  DEFECT
+  REWORK
+  SCRAP
+  OUTSOURCED
+  RETURNED
+  COMPLETED
+  ADJUSTED
+}
+
+// 청운커팅 사업계획서 "재작업/보류관리" — WipUnit.status=ON_HOLD 등록/해제/취소 이력의 상태.
+// REWORK(불량 재작업)와는 별개 개념이다: ON_HOLD는 정상/진행 중 WIP을 업무상 일시 정지한 상태.
+enum WipHoldStatus {
+  ACTIVE
+  RELEASED
+  CANCELLED
+}
+
+enum InspectionResult {
+  PASS
+  FAIL
+  CONDITIONAL
+}
+
+enum DefectSeverity {
+  CRITICAL
+  MAJOR
+  MINOR
+}
+
+enum DefectDisposition {
+  SCRAP
+  REWORK
+  ACCEPT
+  USE_AS_IS
+}
+
+enum DefectCategory {
+  DIMENSIONAL
+  VISUAL
+  FUNCTIONAL
+  MATERIAL
+}
+
+// 청운커팅 사업계획서 "품질검사 > 조치관리" — 등록/진행/완료 3단계로 최소화한다.
+// CANCELLED/REJECTED/APPROVED 등은 실제 필요성이 확인되기 전까지 추가하지 않는다.
+enum CorrectiveActionStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+}
+
+// 청운커팅 사업계획서 "품질검사 > 재발방지관리" — "대책 수행"과 "효과성 검증"을
+// 구분해야 하므로 조치관리(3단계)보다 한 단계 많다. 효과성 검증 전에는
+// COMPLETED가 될 수 없다(VERIFYING을 반드시 거친다).
+enum RecurrencePreventionStatus {
+  OPEN
+  IN_PROGRESS
+  VERIFYING
+  COMPLETED
+}
+
+// 효과성 검증 결과. INEFFECTIVE면 COMPLETED로 전이하지 않고 IN_PROGRESS로
+// 되돌려 추가 대책을 수행하게 한다(§ DefectRecurrencePrevention 주석 참조).
+enum VerificationResult {
+  EFFECTIVE
+  INEFFECTIVE
+}
+
+enum DocType {
+  SOP
+  DRAWING
+  SPEC
+  CERTIFICATE
+  OTHER
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+enum SignupRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+}
+
+enum InspectionInputType {
+  NUMERIC
+  TEXT
+  BOOLEAN
+  SELECT
+}
+
+enum LotGenealogyRelation {
+  INPUT
+  OUTPUT
+  REWORK
+}
+
+enum InspectionSpecStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+}
+
+enum InspectionJudgement {
+  PASS
+  FAIL
+}
+
+// 이번 PR은 Individuals-Moving Range만 지원한다 — P chart/Xbar-R 등은 후속 범위.
+enum SpcControlChartType {
+  I_MR
+}
+
+enum AuditActorType {
+  USER
+  SYSTEM
+  BATCH
+  API
+}
+
+enum PlanType {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+enum PlanStatus {
+  DRAFT
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum PermissionAction {
+  READ
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  EXPORT
+}
+
+enum ConnectionProtocol {
+  OPC_UA
+  MODBUS_TCP
+  MQTT
+  MC_PROTOCOL
+  S7
+  FOCAS
+  CUSTOM
+  NCWATCH_AGENT
+}
+
+enum TagDataType {
+  BOOL
+  INT
+  FLOAT
+  STRING
+}
+
+enum TagCategory {
+  PROCESS
+  STATUS
+  ALARM
+  COUNTER
+  QUALITY
+}
+
+enum GatewayStatus {
+  ONLINE
+  OFFLINE
+  ERROR
+}
+
+enum ECNStatus {
+  DRAFT
+  SUBMITTED
+  REVIEWING
+  APPROVED
+  REJECTED
+  IMPLEMENTED
+  CANCELLED
+}
+
+enum EquipmentEventType {
+  RUN
+  STOP
+  ALARM
+  WARNING
+  MAINTENANCE
+}
+
+enum LoginEventType {
+  LOGIN_SUCCESS
+  LOGIN_FAIL
+  LOGOUT
+}
+
+enum LoginFailReason {
+  USER_NOT_FOUND
+  INVALID_PASSWORD
+  PENDING_APPROVAL
+  HOLD
+  REJECTED
+  INACTIVE
+  LOCKED
+  DELETED
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id        String       @id @default(cuid())
+  code      String       @unique
+  name      String
+  status    TenantStatus @default(ACTIVE)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  sites                         Site[]
+  tenantUsers                   TenantUser[]
+  businessPartners              BusinessPartner[]
+  itemCategories                ItemCategory[]
+  items                         Item[]
+  warehouses                    Warehouse[]
+  numberingRules                NumberingRule[]
+  lots                          Lot[]
+  lotNumberReservations         LotNumberReservation[]
+  inventoryBalances             InventoryBalance[]
+  inventoryTxns                 InventoryTransaction[]
+  workOrders                    WorkOrder[]
+  defectCodes                   DefectCode[]
+  documents                     Document[]
+  workStandardMappings          WorkStandardMapping[]
+  inspectionSpecs               InspectionSpec[]
+  auditLogs                     AuditLog[]
+  approvalRequests              ApprovalRequest[]
+  equipments                    Equipment[]
+  finishedGoodsReceipts         FinishedGoodsReceipt[]
+  wipUnits                      WipUnit[]
+  wipMovements                  WipMovement[]
+  wipUnitMaterialLots           WipUnitMaterialLot[]
+  wipHolds                      WipHold[]
+  boms                          BOM[]
+  routings                      Routing[]
+  itemRoutings                  ItemRouting[]
+  productionPlans               ProductionPlan[]
+  codeGroups                    CodeGroup[]
+  rolePermissions               RolePermission[]
+  tenantFeatures                TenantFeature[]
+  gateways                      EdgeGateway[]
+  salesOrders                   SalesOrder[]                   @relation("TenantSalesOrders")
+  shipmentOrders                ShipmentOrder[]                @relation("TenantShipmentOrders")
+  purchaseOrders                PurchaseOrder[]                @relation("TenantPurchaseOrders")
+  itemPrices                    ItemPrice[]                    @relation("TenantItemPrices")
+  aiUsageLogs                   AIUsageLog[]                   @relation("TenantAIUsageLogs")
+  quotations                    Quotation[]                    @relation("TenantQuotations")
+  projectOrders                 ProjectOrder[]                 @relation("TenantProjectOrders")
+  projectStages                 ProjectStage[]
+  projectIssues                 ProjectIssue[]                 @relation("TenantProjectIssues")
+  itemCosts                     ItemCost[]                     @relation("TenantItemCosts")
+  engineeringChanges            EngineeringChange[]            @relation("TenantECNs")
+  signupRequests                SignupRequest[]
+  equipmentProblemTypes         EquipmentProblemType[]
+  equipmentRepairs              EquipmentRepairRequest[]
+  equipmentDailyChecks          EquipmentDailyCheck[]
+  userCredentials               UserCredential[]
+  loginHistories                LoginHistory[]
+  itemGroups                    ItemGroup[]
+  workOrderOperationAssignments WorkOrderOperationAssignment[]
+  supportRequests               SupportRequest[]
+  materialReturns               MaterialReturn[]
+  projectOrderPrices            ProjectOrderPrice[]
+  projectOrderPriceRevisions    ProjectOrderPriceRevision[]
+  inspectionMeasurements        InspectionMeasurement[]
+  spcProfiles                   SpcProfile[]
+  defectCauseAnalyses           DefectCauseAnalysis[]
+  defectCorrectiveActions       DefectCorrectiveAction[]
+  defectRecurrencePreventions   DefectRecurrencePrevention[]
+  equipmentUsageHistories       EquipmentUsageHistory[]
+  attachments                   Attachment[]
+  backupGroups                  BackupGroup[]
+  backupGroupItems              BackupGroupItem[]
+  hiddenBackups                 HiddenBackup[]
+  EquipmentDowntime             EquipmentDowntime[]
+  EquipmentMaintenancePlan      EquipmentMaintenancePlan[]
+  EquipmentMaintenanceHistory   EquipmentMaintenanceHistory[]
+}
+
+model Profile {
+  id         String   @id @default(cuid())
+  email      String   @unique
+  name       String
+  avatarUrl  String?
+  department String?
+  phone      String?
+  employeeNo String?
+  jobTitle   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenantUsers                         TenantUser[]
+  qualityInspections                  QualityInspection[]
+  auditLogs                           AuditLog[]
+  approvalRequests                    ApprovalRequest[]             @relation("Requester")
+  approvals                           ApprovalRequest[]             @relation("Approver")
+  receivingInspections                ReceivingInspection[]         @relation("ReceivingInspector")
+  ecnRequested                        EngineeringChange[]           @relation("ECNRequester")
+  ecnApproved                         EngineeringChange[]           @relation("ECNApprover")
+  signupsApproved                     SignupRequest[]               @relation("SignupApprover")
+  signupsRejected                     SignupRequest[]               @relation("SignupRejector")
+  repairRequested                     EquipmentRepairRequest[]      @relation("RepairRequester")
+  repairAssigned                      EquipmentRepairRequest[]      @relation("RepairAssignee")
+  dailyChecks                         EquipmentDailyCheck[]         @relation("DailyCheckChecker")
+  userCredential                      UserCredential?
+  loginHistories                      LoginHistory[]
+  supportAuthored                     SupportRequest[]              @relation("SupportAuthor")
+  supportHandled                      SupportRequest[]              @relation("SupportHandler")
+  projectOrdersOwned                  ProjectOrder[]                @relation("ProjectOrderOwner")
+  projectIssuesAssigned               ProjectIssue[]                @relation("ProjectIssueAssignee")
+  projectIssuesCreated                ProjectIssue[]                @relation("ProjectIssueCreator")
+  materialReturnsCreated              MaterialReturn[]              @relation("MaterialReturnCreator")
+  materialReturnsCompleted            MaterialReturn[]              @relation("MaterialReturnCompleter")
+  projectOrderPricesCreated           ProjectOrderPrice[]           @relation("ProjectOrderPriceCreator")
+  projectOrderPricesUpdated           ProjectOrderPrice[]           @relation("ProjectOrderPriceUpdater")
+  projectOrderPricesDecided           ProjectOrderPrice[]           @relation("ProjectOrderPriceDecider")
+  projectOrderPriceRevisions          ProjectOrderPriceRevision[]   @relation("ProjectOrderPriceRevisionChanger")
+  spcProfilesCreated                  SpcProfile[]                  @relation("SpcProfileCreator")
+  spcProfilesUpdated                  SpcProfile[]                  @relation("SpcProfileUpdater")
+  defectCauseAnalysesCreated          DefectCauseAnalysis[]         @relation("DefectCauseAnalysisCreator")
+  defectCauseAnalysesUpdated          DefectCauseAnalysis[]         @relation("DefectCauseAnalysisUpdater")
+  defectCorrectiveActionsAssigned     DefectCorrectiveAction[]      @relation("DefectCorrectiveActionAssignee")
+  defectCorrectiveActionsCreated      DefectCorrectiveAction[]      @relation("DefectCorrectiveActionCreator")
+  defectCorrectiveActionsUpdated      DefectCorrectiveAction[]      @relation("DefectCorrectiveActionUpdater")
+  defectRecurrencePreventionsAssigned DefectRecurrencePrevention[]  @relation("DefectRecurrencePreventionAssignee")
+  defectRecurrencePreventionsVerified DefectRecurrencePrevention[]  @relation("DefectRecurrencePreventionVerifier")
+  defectRecurrencePreventionsCreated  DefectRecurrencePrevention[]  @relation("DefectRecurrencePreventionCreator")
+  defectRecurrencePreventionsUpdated  DefectRecurrencePrevention[]  @relation("DefectRecurrencePreventionUpdater")
+  equipmentUsageHistoriesAsOperator   EquipmentUsageHistory[]       @relation("EquipmentUsageOperator")
+  equipmentUsageHistoriesCreated      EquipmentUsageHistory[]       @relation("EquipmentUsageCreator")
+  createdDowntimeRecords              EquipmentDowntime[]           @relation("EquipmentDowntimeCreator")
+  createdMaintenancePlans             EquipmentMaintenancePlan[]    @relation("EquipmentMaintenancePlanCreator")
+  performedMaintenanceHistories       EquipmentMaintenanceHistory[] @relation("EquipmentMaintenancePerformer")
+  productionResultsOperated           ProductionResult[]            @relation("ProductionResultOperator")
+  attachmentsUploaded                 Attachment[]
+  backupGroupsCreated                 BackupGroup[]                 @relation("BackupGroupCreator")
+  backupGroupsUpdated                 BackupGroup[]                 @relation("BackupGroupUpdater")
+  hiddenBackupsHidden                 HiddenBackup[]                @relation("HiddenBackupHider")
+}
+
+model Site {
+  id        String   @id @default(cuid())
+  tenantId  String
+  code      String
+  name      String
+  type      SiteType @default(FACTORY)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant                Tenant                        @relation(fields: [tenantId], references: [id])
+  tenantUsers           TenantUser[]
+  workCenters           WorkCenter[]
+  warehouses            Warehouse[]
+  workOrders            WorkOrder[]
+  inventoryBalances     InventoryBalance[]
+  equipments            Equipment[]
+  finishedGoodsReceipts FinishedGoodsReceipt[]
+  wipUnits              WipUnit[]
+  wipMovements          WipMovement[]
+  wipHolds              WipHold[]
+  productionPlans       ProductionPlan[]
+  gateways              EdgeGateway[]
+  salesOrders           SalesOrder[]                  @relation("SiteSalesOrders")
+  shipmentOrders        ShipmentOrder[]               @relation("SiteShipmentOrders")
+  purchaseOrders        PurchaseOrder[]               @relation("SitePurchaseOrders")
+  quotations            Quotation[]                   @relation("SiteQuotations")
+  projectOrders         ProjectOrder[]                @relation("SiteProjectOrders")
+  equipmentRepairs      EquipmentRepairRequest[]
+  equipmentDailyChecks  EquipmentDailyCheck[]
+  equipmentDowntimes    EquipmentDowntime[]
+  maintenancePlans      EquipmentMaintenancePlan[]
+  maintenanceHistories  EquipmentMaintenanceHistory[]
+  materialReturns       MaterialReturn[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model TenantUser {
+  id        String   @id @default(cuid())
+  tenantId  String
+  profileId String
+  siteId    String?
+  role      UserRole @default(OPERATOR)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  profile Profile @relation(fields: [profileId], references: [id])
+  site    Site?   @relation(fields: [siteId], references: [id])
+
+  @@index([tenantId])
+  @@index([profileId])
+  @@index([siteId])
+  @@index([tenantId, profileId])
+  @@index([tenantId, siteId, role])
+}
+
+model SignupRequest {
+  id                String              @id @default(cuid())
+  tenantId          String
+  loginId           String?
+  email             String
+  name              String
+  department        String?
+  employeeNo        String?
+  phone             String?
+  jobTitle          String?
+  passwordHash      String?
+  popPinHash        String?
+  popPinFingerprint String?
+  popPinSetAt       DateTime?
+  requestedRole     UserRole            @default(OPERATOR)
+  status            SignupRequestStatus @default(PENDING)
+  createdAt         DateTime            @default(now())
+  approvedAt        DateTime?
+  approvedById      String?
+  rejectedAt        DateTime?
+  rejectedById      String?
+  rejectReason      String?
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
+  approvedBy Profile? @relation("SignupApprover", fields: [approvedById], references: [id])
+  rejectedBy Profile? @relation("SignupRejector", fields: [rejectedById], references: [id])
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([email])
+  @@index([tenantId, loginId])
+  @@index([tenantId, popPinFingerprint])
+}
+
+model WorkCenter {
+  id        String         @id @default(cuid())
+  siteId    String
+  code      String
+  name      String
+  kind      WorkCenterKind @default(ASSEMBLY)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  site              Site               @relation(fields: [siteId], references: [id])
+  equipments        Equipment[]
+  routingOperations RoutingOperation[]
+  currentWipUnits   WipUnit[]          @relation("WipUnitCurrentWorkCenter")
+  wipMovementsFrom  WipMovement[]      @relation("WipMovementFromWorkCenter")
+  wipMovementsTo    WipMovement[]      @relation("WipMovementToWorkCenter")
+
+  @@unique([siteId, code])
+  @@index([siteId])
+}
+
+model BusinessPartner {
+  id          String        @id @default(cuid())
+  tenantId    String
+  code        String
+  name        String
+  partnerType PartnerType
+  status      PartnerStatus @default(ACTIVE)
+
+  // 연락처/상세 정보 (전부 선택, 기존 데이터는 null)
+  businessNumber String? // 사업자등록번호
+  ceoName        String? // 대표자명
+  phone          String? // 전화번호
+  email          String? // 이메일1 (대표 이메일)
+  email2         String? // 이메일2 (담당자/추가 이메일)
+  address        String? // 주소
+  contactName    String? // 담당자명
+  contactPhone   String? // 담당자연락처
+  remark         String? // 비고
+
+  tenant                  Tenant           @relation(fields: [tenantId], references: [id])
+  salesOrders             SalesOrder[]     @relation("CustomerSalesOrders")
+  purchaseOrders          PurchaseOrder[]  @relation("SupplierPurchaseOrders")
+  itemPrices              ItemPrice[]      @relation("PartnerPrices")
+  quotations              Quotation[]      @relation("CustomerQuotations")
+  projectOrders           ProjectOrder[]   @relation("CustomerProjectOrders")
+  outsourcedWipUnits      WipUnit[]        @relation("WipUnitOutsourcingPartner")
+  wipMovementsFromPartner WipMovement[]    @relation("WipMovementFromPartner")
+  wipMovementsToPartner   WipMovement[]    @relation("WipMovementToPartner")
+  materialReturns         MaterialReturn[] @relation("SupplierMaterialReturns")
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model ItemCategory {
+  id           String    @id @default(cuid())
+  tenantId     String
+  parentId     String?
+  code         String
+  name         String
+  itemType     ItemType?
+  displayOrder Int       @default(0)
+
+  tenant     Tenant         @relation(fields: [tenantId], references: [id])
+  parent     ItemCategory?  @relation("CategoryTree", fields: [parentId], references: [id])
+  children   ItemCategory[] @relation("CategoryTree")
+  items      Item[]
+  itemGroups ItemGroup[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([parentId])
+}
+
+model ItemGroup {
+  id           String   @id @default(cuid())
+  tenantId     String
+  categoryId   String
+  code         String
+  name         String
+  description  String?
+  displayOrder Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant   Tenant       @relation(fields: [tenantId], references: [id])
+  category ItemCategory @relation(fields: [categoryId], references: [id])
+  items    Item[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([categoryId])
+}
+
+model Item {
+  id                 String           @id @default(cuid())
+  tenantId           String
+  categoryId         String?
+  itemGroupId        String?
+  code               String
+  name               String
+  itemType           ItemType
+  uom                UOM              @default(EA)
+  spec               String?
+  isLotTracked       Boolean          @default(false)
+  isSerialTracked    Boolean          @default(false)
+  lotNumberingType   LotNumberingType @default(DEFAULT)
+  lotPrefix          String?
+  manualLotPolicy    ManualLotPolicy  @default(ALLOWED)
+  status             ItemStatus       @default(ACTIVE)
+  defaultWarehouseId String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  tenant           Tenant        @relation(fields: [tenantId], references: [id])
+  category         ItemCategory? @relation(fields: [categoryId], references: [id])
+  itemGroup        ItemGroup?    @relation(fields: [itemGroupId], references: [id])
+  defaultWarehouse Warehouse?    @relation("ItemDefaultWarehouse", fields: [defaultWarehouseId], references: [id])
+
+  substitutes             ItemSubstitute[]        @relation("PrimaryItem")
+  substituteOf            ItemSubstitute[]        @relation("SubstituteItem")
+  boms                    BOM[]
+  bomItems                BOMItem[]
+  itemRoutings            ItemRouting[]
+  workStandardMappings    WorkStandardMapping[]
+  lots                    Lot[]
+  lotNumberReservations   LotNumberReservation[]
+  inspectionSpecs         InspectionSpec[]
+  inventoryBalances       InventoryBalance[]
+  inventoryTxns           InventoryTransaction[]
+  workOrders              WorkOrder[]
+  materialReservations    MaterialReservation[]
+  materialConsumptions    MaterialConsumption[]
+  wipUnits                WipUnit[]
+  wipUnitMaterialLots     WipUnitMaterialLot[]    @relation("WipUnitMaterialItem")
+  finishedGoodsReceipts   FinishedGoodsReceipt[]
+  productionPlanItems     ProductionPlanItem[]
+  salesOrderItems         SalesOrderItem[]        @relation("ItemSalesOrderItems")
+  shipmentItems           ShipmentItem[]          @relation("ItemShipmentItems")
+  purchaseOrderItems      PurchaseOrderItem[]     @relation("ItemPurchaseOrderItems")
+  itemPrices              ItemPrice[]             @relation("ItemPrices")
+  quotationItems          QuotationItem[]         @relation("ItemQuotationItems")
+  projectOrders           ProjectOrder[]          @relation("ItemProjectOrders")
+  itemCosts               ItemCost[]              @relation("ItemCosts")
+  engineeringChanges      EngineeringChange[]     @relation("ItemECNs")
+  materialLotConsumptions WorkOrderMaterialLot[]  @relation("MaterialLotItem")
+  materialReturnItems     MaterialReturnItem[]
+  projectOrderPrices      ProjectOrderPrice[]     @relation("ItemProjectOrderPrices")
+  equipmentAppliedItems   EquipmentAppliedItem[]
+  equipmentUsageHistories EquipmentUsageHistory[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([categoryId])
+  @@index([itemGroupId])
+  @@index([defaultWarehouseId])
+}
+
+model ItemSubstitute {
+  id               String @id @default(cuid())
+  itemId           String
+  substituteItemId String
+  priority         Int    @default(1)
+
+  item           Item @relation("PrimaryItem", fields: [itemId], references: [id])
+  substituteItem Item @relation("SubstituteItem", fields: [substituteItemId], references: [id])
+
+  @@unique([itemId, substituteItemId])
+  @@index([itemId])
+}
+
+model BOM {
+  id        String    @id @default(cuid())
+  tenantId  String
+  itemId    String
+  version   String
+  isDefault Boolean   @default(false)
+  status    BOMStatus @default(DRAFT)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
+  item                Item                 @relation(fields: [itemId], references: [id])
+  bomItems            BOMItem[]
+  workOrders          WorkOrder[]
+  productionPlanItems ProductionPlanItem[]
+  itemCosts           ItemCost[]           @relation("BOMItemCosts")
+
+  @@unique([tenantId, itemId, version])
+  @@index([tenantId])
+  @@index([itemId])
+}
+
+model BOMItem {
+  id              String  @id @default(cuid())
+  bomId           String
+  componentItemId String
+  seq             Int
+  qtyPer          Decimal @db.Decimal(18, 6)
+  scrapRate       Decimal @default(0) @db.Decimal(5, 4)
+
+  bom           BOM  @relation(fields: [bomId], references: [id])
+  componentItem Item @relation(fields: [componentItemId], references: [id])
+
+  @@unique([bomId, seq])
+  @@index([bomId])
+  @@index([componentItemId])
+}
+
+model Routing {
+  id        String        @id @default(cuid())
+  tenantId  String
+  code      String
+  name      String
+  version   String
+  status    RoutingStatus @default(DRAFT)
+  // COMMON: 품목 연결 없이 모든 완제품/반제품에서 선택 가능. ITEM_SPECIFIC: ItemRouting으로 연결된 품목에서만 선택 가능.
+  scope     RoutingScope  @default(ITEM_SPECIFIC)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id])
+  items               ItemRouting[]
+  operations          RoutingOperation[]
+  workOrders          WorkOrder[]
+  productionPlanItems ProductionPlanItem[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model ItemRouting {
+  id        String  @id @default(cuid())
+  tenantId  String
+  itemId    String
+  routingId String
+  isDefault Boolean @default(false)
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  item    Item    @relation(fields: [itemId], references: [id])
+  routing Routing @relation(fields: [routingId], references: [id])
+
+  @@unique([itemId, routingId])
+  @@index([itemId])
+  @@index([routingId])
+}
+
+model RoutingOperation {
+  id            String  @id @default(cuid())
+  routingId     String
+  workCenterId  String
+  seq           Int
+  operationCode String
+  name          String
+  standardTime  Decimal @default(0) @db.Decimal(10, 2)
+
+  routing    Routing    @relation(fields: [routingId], references: [id])
+  workCenter WorkCenter @relation(fields: [workCenterId], references: [id])
+
+  equipmentMaps       EquipmentOperationMap[]
+  workOrderOperations WorkOrderOperation[]
+  inspectionSpecs     InspectionSpec[]
+  projectStages       ProjectStage[]
+  workStandardMappings WorkStandardMapping[]
+
+  @@unique([routingId, seq])
+  @@index([routingId])
+  @@index([workCenterId])
+}
+
+model Equipment {
+  id            String          @id @default(cuid())
+  tenantId      String
+  siteId        String
+  workCenterId  String
+  code          String
+  name          String
+  equipmentType EquipmentType
+  status        EquipmentStatus @default(ACTIVE)
+  // 청운커팅 사업계획서 "설비관리 > 공구관리" — 공구/치공구(TOOL/JIG/FIXTURE)의
+  // 수명 관리용 필드. MACHINE/VEHICLE에는 의미가 없어 lifeLimit은 선택값으로
+  // 둔다(값이 없으면 화면에서 잔여수명/사용률을 계산·표시하지 않는다). 실제
+  // 현장 데이터가 전부 "사용횟수(타수)" 기준이라 lifeUnit 같은 범용 단위 개념은
+  // 아직 두지 않는다 — 시간 기준 수명 관리가 실제로 필요해지면 그때 추가한다.
+  // remainingLife/usageRate 같은 파생값은 DB에 저장하지 않고 조회 시점에 계산한다
+  // (tool.helpers.ts 참조, DefectCorrectiveAction의 overdue 계산과 동일 원칙).
+  lifeLimit     Int?
+  currentUsage  Int             @default(0)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  site       Site       @relation(fields: [siteId], references: [id])
+  workCenter WorkCenter @relation(fields: [workCenterId], references: [id])
+
+  operationMaps                 EquipmentOperationMap[]
+  workOrderOperations           WorkOrderOperation[]
+  connections                   EquipmentConnection[]
+  events                        EquipmentEvent[]
+  repairRequests                EquipmentRepairRequest[]
+  dailyChecks                   EquipmentDailyCheck[]
+  downtimeRecords               EquipmentDowntime[]
+  maintenancePlans              EquipmentMaintenancePlan[]
+  maintenanceHistories          EquipmentMaintenanceHistory[]
+  workOrderOperationAssignments WorkOrderOperationAssignment[]
+  ncwatchMappings               NcwatchEquipmentMapping[]      @relation("EquipmentNcwatchMappings")
+  appliedItems                  EquipmentAppliedItem[]
+  usageHistories                EquipmentUsageHistory[]
+
+  @@unique([siteId, code])
+  @@index([tenantId])
+  @@index([siteId])
+  @@index([workCenterId])
+}
+
+// ─── 청운커팅 사업계획서 "설비관리 > 공구관리" ──────────────────────────────
+//
+// 공구/치공구 전용 신규 모델을 만들지 않고 기존 Equipment(TOOL/JIG/FIXTURE
+// 타입)를 그대로 재사용한다 — EquipmentType이 이미 TOOL/JIG/FIXTURE를 구분하고
+// 있고, 기준정보 CRUD(mold.actions.ts, /app/mes/master/molds)와 설비수리이력
+// (EquipmentRepairRequest)/설비점검이력(EquipmentDailyCheck)이 이미 equipmentId
+// 기준으로 동작해 공구에도 그대로 적용된다. 새로 필요한 것은 (1) 수명 관리
+// 필드(위 Equipment.lifeLimit/currentUsage), (2) 공구-품목 다대다 연결,
+// (3) 사용이력 기록뿐이라 이 두 모델만 추가한다.
+
+// 공구 1건에 여러 적용품목이 연결될 수 있고, 품목 1건도 여러 공구에서 쓰일 수 있어 M:N(EquipmentOperationMap과 동일한 join 패턴)으로 둔다.
+model EquipmentAppliedItem {
+  id          String @id @default(cuid())
+  equipmentId String
+  itemId      String
+
+  equipment Equipment @relation(fields: [equipmentId], references: [id])
+  item      Item      @relation(fields: [itemId], references: [id])
+
+  @@unique([equipmentId, itemId])
+  @@index([equipmentId])
+  @@index([itemId])
+}
+
+// 공구 사용이력 — 등록 시 같은 트랜잭션에서 Equipment.currentUsage를 누적한다.
+// POP 생산실적과 연결되는 사용이력은 사용자가 실제 공구를 선택한 경우에만
+// 생성한다. RoutingOperation/WorkOrderOperation에 연결된 공구는 계획/사용가능
+// 공구일 뿐이며, 미선택이면 ProductionResult만 생성되고 공구 이력/수명은
+// 변경하지 않는다(append-only 이력 정책).
+model EquipmentUsageHistory {
+  id          String   @id @default(cuid())
+  tenantId    String
+  equipmentId String
+  usedAt      DateTime
+  usageCount  Int
+
+  itemId               String?
+  workOrderOperationId String?
+  productionResultId   String?
+  operatorId           String?
+  note                 String?
+
+  createdById String
+  createdAt   DateTime @default(now())
+
+  tenant             Tenant              @relation(fields: [tenantId], references: [id])
+  equipment          Equipment           @relation(fields: [equipmentId], references: [id])
+  item               Item?               @relation(fields: [itemId], references: [id])
+  workOrderOperation WorkOrderOperation? @relation(fields: [workOrderOperationId], references: [id])
+  productionResult   ProductionResult?   @relation(fields: [productionResultId], references: [id], onDelete: SetNull)
+  operator           Profile?            @relation("EquipmentUsageOperator", fields: [operatorId], references: [id])
+  createdBy          Profile             @relation("EquipmentUsageCreator", fields: [createdById], references: [id])
+
+  @@index([tenantId])
+  @@index([equipmentId])
+  @@index([productionResultId])
+  @@index([usedAt])
+  @@unique([productionResultId, equipmentId])
+}
+
+model EquipmentOperationMap {
+  id                 String @id @default(cuid())
+  equipmentId        String
+  routingOperationId String
+
+  equipment        Equipment        @relation(fields: [equipmentId], references: [id])
+  routingOperation RoutingOperation @relation(fields: [routingOperationId], references: [id])
+
+  @@unique([equipmentId, routingOperationId])
+  @@index([equipmentId])
+  @@index([routingOperationId])
+}
+
+model Warehouse {
+  id       String  @id @default(cuid())
+  tenantId String
+  siteId   String
+  code     String
+  name     String
+  zone     String?
+
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id])
+  site                  Site                   @relation(fields: [siteId], references: [id])
+  locations             Location[]
+  finishedGoodsReceipts FinishedGoodsReceipt[]
+  shipments             ShipmentOrder[]        @relation("WarehouseShipments")
+  inventoryBalances     InventoryBalance[]
+  inventoryTxnsFrom     InventoryTransaction[] @relation("TxFromWarehouse")
+  inventoryTxnsTo       InventoryTransaction[] @relation("TxToWarehouse")
+  currentWipUnits       WipUnit[]              @relation("WipUnitCurrentWarehouse")
+  wipMovementsFrom      WipMovement[]          @relation("WipMovementFromWarehouse")
+  wipMovementsTo        WipMovement[]          @relation("WipMovementToWarehouse")
+  defaultForItems       Item[]                 @relation("ItemDefaultWarehouse")
+  materialReturnItems   MaterialReturnItem[]
+
+  @@unique([siteId, code])
+  @@index([tenantId])
+  @@index([siteId])
+}
+
+model Location {
+  id           String  @id @default(cuid())
+  warehouseId  String
+  code         String
+  name         String
+  locationType String?
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+
+  wipUnits              WipUnit[]
+  finishedGoodsReceipts FinishedGoodsReceipt[]
+  wipMovementsFrom      WipMovement[]          @relation("WipMovementFromLocation")
+  wipMovementsTo        WipMovement[]          @relation("WipMovementToLocation")
+
+  @@unique([warehouseId, code])
+  @@index([warehouseId])
+}
+
+enum NumberingRuleType {
+  LOT
+  SERIAL
+}
+
+model NumberingRule {
+  id        String            @id @default(cuid())
+  tenantId  String
+  type      NumberingRuleType
+  tokens    Json
+  isActive  Boolean           @default(true)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  tenant    Tenant              @relation(fields: [tenantId], references: [id])
+  sequences NumberingSequence[]
+
+  @@unique([tenantId, type])
+  @@index([tenantId])
+}
+
+model NumberingSequence {
+  id        String @id @default(cuid())
+  ruleId    String
+  periodKey String
+  current   Int    @default(0)
+
+  rule NumberingRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, periodKey])
+}
+
+model InspectionSpec {
+  id                 String               @id @default(cuid())
+  tenantId           String
+  itemId             String
+  routingOperationId String
+  version            String
+  status             InspectionSpecStatus @default(DRAFT)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id])
+  item             Item             @relation(fields: [itemId], references: [id])
+  routingOperation RoutingOperation @relation(fields: [routingOperationId], references: [id])
+
+  inspectionItems    InspectionItem[]
+  qualityInspections QualityInspection[]
+
+  @@unique([tenantId, itemId, routingOperationId, version])
+  @@index([tenantId])
+  @@index([itemId])
+  @@index([routingOperationId])
+}
+
+model InspectionItem {
+  id               String              @id @default(cuid())
+  inspectionSpecId String
+  seq              Int
+  name             String
+  inputType        InspectionInputType @default(NUMERIC)
+  lowerLimit       Decimal?            @db.Decimal(18, 6)
+  upperLimit       Decimal?            @db.Decimal(18, 6)
+  unit             String?
+
+  inspectionSpec InspectionSpec          @relation(fields: [inspectionSpecId], references: [id])
+  measurements   InspectionMeasurement[]
+  spcProfiles    SpcProfile[]
+
+  @@unique([inspectionSpecId, seq])
+  @@index([inspectionSpecId])
+}
+
+model DefectCode {
+  id             String         @id @default(cuid())
+  tenantId       String
+  code           String
+  name           String
+  defectCategory DefectCategory
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  defectRecords DefectRecord[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model Document {
+  id       String  @id @default(cuid())
+  tenantId String
+  code     String
+  name     String
+  docType  DocType
+  fileUrl  String?
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id])
+  documentLinks DocumentLink[]
+  workStandardMappings WorkStandardMapping[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model DocumentLink {
+  id         String @id @default(cuid())
+  documentId String
+  targetType String
+  targetId   String
+
+  document Document @relation(fields: [documentId], references: [id])
+
+  @@unique([documentId, targetType, targetId])
+  @@index([documentId])
+  @@index([targetType, targetId])
+}
+
+model WorkStandardMapping {
+  id                 String   @id @default(cuid())
+  tenantId           String
+  documentId         String
+  itemId             String
+  routingOperationId String
+  isActive           Boolean  @default(true)
+  displayOrder       Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  tenant           Tenant           @relation(fields: [tenantId], references: [id])
+  document         Document         @relation(fields: [documentId], references: [id])
+  item             Item             @relation(fields: [itemId], references: [id])
+  routingOperation RoutingOperation @relation(fields: [routingOperationId], references: [id])
+
+  @@unique([tenantId, documentId, itemId, routingOperationId])
+  @@index([tenantId, itemId, routingOperationId, isActive])
+  @@index([documentId])
+  @@index([routingOperationId])
+}
+
+// ─── 청운커팅 사업계획서 "첨부파일관리" ──────────────────────────────────────
+//
+// 여러 업무 엔티티(조치관리/재발방지관리, 향후 품목/수주/작업지시/설비/공구/
+// 프로젝트 등으로 확대 예정)에 파일을 첨부하는 공통 구조다. 기존 Document/
+// DocumentLink(work-standards 전용 문서 코드 마스터 — fileUrl은 수동 입력 링크일
+// 뿐이고 fileSize/mimeType/업로더/업로드일시 등 실제 업로드 메타데이터가 없음)와는
+// 근본적으로 목적이 달라 재사용하지 않고 신규로 만든다. 다만 하나의 모델이 여러
+// 업무 엔티티에 연결되는 구조 자체는 DocumentLink(targetType/targetId 문자열 기반
+// polymorphic 연결)와 동일한 패턴을 그대로 따른다 — Prisma FK 참조무결성을
+// entityId에 대해서는 강제하지 못하는 대가를 감수하는 대신, 대상 엔티티 종류가
+// 계속 늘어날 예정이라 매번 스키마 마이그레이션 없이 확장 가능해야 하기 때문이다.
+// entityType은 Prisma enum이 아닌 문자열로 두고(DocumentLink.targetType과 동일
+// 이유), 허용값은 애플리케이션 레벨 allow-list로 관리한다(attachment.helpers.ts의
+// ATTACHMENT_ENTITY_TYPES). 서버의 모든 mutating/조회 action은 entityId가 가리키는
+// 실제 레코드가 현재 tenant 소속인지 반드시 재검증한다(추측성 신뢰 금지).
+//
+// 실제 파일 바이너리는 DB에 저장하지 않는다 — Supabase Storage 비공개(private)
+// 버킷에 저장하고, DB에는 metadata + storagePath만 저장한다. storagePath를 그대로
+// 브라우저에 노출하지 않고, 다운로드 시 서버에서 tenant 소유권을 확인한 뒤 짧은
+// 유효시간의 signed URL을 발급한다(attachment.actions.ts 참조). 삭제는 제공하되
+// (사업계획서 CRUD 요구사항), 복잡한 버전관리/승인/전자서명은 이번 PR 범위 밖이다.
+model Attachment {
+  id         String @id @default(cuid())
+  tenantId   String
+  entityType String
+  entityId   String
+
+  fileName    String
+  storagePath String
+  mimeType    String
+  fileSize    Int
+  description String?
+
+  uploadedById String
+  createdAt    DateTime @default(now())
+
+  tenant     Tenant  @relation(fields: [tenantId], references: [id])
+  uploadedBy Profile @relation(fields: [uploadedById], references: [id])
+
+  @@unique([storagePath])
+  @@index([tenantId])
+  @@index([entityType, entityId])
+  @@index([uploadedById])
+}
+
+// ─── 청운커팅 사업계획서 "기준정보관리 > 백업관리" ──────────────────────────
+//
+// 이 기능은 NMES가 DB 백업을 직접 생성/수정/삭제하는 기능이 아니다 — 실제 DB
+// 백업은 계속 Supabase가 자동으로 관리한다(Supabase Management API
+// GET /v1/projects/{ref}/database/backups로 조회만 함, src/lib/supabase-management/
+// backups.ts 참조). NMES는 그 백업 목록을 (1) 사용자가 그룹(폴더)으로 묶어
+// 조회하고, (2) 특정 백업을 화면에서만 숨기는 "관리/분류 UI" 역할만 한다.
+// Supabase backup 원본에 대한 mutation(생성/삭제/restore/PITR)은 이 코드베이스
+// 어디에도 구현하지 않는다.
+//
+// 그룹-백업 관계는 M:N이다(같은 Supabase backup이 여러 그룹에 동시에 포함될 수
+// 있음, § STEP 9). externalBackupId는 Supabase API 응답의 안정적인 식별자를
+// 그대로 문자열로 보존한다(실제 응답에 id 필드가 있으면 그 값을, 없으면
+// inserted_at을 사용 — backup.helpers.ts의 normalizeExternalBackupId 참조).
+// Supabase 프로젝트가 tenant마다 별도가 아니라 하나이므로 백업 목록 자체는
+// 모든 tenant에 동일하게 보이지만, 그룹/숨김 metadata는 tenant별로 분리한다
+// (§ STEP 25).
+model BackupGroup {
+  id          String  @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+
+  createdById String
+  updatedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant    Tenant            @relation(fields: [tenantId], references: [id])
+  createdBy Profile           @relation("BackupGroupCreator", fields: [createdById], references: [id])
+  updatedBy Profile           @relation("BackupGroupUpdater", fields: [updatedById], references: [id])
+  items     BackupGroupItem[]
+
+  @@index([tenantId])
+}
+
+// 그룹 삭제 시 이 관계 row들만 함께 정리한다(onDelete: Cascade) — Supabase backup
+// 원본이나 다른 그룹에 속한 동일 backup의 멤버십에는 영향 없음.
+model BackupGroupItem {
+  id               String @id @default(cuid())
+  tenantId         String
+  groupId          String
+  externalBackupId String
+
+  backupAt  DateTime?
+  createdAt DateTime  @default(now())
+
+  tenant Tenant      @relation(fields: [tenantId], references: [id])
+  group  BackupGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, externalBackupId])
+  @@index([tenantId])
+  @@index([externalBackupId])
+}
+
+// 특정 backup을 NMES 화면에서만 제외하는 용도 — Supabase backup 원본에는 어떤
+// 영향도 주지 않는다. 그룹 소속 여부와 무관하게 독립적으로 존재한다(§ STEP 15).
+model HiddenBackup {
+  id               String @id @default(cuid())
+  tenantId         String
+  externalBackupId String
+
+  hiddenById String
+  hiddenAt   DateTime @default(now())
+
+  tenant   Tenant  @relation(fields: [tenantId], references: [id])
+  hiddenBy Profile @relation("HiddenBackupHider", fields: [hiddenById], references: [id])
+
+  @@unique([tenantId, externalBackupId])
+  @@index([tenantId])
+  @@index([externalBackupId])
+}
+
+model WorkOrder {
+  id              String          @id @default(cuid())
+  tenantId        String
+  siteId          String
+  itemId          String
+  bomId           String
+  routingId       String
+  orderNo         String
+  manufacturingNo String?
+  plannedQty      Decimal         @db.Decimal(18, 6)
+  status          WorkOrderStatus @default(DRAFT)
+  dueDate         DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  site    Site    @relation(fields: [siteId], references: [id])
+  item    Item    @relation(fields: [itemId], references: [id])
+  bom     BOM     @relation(fields: [bomId], references: [id])
+  routing Routing @relation(fields: [routingId], references: [id])
+
+  productionPlanItemId String?
+  productionPlanItem   ProductionPlanItem? @relation(fields: [productionPlanItemId], references: [id])
+
+  operations            WorkOrderOperation[]
+  materialReservations  MaterialReservation[]
+  finishedGoodsReceipts FinishedGoodsReceipt[]
+  itemCosts             ItemCost[]             @relation("WorkOrderItemCosts")
+  materialLots          WorkOrderMaterialLot[]
+  wipUnits              WipUnit[]
+
+  @@unique([tenantId, orderNo])
+  @@unique([tenantId, manufacturingNo])
+  @@index([tenantId])
+  @@index([siteId])
+  @@index([status])
+  @@index([tenantId, siteId, status])
+  @@index([tenantId, dueDate])
+  @@index([tenantId, itemId])
+  @@index([productionPlanItemId])
+  @@index([tenantId, manufacturingNo])
+}
+
+// ─── 의료기기 추적성: 작업지시-제조번호-원자재 LOT 연결 ─────────────────────
+model WorkOrderMaterialLot {
+  id                     String   @id @default(cuid())
+  tenantId               String
+  workOrderId            String
+  manufacturingNo        String?
+  materialItemId         String
+  materialLotNo          String
+  qty                    Decimal  @db.Decimal(18, 6)
+  unit                   String?
+  issuedAt               DateTime @default(now())
+  issuedBy               String?
+  inventoryTransactionId String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  workOrder            WorkOrder             @relation(fields: [workOrderId], references: [id])
+  materialItem         Item                  @relation("MaterialLotItem", fields: [materialItemId], references: [id])
+  inventoryTransaction InventoryTransaction? @relation("MaterialLotInventoryTx", fields: [inventoryTransactionId], references: [id])
+  wipUnitMaterialLots  WipUnitMaterialLot[]
+
+  @@index([tenantId])
+  @@index([workOrderId])
+  @@index([tenantId, manufacturingNo])
+  @@index([materialItemId])
+  @@index([tenantId, materialLotNo])
+  @@index([inventoryTransactionId])
+}
+
+model WorkOrderOperation {
+  id                 String          @id @default(cuid())
+  workOrderId        String
+  routingOperationId String
+  equipmentId        String?
+  seq                Int
+  status             OperationStatus @default(PENDING)
+  plannedQty         Decimal         @db.Decimal(18, 6)
+  completedQty       Decimal         @default(0) @db.Decimal(18, 6)
+  startedAt          DateTime?
+
+  workOrder        WorkOrder        @relation(fields: [workOrderId], references: [id])
+  routingOperation RoutingOperation @relation(fields: [routingOperationId], references: [id])
+  equipment        Equipment?       @relation(fields: [equipmentId], references: [id])
+
+  materialConsumptions    MaterialConsumption[]
+  wipUnits                WipUnit[]
+  productionResults       ProductionResult[]
+  qualityInspections      QualityInspection[]
+  wipMovementsFrom        WipMovement[]                  @relation("WipMovementFromOperation")
+  wipMovementsTo          WipMovement[]                  @relation("WipMovementToOperation")
+  assignments             WorkOrderOperationAssignment[]
+  equipmentUsageHistories EquipmentUsageHistory[]
+  purchaseOrderItems      PurchaseOrderItem[]            @relation("OutsourcingOperationPurchaseItems")
+
+  @@unique([workOrderId, seq])
+  @@index([workOrderId])
+  @@index([routingOperationId])
+  @@index([equipmentId])
+}
+
+model WorkOrderOperationAssignment {
+  id                   String          @id @default(cuid())
+  tenantId             String
+  workOrderOperationId String
+  equipmentId          String
+  assignedQty          Decimal         @db.Decimal(18, 6)
+  completedQty         Decimal         @default(0) @db.Decimal(18, 6)
+  status               OperationStatus @default(PENDING)
+  startedAt            DateTime?
+  seq                  Int             @default(1)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  tenant             Tenant             @relation(fields: [tenantId], references: [id])
+  workOrderOperation WorkOrderOperation @relation(fields: [workOrderOperationId], references: [id], onDelete: Cascade)
+  equipment          Equipment          @relation(fields: [equipmentId], references: [id])
+  productionResults  ProductionResult[]
+
+  @@unique([workOrderOperationId, equipmentId])
+  @@index([tenantId])
+  @@index([workOrderOperationId])
+  @@index([equipmentId])
+  @@index([status])
+}
+
+model MaterialReservation {
+  id          String            @id @default(cuid())
+  workOrderId String
+  itemId      String
+  requiredQty Decimal           @db.Decimal(18, 6)
+  reservedQty Decimal           @default(0) @db.Decimal(18, 6)
+  issuedQty   Decimal           @default(0) @db.Decimal(18, 6)
+  status      ReservationStatus @default(PENDING)
+
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id])
+  item      Item      @relation(fields: [itemId], references: [id])
+
+  @@unique([workOrderId, itemId])
+  @@index([workOrderId])
+  @@index([itemId])
+}
+
+model Lot {
+  id              String    @id @default(cuid())
+  tenantId        String
+  itemId          String
+  lotNo           String
+  status          LotStatus @default(ACTIVE)
+  manufactureDate DateTime?
+  expiryDate      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  item   Item   @relation(fields: [itemId], references: [id])
+
+  inventoryBalances     InventoryBalance[]
+  inventoryTxns         InventoryTransaction[]
+  materialConsumptions  MaterialConsumption[]
+  wipUnits              WipUnit[]
+  wipUnitMaterialLots   WipUnitMaterialLot[]   @relation("WipUnitMaterialLot")
+  finishedGoodsReceipts FinishedGoodsReceipt[]
+  qualityInspections    QualityInspection[]
+  parentGenealogyLinks  LotGenealogy[]         @relation("ParentLot")
+  childGenealogyLinks   LotGenealogy[]         @relation("ChildLot")
+  shipmentItems         ShipmentItem[]         @relation("LotShipmentItems")
+  materialReturnItems   MaterialReturnItem[]
+
+  @@unique([tenantId, lotNo])
+  @@index([tenantId])
+  @@index([itemId])
+}
+
+// 자재입고 자동채번 미리보기(라벨 선출력용) — 실제 Lot 생성 전 번호를 선점한다.
+// RELEASED/EXPIRED 상태가 되어도 row는 삭제하지 않고 lotNo unique 제약으로 영구히 재사용을 막는다.
+model LotNumberReservation {
+  id                  String               @id @default(cuid())
+  tenantId            String
+  itemId              String
+  purchaseOrderId     String
+  purchaseOrderItemId String
+  lotNo               String
+  status              LotReservationStatus @default(RESERVED)
+  reservedBy          String
+  expiresAt           DateTime
+  createdAt           DateTime             @default(now())
+  consumedAt          DateTime?
+  releasedAt          DateTime?
+  // 라벨을 실제로 출력한 시각. null이면 "미출력" — 취소/재채번/만료 시 행을 삭제해 번호를 재사용 가능하게 한다.
+  // 값이 있으면 "출력됨" — 이후 취소/재채번/만료돼도 행을 삭제하지 않고 상태만 바꿔 번호를 영구히 재사용 금지한다.
+  printedAt           DateTime?
+
+  tenant            Tenant            @relation(fields: [tenantId], references: [id])
+  item              Item              @relation(fields: [itemId], references: [id])
+  purchaseOrder     PurchaseOrder     @relation(fields: [purchaseOrderId], references: [id])
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id])
+
+  @@unique([tenantId, lotNo])
+  @@index([tenantId, purchaseOrderItemId])
+  @@index([status, expiresAt])
+}
+
+model InventoryBalance {
+  id           String   @id @default(cuid())
+  tenantId     String
+  siteId       String
+  itemId       String
+  lotId        String?
+  warehouseId  String
+  qtyOnHand    Decimal  @default(0) @db.Decimal(18, 6)
+  qtyAvailable Decimal  @default(0) @db.Decimal(18, 6)
+  qtyHold      Decimal  @default(0) @db.Decimal(18, 6)
+  updatedAt    DateTime @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  site      Site      @relation(fields: [siteId], references: [id])
+  item      Item      @relation(fields: [itemId], references: [id])
+  lot       Lot?      @relation(fields: [lotId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+
+  @@unique([tenantId, itemId, warehouseId, lotId])
+  @@index([tenantId])
+  @@index([siteId])
+  @@index([itemId])
+  @@index([warehouseId])
+  @@index([tenantId, siteId, itemId])
+  @@index([tenantId, warehouseId])
+  @@index([tenantId, itemId, lotId, warehouseId])
+}
+
+model InventoryTransaction {
+  id             String          @id @default(cuid())
+  tenantId       String
+  itemId         String
+  lotId          String?
+  fromLocationId String?
+  toLocationId   String?
+  txNo           String
+  txType         TransactionType
+  qty            Decimal         @db.Decimal(18, 6)
+  refType        String?
+  refId          String?
+  note           String?
+  txAt           DateTime        @default(now())
+
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id])
+  item                  Item                   @relation(fields: [itemId], references: [id])
+  lot                   Lot?                   @relation(fields: [lotId], references: [id])
+  fromLocation          Warehouse?             @relation("TxFromWarehouse", fields: [fromLocationId], references: [id])
+  toLocation            Warehouse?             @relation("TxToWarehouse", fields: [toLocationId], references: [id])
+  workOrderMaterialLots WorkOrderMaterialLot[] @relation("MaterialLotInventoryTx")
+  materialReturnItem    MaterialReturnItem?
+
+  @@unique([tenantId, txNo])
+  @@index([tenantId])
+  @@index([itemId])
+  @@index([lotId])
+  @@index([txType])
+  @@index([txAt])
+  @@index([tenantId, txAt])
+  @@index([tenantId, itemId, txAt])
+  @@index([tenantId, refType, refId])
+  @@index([fromLocationId])
+  @@index([toLocationId])
+}
+
+model MaterialConsumption {
+  id                   String  @id @default(cuid())
+  workOrderOperationId String
+  itemId               String
+  lotId                String?
+  consumedQty          Decimal @db.Decimal(18, 6)
+  scrapQty             Decimal @default(0) @db.Decimal(18, 6)
+
+  workOrderOperation WorkOrderOperation @relation(fields: [workOrderOperationId], references: [id])
+  item               Item               @relation(fields: [itemId], references: [id])
+  lot                Lot?               @relation(fields: [lotId], references: [id])
+
+  @@index([workOrderOperationId])
+  @@index([itemId])
+  @@index([lotId])
+}
+
+model WipUnit {
+  id                       String        @id @default(cuid())
+  tenantId                 String
+  siteId                   String?
+  workOrderId              String?
+  workOrderOperationId     String
+  itemId                   String
+  lotId                    String?
+  manufacturingNo          String?
+  currentWorkCenterId      String?
+  currentWarehouseId       String?
+  currentLocationId        String?
+  outsourcingPartnerId     String?
+  sourceProductionResultId String?
+  parentWipUnitId          String?
+  qty                      Decimal       @db.Decimal(18, 6)
+  status                   WipUnitStatus @default(IN_PROCESS)
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
+
+  tenant                 Tenant               @relation(fields: [tenantId], references: [id])
+  site                   Site?                @relation(fields: [siteId], references: [id])
+  workOrder              WorkOrder?           @relation(fields: [workOrderId], references: [id])
+  workOrderOperation     WorkOrderOperation   @relation(fields: [workOrderOperationId], references: [id])
+  item                   Item                 @relation(fields: [itemId], references: [id])
+  lot                    Lot?                 @relation(fields: [lotId], references: [id])
+  currentLocation        Location?            @relation(fields: [currentLocationId], references: [id])
+  currentWorkCenter      WorkCenter?          @relation("WipUnitCurrentWorkCenter", fields: [currentWorkCenterId], references: [id])
+  currentWarehouse       Warehouse?           @relation("WipUnitCurrentWarehouse", fields: [currentWarehouseId], references: [id])
+  outsourcingPartner     BusinessPartner?     @relation("WipUnitOutsourcingPartner", fields: [outsourcingPartnerId], references: [id])
+  sourceProductionResult ProductionResult?    @relation("WipUnitSourceProductionResult", fields: [sourceProductionResultId], references: [id])
+  parentWipUnit          WipUnit?             @relation("WipUnitLineage", fields: [parentWipUnitId], references: [id])
+  childWipUnits          WipUnit[]            @relation("WipUnitLineage")
+  movements              WipMovement[]        @relation("WipUnitMovements")
+  relatedMovements       WipMovement[]        @relation("WipMovementRelatedWipUnit")
+  materialLots           WipUnitMaterialLot[]
+  holds                  WipHold[]
+
+  @@index([tenantId, workOrderId])
+  @@index([tenantId, manufacturingNo])
+  @@index([tenantId, workOrderOperationId])
+  @@index([tenantId, status])
+  @@index([tenantId, currentLocationId])
+  @@index([tenantId, currentWorkCenterId])
+  @@index([tenantId, currentWarehouseId])
+  @@index([tenantId, outsourcingPartnerId])
+  @@index([tenantId, lotId])
+  @@index([workOrderOperationId])
+  @@index([itemId])
+  @@index([lotId])
+  @@index([currentLocationId])
+  @@index([status])
+  @@index([currentLocationId, status])
+}
+
+model WipMovement {
+  id               String          @id @default(cuid())
+  tenantId         String
+  siteId           String?
+  wipUnitId        String
+  movementType     WipMovementType
+  fromOperationId  String?
+  toOperationId    String?
+  fromWorkCenterId String?
+  toWorkCenterId   String?
+  fromWarehouseId  String?
+  toWarehouseId    String?
+  fromLocationId   String?
+  toLocationId     String?
+  fromPartnerId    String?
+  toPartnerId      String?
+  relatedWipUnitId String?
+  qty              Decimal         @db.Decimal(18, 6)
+  sourceType       String?
+  sourceId         String?
+  note             String?
+  createdById      String?
+  createdAt        DateTime        @default(now())
+
+  tenant         Tenant              @relation(fields: [tenantId], references: [id])
+  site           Site?               @relation(fields: [siteId], references: [id])
+  wipUnit        WipUnit             @relation("WipUnitMovements", fields: [wipUnitId], references: [id])
+  fromOperation  WorkOrderOperation? @relation("WipMovementFromOperation", fields: [fromOperationId], references: [id])
+  toOperation    WorkOrderOperation? @relation("WipMovementToOperation", fields: [toOperationId], references: [id])
+  fromWorkCenter WorkCenter?         @relation("WipMovementFromWorkCenter", fields: [fromWorkCenterId], references: [id])
+  toWorkCenter   WorkCenter?         @relation("WipMovementToWorkCenter", fields: [toWorkCenterId], references: [id])
+  fromWarehouse  Warehouse?          @relation("WipMovementFromWarehouse", fields: [fromWarehouseId], references: [id])
+  toWarehouse    Warehouse?          @relation("WipMovementToWarehouse", fields: [toWarehouseId], references: [id])
+  fromLocation   Location?           @relation("WipMovementFromLocation", fields: [fromLocationId], references: [id])
+  toLocation     Location?           @relation("WipMovementToLocation", fields: [toLocationId], references: [id])
+  fromPartner    BusinessPartner?    @relation("WipMovementFromPartner", fields: [fromPartnerId], references: [id])
+  toPartner      BusinessPartner?    @relation("WipMovementToPartner", fields: [toPartnerId], references: [id])
+  relatedWipUnit WipUnit?            @relation("WipMovementRelatedWipUnit", fields: [relatedWipUnitId], references: [id])
+
+  @@index([tenantId, wipUnitId])
+  @@index([tenantId, movementType])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, sourceType, sourceId])
+  @@index([tenantId, fromOperationId])
+  @@index([tenantId, toOperationId])
+  @@index([tenantId, relatedWipUnitId])
+}
+
+model WipUnitMaterialLot {
+  id                     String   @id @default(cuid())
+  tenantId               String
+  wipUnitId              String
+  workOrderMaterialLotId String?
+  materialItemId         String
+  materialLotId          String?
+  materialLotNo          String?
+  qty                    Decimal  @db.Decimal(18, 6)
+  unit                   String?
+  linkedAt               DateTime @default(now())
+
+  tenant               Tenant                @relation(fields: [tenantId], references: [id])
+  wipUnit              WipUnit               @relation(fields: [wipUnitId], references: [id])
+  workOrderMaterialLot WorkOrderMaterialLot? @relation(fields: [workOrderMaterialLotId], references: [id])
+  materialItem         Item                  @relation("WipUnitMaterialItem", fields: [materialItemId], references: [id])
+  materialLot          Lot?                  @relation("WipUnitMaterialLot", fields: [materialLotId], references: [id])
+
+  @@index([tenantId, wipUnitId])
+  @@index([tenantId, workOrderMaterialLotId])
+  @@index([tenantId, materialItemId])
+  @@index([tenantId, materialLotId])
+  @@index([tenantId, materialLotNo])
+}
+
+// 청운커팅 사업계획서 "재작업/보류관리" — 보류(ON_HOLD) 등록·해제·취소 이력.
+// REWORK(불량 재작업, WipUnit.status=REWORK)와는 완전히 별개 흐름이며, 이 모델은
+// dispositionDefects/completeRework의 책임(재작업 종결)을 절대 건드리지 않는다.
+// 진행 방식은 WipMovement(HOLD/RELEASED movementType)로도 표현 가능하지만, "누가 어떤
+// 사유로/어떤 이전상태에서 보류했고 언제 해제·취소됐는지"를 조회 가능한 형태로 추적하려면
+// WipMovement 단독으로는 부족해 이 모델을 별도로 둔다(WipMovement는 이 모델의 액션마다
+// 보조적으로 함께 기록해 LOT 추적 화면의 이동이력에도 노출되게 한다).
+model WipHold {
+  id              String        @id @default(cuid())
+  tenantId        String
+  siteId          String?
+  wipUnitId       String
+  previousStatus  WipUnitStatus
+  status          WipHoldStatus @default(ACTIVE)
+  reason          String
+  note            String?
+  heldAt          DateTime      @default(now())
+  heldById        String?
+  heldByName      String?
+  releasedAt      DateTime?
+  releasedById    String?
+  releasedByName  String?
+  releaseNote     String?
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledByName String?
+  cancelNote      String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  site    Site?   @relation(fields: [siteId], references: [id])
+  wipUnit WipUnit @relation(fields: [wipUnitId], references: [id])
+
+  @@index([tenantId, wipUnitId])
+  @@index([tenantId, status])
+  @@index([wipUnitId, status])
+  @@index([tenantId, heldAt])
+}
+
+model ProductionResult {
+  id                             String    @id @default(cuid())
+  workOrderOperationId           String
+  workOrderOperationAssignmentId String?
+  goodQty                        Decimal   @default(0) @db.Decimal(18, 6)
+  defectQty                      Decimal   @default(0) @db.Decimal(18, 6)
+  reworkQty                      Decimal   @default(0) @db.Decimal(18, 6)
+  startedAt                      DateTime?
+  endedAt                        DateTime?
+  operatorId                     String?
+
+  workOrderOperation           WorkOrderOperation            @relation(fields: [workOrderOperationId], references: [id])
+  workOrderOperationAssignment WorkOrderOperationAssignment? @relation(fields: [workOrderOperationAssignmentId], references: [id])
+  sourceWipUnits               WipUnit[]                     @relation("WipUnitSourceProductionResult")
+  operator                     Profile?                      @relation("ProductionResultOperator", fields: [operatorId], references: [id], onDelete: SetNull)
+  equipmentUsageHistories      EquipmentUsageHistory[]
+
+  @@index([workOrderOperationId])
+  @@index([workOrderOperationAssignmentId])
+  @@index([operatorId])
+}
+
+model FinishedGoodsReceipt {
+  id          String   @id @default(cuid())
+  tenantId    String
+  siteId      String
+  workOrderId String
+  itemId      String
+  lotId       String?
+  warehouseId String
+  locationId  String
+  receiptQty  Decimal  @db.Decimal(18, 6)
+  receiptAt   DateTime @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  site      Site      @relation(fields: [siteId], references: [id])
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id])
+  item      Item      @relation(fields: [itemId], references: [id])
+  lot       Lot?      @relation(fields: [lotId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  location  Location  @relation(fields: [locationId], references: [id])
+
+  @@index([tenantId])
+  @@index([siteId])
+  @@index([workOrderId])
+  @@index([itemId])
+  @@index([lotId])
+  @@index([tenantId, siteId, receiptAt])
+  @@index([warehouseId, locationId])
+}
+
+enum InspectionStage {
+  FIRST
+  MID
+  FINAL
+}
+
+model QualityInspection {
+  id                   String            @id @default(cuid())
+  workOrderOperationId String
+  inspectionSpecId     String
+  inspectorId          String
+  stage                InspectionStage   @default(MID)
+  result               InspectionResult?
+  inspectedQty         Decimal           @db.Decimal(18, 6)
+  inspectedAt          DateTime          @default(now())
+  lotId                String?
+
+  workOrderOperation WorkOrderOperation @relation(fields: [workOrderOperationId], references: [id])
+  inspectionSpec     InspectionSpec     @relation(fields: [inspectionSpecId], references: [id])
+  inspector          Profile            @relation(fields: [inspectorId], references: [id])
+  lot                Lot?               @relation(fields: [lotId], references: [id])
+
+  defectRecords DefectRecord[]
+  measurements  InspectionMeasurement[]
+
+  @@index([workOrderOperationId])
+  @@index([inspectionSpecId])
+  @@index([inspectorId])
+  @@index([lotId])
+  @@index([lotId, inspectedAt])
+  @@index([workOrderOperationId, inspectedAt])
+  @@index([inspectorId, inspectedAt])
+}
+
+// ─── 청운커팅 사업계획서 "품질검사 > SPC 통계분석" 선행 PR(#53) ──────────────────
+//
+// SPC 계산/Profile/차트는 후속 PR(#54)에서 다룬다. 이번 PR은 그 전제조건인
+// "검사항목별 실제 측정값 정본"만 구축한다 — QualityInspection은 검사 이벤트(건)
+// 전체 판정만 갖고, InspectionItem은 규격(LSL/USL) 템플릿만 가질 뿐 실측값을
+// 저장할 곳이 없었다(사업계획서 감사 결과 확인). 이 모델이 그 간극을 메운다.
+//
+// lowerLimitSnapshot/upperLimitSnapshot/itemNameSnapshot/inputTypeSnapshot/
+// unitSnapshot: InspectionItem을 그대로 참조하지 않고 값을 복제해 두는 이유는
+// upsertInspectionItems()가 항목을 deleteMany+createMany로 통째로 교체하는
+// 기존 동작 때문이다(버전 개념과 무관하게 id/lowerLimit/upperLimit이 언제든
+// 재생성될 수 있음). 과거 측정값의 판정 기준이 나중에 규격이 바뀌었다는 이유로
+// 흔들리는 것을 막기 위해 측정 시점 값을 서버가 직접 스냅샷한다(quality.actions.ts
+// createQualityInspection 참조). 이 스냅샷 때문에라도 사용 이력이 있는 항목은
+// upsertInspectionItems/deleteInspectionItem에서 수정·삭제를 막는다(DB FK도
+// RESTRICT로 동일 목적을 이중 보장).
+model InspectionMeasurement {
+  id                  String @id @default(cuid())
+  tenantId            String
+  qualityInspectionId String
+  inspectionItemId    String
+  sampleNo            Int    @default(1)
+
+  numericValue Decimal? @db.Decimal(18, 6)
+  textValue    String?
+  booleanValue Boolean?
+
+  lowerLimitSnapshot Decimal?            @db.Decimal(18, 6)
+  upperLimitSnapshot Decimal?            @db.Decimal(18, 6)
+  itemNameSnapshot   String
+  inputTypeSnapshot  InspectionInputType
+  unitSnapshot       String?
+
+  judgement InspectionJudgement?
+
+  measuredAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant            Tenant            @relation(fields: [tenantId], references: [id])
+  qualityInspection QualityInspection @relation(fields: [qualityInspectionId], references: [id])
+  inspectionItem    InspectionItem    @relation(fields: [inspectionItemId], references: [id])
+
+  @@unique([qualityInspectionId, inspectionItemId, sampleNo])
+  @@index([tenantId, measuredAt])
+  @@index([tenantId, inspectionItemId, measuredAt])
+  @@index([qualityInspectionId])
+  @@index([inspectionItemId])
+}
+
+// ─── 청운커팅 사업계획서 "품질검사 > SPC 통계분석" (PR #54) ──────────────────
+//
+// SpcProfile은 "어떤 NUMERIC 검사항목을 SPC 관리도로 볼지"를 지정하는 메타데이터일
+// 뿐, 통계 결과 자체를 저장하지 않는다 — 관리도/Cp·Cpk/Histogram은 항상
+// InspectionMeasurement(numericValue/lowerLimitSnapshot/upperLimitSnapshot)를
+// 원본으로 매번 재계산한다(spc-calculations.ts 참조). 규격이 나중에 바뀌어도
+// 과거 계산 결과가 스냅샷과 다르게 흔들리지 않도록 하기 위함이며, PR #53에서
+// 세운 "판정 기준은 항상 measurement 시점 snapshot" 원칙과 동일하다.
+model SpcProfile {
+  id               String              @id @default(cuid())
+  tenantId         String
+  inspectionItemId String
+  name             String
+  controlChartType SpcControlChartType @default(I_MR)
+  isActive         Boolean             @default(true)
+  createdById      String
+  updatedById      String
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id])
+  inspectionItem InspectionItem @relation(fields: [inspectionItemId], references: [id])
+  createdBy      Profile        @relation("SpcProfileCreator", fields: [createdById], references: [id])
+  updatedBy      Profile        @relation("SpcProfileUpdater", fields: [updatedById], references: [id])
+
+  @@unique([tenantId, inspectionItemId, name])
+  @@index([tenantId])
+  @@index([tenantId, isActive])
+  @@index([inspectionItemId])
+}
+
+model DefectRecord {
+  id                  String             @id @default(cuid())
+  qualityInspectionId String
+  defectCodeId        String
+  qty                 Decimal            @db.Decimal(18, 6)
+  severity            DefectSeverity     @default(MAJOR)
+  disposition         DefectDisposition?
+
+  qualityInspection     QualityInspection            @relation(fields: [qualityInspectionId], references: [id])
+  defectCode            DefectCode                   @relation(fields: [defectCodeId], references: [id])
+  causeAnalysis         DefectCauseAnalysis?
+  correctiveActions     DefectCorrectiveAction[]
+  recurrencePreventions DefectRecurrencePrevention[]
+
+  @@index([qualityInspectionId])
+  @@index([defectCodeId])
+}
+
+// ─── 청운커팅 사업계획서 "품질검사 > 원인분석" (PR #55) ──────────────────────
+//
+// DefectRecord 1건당 최대 1건의 원인분석만 존재한다(1:0..1, @unique(defectRecordId)).
+// QualityInspection 단위나 별도 QualityIssue 상위 사건으로 앵커링하지 않는다 —
+// 한 검사에 서로 다른 defectCode가 여러 건 섞여도(§ DefectRecord 주석 참조) 근본
+// 원인은 불량 건마다 다를 수 있어, 가장 구체적인 단위인 DefectRecord에 붙인다.
+// 통계 결과나 조치/재발방지 이력을 이 모델에 얹지 않는다 — "기록"은 이 row를
+// 직접 update하고 AuditLog(entityType="DefectCauseAnalysis")로 변경 이력만 남긴다
+// (SpcProfile과 동일 패턴, 별도 revision 테이블 없음).
+model DefectCauseAnalysis {
+  id             String @id @default(cuid())
+  tenantId       String
+  defectRecordId String @unique
+
+  rootCause      String
+  analysisDetail String?
+
+  createdById String
+  updatedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  defectRecord DefectRecord @relation(fields: [defectRecordId], references: [id])
+  createdBy    Profile      @relation("DefectCauseAnalysisCreator", fields: [createdById], references: [id])
+  updatedBy    Profile      @relation("DefectCauseAnalysisUpdater", fields: [updatedById], references: [id])
+
+  @@index([tenantId])
+}
+
+// ─── 청운커팅 사업계획서 "품질검사 > 조치관리" ──────────────────────────────
+//
+// 불량 발생 → 원인분석 → 조치 등록 → 담당자 지정 → 완료기한 관리 → 조치 진행
+// → 조치 완료 흐름 중 "조치 등록 ~ 조치 완료" 구간을 담당한다. 재발방지관리
+// (효과성 검증/재발 여부 평가/CAPA 종료판정)는 별도 기능으로 분리하며 이
+// 모델에 필드를 얹지 않는다.
+//
+// DefectRecord 1건에 여러 조치가 있을 수 있어 1:N으로 둔다(원인분석과 달리
+// @unique(defectRecordId) 없음). 원인분석(DefectCauseAnalysis)은 이 모델에서
+// 참조만 하고 절대 수정하지 않는다 — 원인분석 수정은 기존 원인분석 화면에서만.
+//
+// 기한초과는 DB에 별도 컬럼/상태로 저장하지 않는다 — 조회 시점에
+// `dueDate < today && status !== COMPLETED` 로 화면에서 계산한다.
+// 삭제 기능은 제공하지 않는다(품질 추적성/감사 증빙 목적, DefectCauseAnalysis와
+// 동일 정책) — 변경은 update와 상태전이만 가능하며 AuditLog에 이력을 남긴다.
+model DefectCorrectiveAction {
+  id             String @id @default(cuid())
+  tenantId       String
+  defectRecordId String
+
+  actionContent String
+  assigneeId    String?
+  dueDate       DateTime
+
+  status CorrectiveActionStatus @default(OPEN)
+
+  completedAt    DateTime?
+  completionNote String?
+
+  createdById String
+  updatedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  defectRecord DefectRecord @relation(fields: [defectRecordId], references: [id])
+  assignee     Profile?     @relation("DefectCorrectiveActionAssignee", fields: [assigneeId], references: [id])
+  createdBy    Profile      @relation("DefectCorrectiveActionCreator", fields: [createdById], references: [id])
+  updatedBy    Profile      @relation("DefectCorrectiveActionUpdater", fields: [updatedById], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, dueDate])
+  @@index([defectRecordId])
+  @@index([assigneeId])
+}
+
+// ─── 청운커팅 사업계획서 "품질검사 > 재발방지관리" ──────────────────────────
+//
+// 불량 발생 → 원인분석 → 조치관리("현재 발생한 문제를 바로잡는 조치") →
+// 재발방지관리("같은 원인으로 재발하지 않도록 표준/공정/점검/교육 등을
+// 개선하고, 그 대책이 실제 효과가 있었는지 검증하는 단계") 흐름의 마지막
+// 구간을 담당한다.
+//
+// DefectRecord 1건에 여러 재발방지 대책이 있을 수 있어 조치관리와 동일하게
+// 1:N으로 둔다(@unique(defectRecordId) 없음). 원인분석/조치관리는 이 모델에서
+// 참조만 하고 절대 수정하지 않는다 — 각각의 원본 화면에서만 관리한다.
+// DefectCorrectiveAction으로의 FK는 두지 않는다 — 선행조건 확인은
+// defectRecordId를 통해 원인분석/조치 존재 여부를 조회하는 것으로 충분하고,
+// 화면 이동 편의만을 위한 FK는 만들지 않는다(§ actions 파일의
+// assertRecurrencePreventionPrerequisites 참조).
+//
+// 상태는 "대책 수행"과 "효과성 검증"을 구분하기 위해 조치관리보다 한 단계
+// 많다: OPEN(등록) → IN_PROGRESS(대책 수행 중) → VERIFYING(검증 중) →
+// COMPLETED(효과 확인 및 종료). 효과성 검증 결과가 EFFECTIVE일 때만
+// COMPLETED로 전이하며, 이때 completedAt을 서버에서 자동 기록한다.
+// INEFFECTIVE면 COMPLETED로 전이하지 않고 IN_PROGRESS로 되돌려 추가 대책을
+// 수행하게 한다 — 검증 이력은 최신 1건만 이 row에 스냅샷으로 보관한다(별도
+// 이력 테이블 없음, DefectCauseAnalysis와 동일한 "단일 row 갱신 + AuditLog로
+// 변경 이력 추적" 패턴).
+//
+// 기한초과는 DB에 별도 컬럼/상태로 저장하지 않는다 — 조치관리와 동일하게
+// `dueDate < today && status !== COMPLETED`를 조회 시점에 계산한다.
+// 삭제 기능은 제공하지 않는다(품질 추적성/감사 증빙 목적, DefectCauseAnalysis/
+// DefectCorrectiveAction과 동일 정책) — 변경은 update와 상태전이만 가능하며
+// AuditLog에 이력을 남긴다.
+model DefectRecurrencePrevention {
+  id             String @id @default(cuid())
+  tenantId       String
+  defectRecordId String
+
+  preventionContent String
+  assigneeId        String?
+  dueDate           DateTime
+
+  status RecurrencePreventionStatus @default(OPEN)
+
+  verificationContent String?
+  verificationResult  VerificationResult?
+  verifierId          String?
+  verifiedAt          DateTime?
+
+  completedAt DateTime?
+
+  createdById String
+  updatedById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id])
+  defectRecord DefectRecord @relation(fields: [defectRecordId], references: [id])
+  assignee     Profile?     @relation("DefectRecurrencePreventionAssignee", fields: [assigneeId], references: [id])
+  verifier     Profile?     @relation("DefectRecurrencePreventionVerifier", fields: [verifierId], references: [id])
+  createdBy    Profile      @relation("DefectRecurrencePreventionCreator", fields: [createdById], references: [id])
+  updatedBy    Profile      @relation("DefectRecurrencePreventionUpdater", fields: [updatedById], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, dueDate])
+  @@index([defectRecordId])
+  @@index([assigneeId])
+}
+
+model LotGenealogy {
+  id           String               @id @default(cuid())
+  parentLotId  String
+  childLotId   String
+  relationType LotGenealogyRelation @default(OUTPUT)
+  qty          Decimal              @db.Decimal(18, 6)
+
+  parentLot Lot @relation("ParentLot", fields: [parentLotId], references: [id])
+  childLot  Lot @relation("ChildLot", fields: [childLotId], references: [id])
+
+  @@unique([parentLotId, childLotId, relationType])
+  @@index([parentLotId])
+  @@index([childLotId])
+}
+
+model AuditLog {
+  id         String         @id @default(cuid())
+  tenantId   String
+  actorId    String?
+  actorType  AuditActorType @default(USER)
+  actorLabel String?
+  entityType String
+  entityId   String
+  action     AuditAction
+  beforeData Json?
+  afterData  Json?
+  ipAddress  String?
+  userAgent  String?
+  menuName   String?
+  actedAt    DateTime       @default(now())
+
+  tenant Tenant   @relation(fields: [tenantId], references: [id])
+  actor  Profile? @relation(fields: [actorId], references: [id])
+
+  @@index([tenantId])
+  @@index([actorId])
+  @@index([entityType, entityId])
+  @@index([actedAt])
+  @@index([tenantId, entityType, entityId, actedAt])
+}
+
+model ApprovalRequest {
+  id          String         @id @default(cuid())
+  tenantId    String
+  requesterId String
+  approverId  String?
+  requestType String
+  targetType  String
+  targetId    String
+  status      ApprovalStatus @default(PENDING)
+  requestedAt DateTime       @default(now())
+  approvedAt  DateTime?
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  requester Profile  @relation("Requester", fields: [requesterId], references: [id])
+  approver  Profile? @relation("Approver", fields: [approverId], references: [id])
+
+  @@index([tenantId])
+  @@index([requesterId])
+  @@index([approverId])
+  @@index([status])
+  @@index([status, requestedAt])
+  @@index([tenantId, targetType, targetId])
+}
+
+model ProductionPlan {
+  id        String     @id @default(cuid())
+  tenantId  String
+  siteId    String
+  planNo    String
+  planType  PlanType
+  startDate DateTime
+  endDate   DateTime
+  status    PlanStatus @default(DRAFT)
+  note      String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  tenant Tenant               @relation(fields: [tenantId], references: [id])
+  site   Site                 @relation(fields: [siteId], references: [id])
+  items  ProductionPlanItem[]
+
+  @@unique([tenantId, planNo])
+  @@index([tenantId])
+  @@index([siteId])
+  @@index([status])
+}
+
+model ProductionPlanItem {
+  id         String  @id @default(cuid())
+  planId     String
+  itemId     String
+  bomId      String?
+  routingId  String?
+  plannedQty Decimal @db.Decimal(18, 6)
+  note       String?
+
+  salesOrderItemId String?
+
+  plan           ProductionPlan  @relation(fields: [planId], references: [id])
+  item           Item            @relation(fields: [itemId], references: [id])
+  bom            BOM?            @relation(fields: [bomId], references: [id])
+  routing        Routing?        @relation(fields: [routingId], references: [id])
+  workOrders     WorkOrder[]
+  salesOrderItem SalesOrderItem? @relation(fields: [salesOrderItemId], references: [id])
+
+  @@unique([planId, itemId])
+  @@index([planId])
+  @@index([itemId])
+}
+
+model CodeGroup {
+  id          String   @id @default(cuid())
+  tenantId    String
+  groupCode   String
+  groupName   String
+  description String?
+  isSystem    Boolean  @default(false)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant       @relation(fields: [tenantId], references: [id])
+  codes  CommonCode[]
+
+  @@unique([tenantId, groupCode])
+  @@index([tenantId])
+}
+
+model CommonCode {
+  id           String   @id @default(cuid())
+  groupId      String
+  code         String
+  name         String
+  description  String?
+  displayOrder Int      @default(0)
+  isActive     Boolean  @default(true)
+  extra        Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  group CodeGroup @relation(fields: [groupId], references: [id])
+
+  downtimeRecords EquipmentDowntime[] @relation("DowntimeReason")
+
+  @@unique([groupId, code])
+  @@index([groupId])
+}
+
+model RolePermission {
+  id        String           @id @default(cuid())
+  tenantId  String
+  role      UserRole
+  resource  String
+  action    PermissionAction
+  isAllowed Boolean          @default(true)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, role, resource, action])
+  @@index([tenantId])
+  @@index([role])
+  @@index([resource])
+}
+
+model FeatureDefinition {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  name         String
+  description  String?
+  category     String
+  icon         String?
+  menuCodes    String[]
+  isCore       Boolean  @default(false)
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  dependencies   FeatureDependency[]  @relation("Feature")
+  dependedBy     FeatureDependency[]  @relation("DependsOn")
+  requirements   FeatureRequirement[]
+  tenantFeatures TenantFeature[]
+}
+
+model FeatureDependency {
+  id          String  @id @default(cuid())
+  featureId   String
+  dependsOnId String
+  isRequired  Boolean @default(true)
+
+  feature   FeatureDefinition @relation("Feature", fields: [featureId], references: [id])
+  dependsOn FeatureDefinition @relation("DependsOn", fields: [dependsOnId], references: [id])
+
+  @@unique([featureId, dependsOnId])
+}
+
+model FeatureRequirement {
+  id          String  @id @default(cuid())
+  featureId   String
+  type        String
+  target      String
+  description String?
+
+  feature FeatureDefinition @relation(fields: [featureId], references: [id])
+
+  @@index([featureId])
+}
+
+model TenantFeature {
+  id        String   @id @default(cuid())
+  tenantId  String
+  featureId String
+  isEnabled Boolean  @default(true)
+  enabledAt DateTime @default(now())
+  config    Json?
+
+  tenant  Tenant            @relation(fields: [tenantId], references: [id])
+  feature FeatureDefinition @relation(fields: [featureId], references: [id])
+
+  @@unique([tenantId, featureId])
+  @@index([tenantId])
+}
+
+// ─── Equipment Integration ────────────────────────────────────────────────────
+
+model EdgeGateway {
+  id            String        @id @default(cuid())
+  tenantId      String
+  siteId        String
+  name          String
+  description   String?
+  apiKey        String        @unique @default(cuid())
+  status        GatewayStatus @default(OFFLINE)
+  lastHeartbeat DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  tenant      Tenant                @relation(fields: [tenantId], references: [id])
+  site        Site                  @relation(fields: [siteId], references: [id])
+  connections EquipmentConnection[]
+
+  @@index([tenantId])
+}
+
+model EquipmentConnection {
+  id          String             @id @default(cuid())
+  equipmentId String
+  gatewayId   String
+  protocol    ConnectionProtocol
+  host        String?
+  port        Int?
+  config      Json?
+  isActive    Boolean            @default(true)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  equipment Equipment   @relation(fields: [equipmentId], references: [id])
+  gateway   EdgeGateway @relation(fields: [gatewayId], references: [id])
+  tags      DataTag[]
+
+  @@unique([equipmentId, gatewayId])
+}
+
+model DataTag {
+  id           String      @id @default(cuid())
+  connectionId String
+  tagCode      String
+  displayName  String
+  dataType     TagDataType
+  unit         String?
+  category     TagCategory
+  plcAddress   String
+  scaleFactor  Decimal?    @db.Decimal(18, 6)
+  offset       Decimal?    @db.Decimal(18, 6)
+  samplingMs   Int         @default(1000)
+  deadband     Decimal?    @db.Decimal(18, 6)
+  isActive     Boolean     @default(true)
+  isEnabled    Boolean     @default(true) @map("is_enabled")
+  isVisible    Boolean     @default(true) @map("is_visible")
+  isPrimary    Boolean     @default(false) @map("is_primary")
+  displayOrder Int         @default(0) @map("display_order")
+  source       String?     @map("source")
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  connection   EquipmentConnection @relation(fields: [connectionId], references: [id])
+  snapshots    TagSnapshot[]
+  currentValue TagCurrentValue?
+
+  @@unique([connectionId, tagCode])
+  @@index([connectionId])
+}
+
+model TagSnapshot {
+  id        String   @id @default(cuid())
+  tagId     String
+  value     String
+  quality   String   @default("GOOD")
+  timestamp DateTime @default(now())
+
+  tag DataTag @relation(fields: [tagId], references: [id])
+
+  @@index([tagId, timestamp])
+}
+
+model TagCurrentValue {
+  id           String   @id @default(cuid())
+  tagId        String   @unique
+  value        String
+  numericValue Decimal? @db.Decimal(18, 6)
+  quality      String   @default("GOOD")
+  timestamp    DateTime
+
+  tag DataTag @relation(fields: [tagId], references: [id])
+}
+
+model EquipmentEvent {
+  id          String             @id @default(cuid())
+  equipmentId String
+  eventType   EquipmentEventType
+  message     String?
+  startedAt   DateTime           @default(now())
+  endedAt     DateTime?
+  duration    Int?
+
+  equipment      Equipment          @relation(fields: [equipmentId], references: [id])
+  downtimeRecord EquipmentDowntime? @relation("EquipmentEventDowntime")
+
+  @@index([equipmentId, startedAt])
+}
+
+// ─── Phase 2d-5: 영업관리 ─────────────────────────────────────────────────────
+
+enum SalesOrderStatus {
+  DRAFT
+  CONFIRMED
+  IN_PRODUCTION
+  PARTIAL_SHIPPED
+  SHIPPED
+  CLOSED
+  CANCELLED
+}
+
+enum ShipmentStatus {
+  PLANNED
+  PICKED
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+model SalesOrder {
+  id           String           @id @default(cuid())
+  tenantId     String
+  siteId       String
+  customerId   String
+  orderNo      String
+  orderDate    DateTime
+  deliveryDate DateTime
+  status       SalesOrderStatus @default(DRAFT)
+  totalAmount  Decimal?         @db.Decimal(18, 2)
+  currency     String           @default("KRW")
+  note         String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  tenant             Tenant              @relation("TenantSalesOrders", fields: [tenantId], references: [id])
+  site               Site                @relation("SiteSalesOrders", fields: [siteId], references: [id])
+  customer           BusinessPartner     @relation("CustomerSalesOrders", fields: [customerId], references: [id])
+  items              SalesOrderItem[]
+  shipments          ShipmentOrder[]
+  projectOrders      ProjectOrder[]      @relation("SalesOrderProjectOrders")
+  projectOrderPrices ProjectOrderPrice[] @relation("SalesOrderProjectOrderPrices")
+
+  @@unique([tenantId, orderNo])
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([status])
+  @@index([tenantId, deliveryDate])
+}
+
+model SalesOrderItem {
+  id           String    @id @default(cuid())
+  salesOrderId String
+  itemId       String
+  qty          Decimal   @db.Decimal(18, 6)
+  unitPrice    Decimal?  @db.Decimal(18, 2)
+  deliveryDate DateTime?
+  producedQty  Decimal   @default(0) @db.Decimal(18, 6)
+  shippedQty   Decimal   @default(0) @db.Decimal(18, 6)
+  note         String?
+
+  salesOrder          SalesOrder           @relation(fields: [salesOrderId], references: [id])
+  item                Item                 @relation("ItemSalesOrderItems", fields: [itemId], references: [id])
+  productionPlanItems ProductionPlanItem[]
+  shipmentItems       ShipmentItem[]
+
+  @@unique([salesOrderId, itemId])
+  @@index([salesOrderId])
+  @@index([itemId])
+}
+
+model ShipmentOrder {
+  id            String         @id @default(cuid())
+  tenantId      String
+  siteId        String
+  salesOrderId  String
+  shipmentNo    String
+  status        ShipmentStatus @default(PLANNED)
+  plannedDate   DateTime
+  shippedDate   DateTime?
+  deliveredDate DateTime?
+  warehouseId   String?
+  note          String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  tenant     Tenant         @relation("TenantShipmentOrders", fields: [tenantId], references: [id])
+  site       Site           @relation("SiteShipmentOrders", fields: [siteId], references: [id])
+  salesOrder SalesOrder     @relation(fields: [salesOrderId], references: [id])
+  warehouse  Warehouse?     @relation("WarehouseShipments", fields: [warehouseId], references: [id])
+  items      ShipmentItem[]
+
+  @@unique([tenantId, shipmentNo])
+  @@index([tenantId])
+  @@index([salesOrderId])
+}
+
+model ShipmentItem {
+  id               String  @id @default(cuid())
+  shipmentOrderId  String
+  salesOrderItemId String
+  itemId           String
+  qty              Decimal @db.Decimal(18, 6)
+  lotId            String?
+
+  shipmentOrder  ShipmentOrder  @relation(fields: [shipmentOrderId], references: [id])
+  salesOrderItem SalesOrderItem @relation(fields: [salesOrderItemId], references: [id])
+  item           Item           @relation("ItemShipmentItems", fields: [itemId], references: [id])
+  lot            Lot?           @relation("LotShipmentItems", fields: [lotId], references: [id])
+
+  @@index([shipmentOrderId])
+  @@index([salesOrderItemId])
+}
+
+// ─── Phase 2d-6: 구매관리 ─────────────────────────────────────────────────────
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIAL_RECEIVED
+  RECEIVED
+  CLOSED
+  CANCELLED
+}
+
+enum ReceivingInspectionResult {
+  PASS
+  FAIL
+  CONDITIONAL
+}
+
+model PurchaseOrder {
+  id           String              @id @default(cuid())
+  tenantId     String
+  siteId       String
+  supplierId   String
+  orderNo      String
+  orderDate    DateTime
+  expectedDate DateTime
+  status       PurchaseOrderStatus @default(DRAFT)
+  totalAmount  Decimal?            @db.Decimal(18, 2)
+  currency     String              @default("KRW")
+  note         String?
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  tenant                Tenant                 @relation("TenantPurchaseOrders", fields: [tenantId], references: [id])
+  site                  Site                   @relation("SitePurchaseOrders", fields: [siteId], references: [id])
+  supplier              BusinessPartner        @relation("SupplierPurchaseOrders", fields: [supplierId], references: [id])
+  items                 PurchaseOrderItem[]
+  lotNumberReservations LotNumberReservation[]
+  materialReturns       MaterialReturn[]
+
+  @@unique([tenantId, orderNo])
+  @@index([tenantId])
+  @@index([supplierId])
+  @@index([status])
+}
+
+model PurchaseOrderItem {
+  id                   String  @id @default(cuid())
+  purchaseOrderId      String
+  itemId               String
+  workOrderOperationId String?
+  qty                  Decimal @db.Decimal(18, 6)
+  unitPrice            Decimal @db.Decimal(18, 2)
+  receivedQty          Decimal @default(0) @db.Decimal(18, 6)
+  stockAtOrder         Decimal @default(0) @db.Decimal(18, 6)
+  note                 String?
+
+  purchaseOrder         PurchaseOrder          @relation(fields: [purchaseOrderId], references: [id])
+  item                  Item                   @relation("ItemPurchaseOrderItems", fields: [itemId], references: [id])
+  workOrderOperation    WorkOrderOperation?    @relation("OutsourcingOperationPurchaseItems", fields: [workOrderOperationId], references: [id])
+  receivingInspections  ReceivingInspection[]
+  lotNumberReservations LotNumberReservation[]
+  materialReturnItems   MaterialReturnItem[]
+
+  @@unique([purchaseOrderId, itemId])
+  @@index([purchaseOrderId])
+  @@index([itemId])
+  @@index([workOrderOperationId])
+}
+
+model ReceivingInspection {
+  id                  String                    @id @default(cuid())
+  purchaseOrderItemId String
+  inspectorId         String?
+  receivedQty         Decimal                   @db.Decimal(18, 6)
+  acceptedQty         Decimal                   @db.Decimal(18, 6)
+  rejectedQty         Decimal                   @default(0) @db.Decimal(18, 6)
+  result              ReceivingInspectionResult
+  inspectedAt         DateTime                  @default(now())
+  note                String?
+
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id])
+  inspector         Profile?          @relation("ReceivingInspector", fields: [inspectorId], references: [id])
+
+  @@index([purchaseOrderItemId])
+}
+
+// ─── 청운커팅 사업계획서 "자재관리 > 반품관리" (PR #50) ────────────────────────
+//
+// 정상 입고되어 회사 재고가 된 자재를 공급사에 반품하는 업무만 다룬다. 입고검사
+// 불합격 수량의 공급사 반송(ReceivingInspection.rejectedQty 처리)은 별개 워크플로
+// 이며 이번 PR의 범위가 아니다 — 이 모델은 이미 InventoryBalance에 반영된
+// 가용재고를 outbound(-)로 차감하는 케이스만 다룬다.
+//
+// MaterialReturnStatus는 DRAFT/COMPLETED/CANCELLED 3개만 사용한다. 별도의
+// 전자결재/승인 워크플로(CONFIRMED 등 중간 상태)는 만들지 않는다 — COMPLETED
+// 전환 자체가 재고차감을 트리거하는 단일 승인 지점이다(권한: MANAGER 이상).
+enum MaterialReturnStatus {
+  DRAFT
+  COMPLETED
+  CANCELLED
+}
+
+model MaterialReturn {
+  id              String               @id @default(cuid())
+  tenantId        String
+  // 반품 건 전체를 하나의 사업장으로 고정한다 — 품목별 warehouse/LOT 재고 조회와
+  // PO 연계 검증이 모두 이 siteId 기준으로 스코프된다(§4). 한 반품 건에 여러
+  // 사업장의 재고가 섞이는 것을 막기 위한 필수 필드다.
+  siteId          String
+  supplierId      String
+  purchaseOrderId String?
+  returnNo        String // 반품번호, 예: SR-2026-001
+  status          MaterialReturnStatus @default(DRAFT)
+  reason          String?
+  note            String?
+  createdById     String
+  // COMPLETED 전환 시각/주체만 기록한다 — confirmedById/confirmedAt은 만들지 않는다(중간
+  // 승인 단계가 없으므로). CANCELLED는 DRAFT에서만 가능한 단순 종료이므로 별도의
+  // cancelledById/cancelledAt 컬럼 없이 AuditLog(actorId/actedAt)로 충분히 추적된다.
+  completedById   String?
+  completedAt     DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  tenant        Tenant               @relation(fields: [tenantId], references: [id])
+  site          Site                 @relation(fields: [siteId], references: [id])
+  supplier      BusinessPartner      @relation("SupplierMaterialReturns", fields: [supplierId], references: [id])
+  purchaseOrder PurchaseOrder?       @relation(fields: [purchaseOrderId], references: [id])
+  createdBy     Profile              @relation("MaterialReturnCreator", fields: [createdById], references: [id])
+  completedBy   Profile?             @relation("MaterialReturnCompleter", fields: [completedById], references: [id])
+  items         MaterialReturnItem[]
+
+  @@unique([tenantId, returnNo])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([siteId])
+  @@index([supplierId])
+  @@index([purchaseOrderId])
+}
+
+model MaterialReturnItem {
+  id                     String  @id @default(cuid())
+  materialReturnId       String
+  itemId                 String
+  purchaseOrderItemId    String?
+  // LOT 관리 품목은 기존 LOT 선택만 허용한다(신규 LOT 생성 금지) — 비LOT 품목은 null.
+  lotId                  String?
+  warehouseId            String
+  returnQty              Decimal @db.Decimal(18, 6)
+  note                   String?
+  // COMPLETED 전환 시 생성되는 SUPPLIER_RETURN InventoryTransaction 추적용. DRAFT
+  // 동안은 null이며, 완료 후에는 수정/삭제/취소가 전면 금지되므로 재사용되지 않는다.
+  inventoryTransactionId String? @unique
+
+  materialReturn       MaterialReturn        @relation(fields: [materialReturnId], references: [id], onDelete: Cascade)
+  item                 Item                  @relation(fields: [itemId], references: [id])
+  purchaseOrderItem    PurchaseOrderItem?    @relation(fields: [purchaseOrderItemId], references: [id])
+  lot                  Lot?                  @relation(fields: [lotId], references: [id])
+  warehouse            Warehouse             @relation(fields: [warehouseId], references: [id])
+  inventoryTransaction InventoryTransaction? @relation(fields: [inventoryTransactionId], references: [id])
+
+  @@index([materialReturnId])
+  @@index([itemId])
+  @@index([purchaseOrderItemId])
+  @@index([lotId])
+  @@index([warehouseId])
+}
+
+model ItemPrice {
+  id            String    @id @default(cuid())
+  tenantId      String
+  itemId        String
+  partnerId     String
+  priceType     String
+  unitPrice     Decimal   @db.Decimal(18, 2)
+  currency      String    @default("KRW")
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  note          String?
+  createdAt     DateTime  @default(now())
+
+  tenant  Tenant          @relation("TenantItemPrices", fields: [tenantId], references: [id])
+  item    Item            @relation("ItemPrices", fields: [itemId], references: [id])
+  partner BusinessPartner @relation("PartnerPrices", fields: [partnerId], references: [id])
+
+  @@index([tenantId, itemId, partnerId])
+  @@index([tenantId, priceType])
+}
+
+// ─── Phase 2d-AI: AI 사용량 로그 ────────────────────────────────────────────
+
+model AIUsageLog {
+  id               String   @id @default(cuid())
+  tenantId         String
+  feature          String
+  model            String
+  promptTokens     Int
+  completionTokens Int
+  totalTokens      Int
+  costEstimate     Decimal? @db.Decimal(10, 6)
+  requestSummary   String?
+  createdAt        DateTime @default(now())
+
+  tenant Tenant @relation("TenantAIUsageLogs", fields: [tenantId], references: [id])
+
+  @@index([tenantId, feature])
+  @@index([tenantId, createdAt])
+  @@index([createdAt])
+}
+
+// ─── Phase 2d-8: 견적관리 ─────────────────────────────────────────────────────
+
+enum QuotationStatus {
+  DRAFT
+  SUBMITTED
+  NEGOTIATING
+  WON
+  LOST
+  EXPIRED
+  CANCELLED
+}
+
+model Quotation {
+  id                    String          @id @default(cuid())
+  tenantId              String
+  siteId                String
+  customerId            String
+  quotationNo           String
+  quotationDate         DateTime
+  validUntil            DateTime
+  status                QuotationStatus @default(DRAFT)
+  totalAmount           Decimal?        @db.Decimal(18, 2)
+  currency              String          @default("KRW")
+  note                  String?
+  convertedSalesOrderId String?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  tenant             Tenant              @relation("TenantQuotations", fields: [tenantId], references: [id])
+  site               Site                @relation("SiteQuotations", fields: [siteId], references: [id])
+  customer           BusinessPartner     @relation("CustomerQuotations", fields: [customerId], references: [id])
+  items              QuotationItem[]
+  projectOrderPrices ProjectOrderPrice[]
+
+  @@unique([tenantId, quotationNo])
+  @@index([tenantId, status])
+  @@index([customerId])
+}
+
+model QuotationItem {
+  id          String  @id @default(cuid())
+  quotationId String
+  itemId      String
+  qty         Decimal @db.Decimal(18, 6)
+  unitPrice   Decimal @db.Decimal(18, 2)
+  note        String?
+
+  quotation Quotation @relation(fields: [quotationId], references: [id])
+  item      Item      @relation("ItemQuotationItems", fields: [itemId], references: [id])
+
+  @@unique([quotationId, itemId])
+  @@index([quotationId])
+  @@index([itemId])
+}
+
+// ─── Phase 2d-8b: 영업관리 — 프로젝트 오더 ───────────────────────────────────────
+//
+// 청운커팅 사업계획서 "영업관리 > 프로젝트 오더": 수주와 생산실행 사이를 잇는
+// 프로젝트 단위 업무 Header. §3 개념도(거래처→수주관리→프로젝트오더)와 §9/§15
+// 필드 목록에 따라 연결 대상은 SalesOrder만 다룬다 — 견적(Quotation) 연동은
+// 이번 PR의 명시적 범위 밖이라 quotationId는 두지 않는다(§22). 견적금액/납품
+// 완료일 등은 이미 SalesOrder/Quotation에 있으므로 여기서 중복 저장하지 않고
+// salesOrderId로만 참조한다 (§4). 프로젝트 진행률/단계/이슈/대금관리는 PR #48+.
+
+enum ProjectOrderStatus {
+  DRAFT
+  CONFIRMED
+  IN_PROGRESS
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum ProjectOrderPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model ProjectOrder {
+  id               String               @id @default(cuid())
+  tenantId         String
+  siteId           String
+  code             String // 프로젝트 오더번호, 예: PROJ-2026-001
+  name             String // 프로젝트명
+  customerId       String
+  itemId           String?
+  salesOrderId     String? // 연결 수주 (수주확정 시)
+  ownerId          String // 담당자
+  priority         ProjectOrderPriority @default(MEDIUM)
+  status           ProjectOrderStatus   @default(DRAFT)
+  plannedStartDate DateTime?
+  dueDate          DateTime?
+  description      String?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+
+  tenant     Tenant             @relation("TenantProjectOrders", fields: [tenantId], references: [id])
+  site       Site               @relation("SiteProjectOrders", fields: [siteId], references: [id])
+  customer   BusinessPartner    @relation("CustomerProjectOrders", fields: [customerId], references: [id])
+  item       Item?              @relation("ItemProjectOrders", fields: [itemId], references: [id])
+  salesOrder SalesOrder?        @relation("SalesOrderProjectOrders", fields: [salesOrderId], references: [id])
+  owner      Profile            @relation("ProjectOrderOwner", fields: [ownerId], references: [id])
+  stages     ProjectStage[]
+  issues     ProjectIssue[]
+  price      ProjectOrderPrice?
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, dueDate])
+  @@index([customerId])
+  @@index([salesOrderId])
+}
+
+// ─── Phase 2d-8c: 프로젝트관리 — 프로젝트 진행현황(ProjectStage) ───────────────────
+//
+// 프로젝트관리 > 프로젝트 진행현황: ProjectOrder 하위의 순차 단계 관리.
+// sourceRoutingOperationId는 "어디서 가져온 단계인지" 추적용 nullable 참조일 뿐,
+// RoutingOperation의 실시간 mirror가 아니다 — 라우팅에서 가져오는 순간 name/seq를
+// snapshot으로 복사해 저장하며, 이후 Routing이 수정되어도 기존 ProjectStage는
+// 자동으로 바뀌지 않는다(§4). 진행률/현재단계/지연여부는 DB에 저장하지 않고
+// 화면/서비스에서 매번 계산한다(§5,§6,§13). 생산실적(ProductionPlan/WorkOrder)과의
+// 직접 FK 연결은 이번 PR 범위 밖이다(§17).
+
+enum ProjectStageStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+model ProjectStage {
+  id                       String             @id @default(cuid())
+  tenantId                 String
+  projectOrderId           String
+  seq                      Int
+  name                     String
+  status                   ProjectStageStatus @default(PENDING)
+  plannedStartDate         DateTime?
+  dueDate                  DateTime?
+  startedAt                DateTime?
+  completedAt              DateTime?
+  sourceRoutingOperationId String? // 가져온 출처 추적용(nullable) — mirror 아님, snapshot임
+  note                     String?
+  createdAt                DateTime           @default(now())
+  updatedAt                DateTime           @updatedAt
+
+  tenant                 Tenant            @relation(fields: [tenantId], references: [id])
+  projectOrder           ProjectOrder      @relation(fields: [projectOrderId], references: [id])
+  sourceRoutingOperation RoutingOperation? @relation(fields: [sourceRoutingOperationId], references: [id])
+
+  @@unique([projectOrderId, seq])
+  @@index([tenantId])
+  @@index([projectOrderId])
+  @@index([sourceRoutingOperationId])
+}
+
+// ─── Phase 2d-8d: 프로젝트관리 — 이슈 관리(ProjectIssue) ────────────────────────
+//
+// 프로젝트관리 > 이슈 관리: ProjectOrder 하위에서 발생하는 문제/리스크를
+// 등록→담당자지정→조치진행→해결 흐름으로 추적한다. 품질검사의 불량 원인분석/
+// 시정조치/재발방지와는 완전히 분리된 별개 도메인이다(품질 불량은 DefectRecord/
+// QualityInspection 쪽 책임) — DefectSeverity 등 품질 enum을 재사용하지 않는다.
+// 이번 PR에서는 ProjectStage와 직접 FK를 연결하지 않는다 — Issue는 ProjectOrder
+// 단위로만 관리한다(향후 특정 단계 연결 요구가 생기면 확장). 지연여부는 DB에
+// 저장하지 않고 화면/서비스에서 매번 계산한다(src/lib/project-issue-calculations.ts).
+
+enum ProjectIssueType {
+  ISSUE
+  RISK
+}
+
+enum ProjectIssueSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ProjectIssueStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+}
+
+model ProjectIssue {
+  id             String               @id @default(cuid())
+  tenantId       String
+  projectOrderId String
+  code           String // 이슈번호, 예: ISS-2026-001
+  type           ProjectIssueType     @default(ISSUE)
+  severity       ProjectIssueSeverity @default(MEDIUM)
+  status         ProjectIssueStatus   @default(OPEN)
+  title          String
+  description    String?
+  assigneeId     String?
+  occurredAt     DateTime
+  dueDate        DateTime?
+  resolution     String?
+  resolvedAt     DateTime?
+  createdById    String
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  tenant       Tenant       @relation("TenantProjectIssues", fields: [tenantId], references: [id])
+  projectOrder ProjectOrder @relation(fields: [projectOrderId], references: [id])
+  assignee     Profile?     @relation("ProjectIssueAssignee", fields: [assigneeId], references: [id])
+  createdBy    Profile      @relation("ProjectIssueCreator", fields: [createdById], references: [id])
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, dueDate])
+  @@index([projectOrderId])
+  @@index([assigneeId])
+}
+
+// ─── 청운커팅 사업계획서 "영업관리 > 프로젝트 단가관리" (PR #52A) ────────────────
+//
+// ProjectOrder에 단가 필드를 직접 얹지 않고 별도 모델로 분리한다 — 견적단가/
+// 수주단가/최종결정단가를 "그 시점의 값 snapshot"으로 보존해야 하고(원본
+// Quotation/SalesOrder가 나중에 수정되어도 과거 분석 결과가 바뀌면 안 됨),
+// ProjectOrder는 이미 book-keeping 책임이 많아 가격 이력까지 얹으면 과밀해진다.
+//
+// ProjectOrder당 현재 단가관리 레코드는 1건뿐이다(@@unique([tenantId,
+// projectOrderId])) — 여러 품목/여러 라인 가격은 다루지 않는다(ProjectOrder
+// 자체가 단일 itemId만 갖는 현재 구조와 대칭).
+//
+// quotationId/salesOrderId는 "이 snapshot이 어느 문서에서 왔는지"를 가리키는
+// 참조일 뿐이고, 실제 비교/집계에 쓰이는 값은 항상 quotationUnitPrice/
+// orderUnitPrice/quantity/currency 컬럼의 snapshot이다 — 원본이 나중에 수정돼도
+// 이 값들은 그대로다. 단, 원본 "삭제"는 값 불변과 별개 문제다: quotationId/
+// salesOrderId FK는 onDelete Restrict이므로, ProjectOrderPrice가 참조하는 동안은
+// 원본 Quotation/SalesOrder를 삭제할 수 없다(source 추적성 보존 — FK가 null이
+// 되면 어느 문서에서 온 snapshot인지 알 수 없어지고 currency/불변성 정책 판단도
+// 깨진다). DRAFT 가격관리 레코드를 먼저 삭제하면 그 뒤로는 원본 삭제가 다시
+// 가능하고, DECIDED는 hard delete를 만들지 않으므로 연결된 source도 가격 이력과
+// 함께 영구 보존된다.
+enum ProjectPriceStatus {
+  DRAFT
+  DECIDED
+}
+
+model ProjectOrderPrice {
+  id             String @id @default(cuid())
+  tenantId       String
+  // ProjectOrder 쪽 1:1 back-relation(price ProjectOrderPrice?)이 유효하려면
+  // Prisma가 이 필드에 @unique를 요구한다 — 아래 @@unique([tenantId,
+  // projectOrderId]) 복합 unique와 사실상 중복이지만, 후자는 기존 코드베이스의
+  // tenant-scoped unique 관례(예: @@unique([tenantId, code]))와 표기를 맞추기
+  // 위해 그대로 유지한다.
+  projectOrderId String @unique
+
+  // 참조용 — 실제 비교 값은 아래 snapshot 컬럼을 쓴다(§ 상단 설명 참고).
+  quotationId  String?
+  salesOrderId String?
+
+  itemId   String
+  quantity Decimal @db.Decimal(18, 6)
+
+  quotationUnitPrice Decimal? @db.Decimal(18, 2)
+  orderUnitPrice     Decimal? @db.Decimal(18, 2)
+  finalUnitPrice     Decimal? @db.Decimal(18, 2)
+
+  currency String             @default("KRW")
+  status   ProjectPriceStatus @default(DRAFT)
+
+  quotationDate DateTime?
+  orderDate     DateTime?
+
+  // DECIDED 전환 시각/주체 — 최초 결정 시점을 가리킨다. 이후 재결정 시에도 이
+  // 필드들은 "가장 최근 결정"으로 갱신되고, 결정이 바뀌어온 과정 자체는
+  // ProjectOrderPriceRevision이 별도로 보존한다.
+  decidedAt      DateTime?
+  decidedById    String?
+  decisionReason String?
+
+  createdById String
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant                      @relation(fields: [tenantId], references: [id])
+  projectOrder ProjectOrder                @relation(fields: [projectOrderId], references: [id])
+  // quotationId/salesOrderId는 nullable이라 Prisma 기본 onDelete는 SetNull이지만,
+  // 그 기본값은 가격 원장의 source 추적성과 충돌한다 — 원본이 삭제돼 FK가 null이
+  // 되면 어떤 견적/수주에서 이 snapshot이 나왔는지 알 수 없게 되고, salesOrderId
+  // source-presence로 currency/불변성 정책을 판단하는 로직도 오동작한다. 그래서
+  // ProjectOrderPrice가 참조 중인 동안은 원본 Quotation/SalesOrder 삭제 자체를
+  // 막는다(Restrict) — DRAFT 가격을 먼저 지우면 그 뒤로는 기존 삭제 흐름 그대로 가능하다.
+  quotation    Quotation?                  @relation(fields: [quotationId], references: [id], onDelete: Restrict)
+  salesOrder   SalesOrder?                 @relation("SalesOrderProjectOrderPrices", fields: [salesOrderId], references: [id], onDelete: Restrict)
+  item         Item                        @relation("ItemProjectOrderPrices", fields: [itemId], references: [id])
+  decidedBy    Profile?                    @relation("ProjectOrderPriceDecider", fields: [decidedById], references: [id])
+  createdBy    Profile                     @relation("ProjectOrderPriceCreator", fields: [createdById], references: [id])
+  updatedBy    Profile?                    @relation("ProjectOrderPriceUpdater", fields: [updatedById], references: [id])
+  revisions    ProjectOrderPriceRevision[]
+
+  @@unique([tenantId, projectOrderId])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, decidedAt])
+  @@index([quotationId])
+  @@index([salesOrderId])
+  @@index([itemId])
+}
+
+// finalUnitPrice가 바뀔 때마다(최초 DECIDED 전환 포함) 1건씩 쌓인다 — 사용자가
+// 볼 "가격 흐름 타임라인" 전용 데이터다. AuditLog(시스템 감사 추적)와 목적이
+// 다르므로 역할이 겹치지 않는다: 여기는 "가격이 어떻게 흘러왔는가"만 담고,
+// 누가 어떤 필드를 언제 바꿨는지의 전체 스냅샷은 AuditLog가 별도로 남긴다.
+// ProjectStage/ProjectIssue와 같은 이유로 tenantId를 직접 갖는다 — 상위
+// ProjectOrder 계열 레코드들의 기존 관례(직접 조회/tenant 격리 방어)를 따른다.
+model ProjectOrderPriceRevision {
+  id                     String   @id @default(cuid())
+  tenantId               String
+  projectOrderPriceId    String
+  previousFinalUnitPrice Decimal? @db.Decimal(18, 2)
+  newFinalUnitPrice      Decimal  @db.Decimal(18, 2)
+  reason                 String?
+  changedById            String
+  changedAt              DateTime @default(now())
+
+  tenant            Tenant            @relation(fields: [tenantId], references: [id])
+  projectOrderPrice ProjectOrderPrice @relation(fields: [projectOrderPriceId], references: [id])
+  changedBy         Profile           @relation("ProjectOrderPriceRevisionChanger", fields: [changedById], references: [id])
+
+  @@index([tenantId])
+  @@index([projectOrderPriceId])
+}
+
+// ─── Phase 2d-9: 원가관리 ─────────────────────────────────────────────────────
+
+model ItemCost {
+  id           String   @id @default(cuid())
+  tenantId     String
+  itemId       String
+  costType     String
+  materialCost Decimal  @db.Decimal(18, 2)
+  laborCost    Decimal  @db.Decimal(18, 2)
+  overheadCost Decimal  @db.Decimal(18, 2)
+  totalCost    Decimal  @db.Decimal(18, 2)
+  bomId        String?
+  workOrderId  String?
+  calculatedAt DateTime @default(now())
+  note         String?
+
+  tenant    Tenant     @relation("TenantItemCosts", fields: [tenantId], references: [id])
+  item      Item       @relation("ItemCosts", fields: [itemId], references: [id])
+  bom       BOM?       @relation("BOMItemCosts", fields: [bomId], references: [id])
+  workOrder WorkOrder? @relation("WorkOrderItemCosts", fields: [workOrderId], references: [id])
+
+  @@index([tenantId, itemId, costType])
+  @@index([tenantId, calculatedAt])
+  @@index([bomId])
+  @@index([workOrderId])
+}
+
+// ─── Phase 2d-10: 변경관리 (ECN/ECO) ─────────────────────────────────────────
+
+model EngineeringChange {
+  id            String    @id @default(cuid())
+  tenantId      String
+  ecnNo         String
+  title         String
+  reason        String
+  changeType    String
+  targetItemId  String
+  status        ECNStatus @default(DRAFT)
+  requestedBy   String
+  approvedBy    String?
+  requestedAt   DateTime  @default(now())
+  approvedAt    DateTime?
+  implementedAt DateTime?
+  note          String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  tenant    Tenant                    @relation("TenantECNs", fields: [tenantId], references: [id])
+  item      Item                      @relation("ItemECNs", fields: [targetItemId], references: [id])
+  requester Profile                   @relation("ECNRequester", fields: [requestedBy], references: [id])
+  approver  Profile?                  @relation("ECNApprover", fields: [approvedBy], references: [id])
+  details   EngineeringChangeDetail[]
+
+  @@unique([tenantId, ecnNo])
+  @@index([tenantId, status])
+  @@index([targetItemId])
+}
+
+model EngineeringChangeDetail {
+  id                  String  @id @default(cuid())
+  engineeringChangeId String
+  changeTarget        String
+  actionType          String
+  beforeValue         Json?
+  afterValue          Json?
+  description         String?
+
+  engineeringChange EngineeringChange @relation(fields: [engineeringChangeId], references: [id])
+
+  @@index([engineeringChangeId])
+}
+
+// ─── LMS: 설비관리 (수리요청/일상점검) ───────────────────────────────────────
+
+enum RepairRequestStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum RepairPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum CheckResult {
+  PASS
+  FAIL
+  NA
+}
+
+enum EquipmentDowntimeKind {
+  PLANNED
+  UNPLANNED
+}
+
+enum PreventiveMaintenanceCycleUnit {
+  DAY
+  WEEK
+  MONTH
+}
+
+// ─── Support Request Enums ────────────────────────────────────────────────────
+
+enum SupportType {
+  BUG_REPORT
+  FEATURE_REQUEST
+  IMPROVEMENT
+  OTHER
+}
+
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  ANSWERED
+  ON_HOLD
+  COMPLETED
+}
+
+enum SupportPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model EquipmentProblemType {
+  id          String   @id @default(cuid())
+  tenantId    String
+  code        String
+  name        String
+  category    String?
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant         Tenant                   @relation(fields: [tenantId], references: [id])
+  repairRequests EquipmentRepairRequest[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model EquipmentRepairRequest {
+  id            String              @id @default(cuid())
+  tenantId      String
+  siteId        String
+  equipmentId   String
+  problemTypeId String?
+  requestNo     String
+  title         String
+  description   String?
+  priority      RepairPriority      @default(MEDIUM)
+  status        RepairRequestStatus @default(OPEN)
+  requestedBy   String
+  assignedTo    String?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  note          String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  tenant      Tenant                @relation(fields: [tenantId], references: [id])
+  site        Site                  @relation(fields: [siteId], references: [id])
+  equipment   Equipment             @relation(fields: [equipmentId], references: [id])
+  problemType EquipmentProblemType? @relation(fields: [problemTypeId], references: [id])
+  requester   Profile               @relation("RepairRequester", fields: [requestedBy], references: [id])
+  assignee    Profile?              @relation("RepairAssignee", fields: [assignedTo], references: [id])
+
+  downtimeRecords EquipmentDowntime[]
+
+  @@unique([tenantId, requestNo])
+  @@index([tenantId])
+  @@index([equipmentId])
+  @@index([status])
+}
+
+model EquipmentDailyCheck {
+  id          String      @id @default(cuid())
+  tenantId    String
+  siteId      String
+  equipmentId String
+  checkDate   DateTime    @db.Date
+  checkedBy   String
+  result      CheckResult @default(PASS)
+  note        String?
+  items       Json?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  site      Site      @relation(fields: [siteId], references: [id])
+  equipment Equipment @relation(fields: [equipmentId], references: [id])
+  checker   Profile   @relation("DailyCheckChecker", fields: [checkedBy], references: [id])
+
+  @@unique([equipmentId, checkDate])
+  @@index([tenantId])
+  @@index([equipmentId, checkDate])
+}
+
+model EquipmentDowntime {
+  id               String                @id @default(cuid())
+  tenantId         String
+  siteId           String
+  equipmentId      String
+  reasonId         String
+  eventType        EquipmentEventType    @default(STOP)
+  kind             EquipmentDowntimeKind @default(UNPLANNED)
+  startedAt        DateTime
+  endedAt          DateTime?
+  note             String?
+  equipmentEventId String?               @unique
+  repairRequestId  String?
+  createdById      String
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  tenant         Tenant                  @relation(fields: [tenantId], references: [id])
+  site           Site                    @relation(fields: [siteId], references: [id])
+  equipment      Equipment               @relation(fields: [equipmentId], references: [id])
+  reason         CommonCode              @relation("DowntimeReason", fields: [reasonId], references: [id])
+  equipmentEvent EquipmentEvent?         @relation("EquipmentEventDowntime", fields: [equipmentEventId], references: [id], onDelete: SetNull)
+  repairRequest  EquipmentRepairRequest? @relation(fields: [repairRequestId], references: [id], onDelete: SetNull)
+  createdBy      Profile                 @relation("EquipmentDowntimeCreator", fields: [createdById], references: [id])
+
+  @@index([tenantId, startedAt])
+  @@index([equipmentId, startedAt])
+  @@index([reasonId])
+  @@index([repairRequestId])
+}
+
+model EquipmentMaintenancePlan {
+  id              String                         @id @default(cuid())
+  tenantId        String
+  siteId          String
+  equipmentId     String
+  title           String
+  description     String?
+  cycleValue      Int
+  cycleUnit       PreventiveMaintenanceCycleUnit
+  startDate       DateTime
+  nextDueAt       DateTime
+  lastCompletedAt DateTime?
+  isActive        Boolean                        @default(true)
+  createdById     String
+  createdAt       DateTime                       @default(now())
+  updatedAt       DateTime                       @updatedAt
+
+  tenant    Tenant                        @relation(fields: [tenantId], references: [id])
+  site      Site                          @relation(fields: [siteId], references: [id])
+  equipment Equipment                     @relation(fields: [equipmentId], references: [id])
+  createdBy Profile                       @relation("EquipmentMaintenancePlanCreator", fields: [createdById], references: [id])
+  histories EquipmentMaintenanceHistory[]
+
+  @@index([tenantId, nextDueAt])
+  @@index([equipmentId, nextDueAt])
+}
+
+model EquipmentMaintenanceHistory {
+  id          String      @id @default(cuid())
+  tenantId    String
+  siteId      String
+  equipmentId String
+  planId      String
+  scheduledAt DateTime
+  completedAt DateTime
+  result      CheckResult @default(PASS)
+  note        String?
+  performedBy String
+  createdAt   DateTime    @default(now())
+
+  tenant    Tenant                   @relation(fields: [tenantId], references: [id])
+  site      Site                     @relation(fields: [siteId], references: [id])
+  equipment Equipment                @relation(fields: [equipmentId], references: [id])
+  plan      EquipmentMaintenancePlan @relation(fields: [planId], references: [id])
+  performer Profile                  @relation("EquipmentMaintenancePerformer", fields: [performedBy], references: [id])
+
+  @@unique([planId, scheduledAt])
+  @@index([tenantId, completedAt])
+  @@index([equipmentId, completedAt])
+}
+
+// ─── Custom Auth ─────────────────────────────────────────────────────────────
+
+model UserCredential {
+  id                String    @id @default(cuid())
+  tenantId          String
+  loginId           String
+  profileId         String    @unique
+  passwordHash      String
+  popPinHash        String?
+  popPinFingerprint String?
+  popPinSetAt       DateTime?
+  mustChangePw      Boolean   @default(true)
+  isLocked          Boolean   @default(false)
+  failCount         Int       @default(0)
+  lockedAt          DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+  profile Profile @relation(fields: [profileId], references: [id])
+
+  @@unique([tenantId, loginId])
+  @@unique([tenantId, popPinFingerprint])
+  @@index([tenantId])
+}
+
+model LoginHistory {
+  id         String           @id @default(cuid())
+  tenantId   String
+  loginId    String
+  profileId  String?
+  eventType  LoginEventType
+  failReason LoginFailReason?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime         @default(now())
+
+  tenant  Tenant   @relation(fields: [tenantId], references: [id])
+  profile Profile? @relation(fields: [profileId], references: [id])
+
+  @@index([tenantId])
+  @@index([profileId])
+  @@index([loginId, createdAt])
+}
+
+// ─── Support Request ──────────────────────────────────────────────────────────
+
+model SupportRequest {
+  id          String          @id @default(cuid())
+  tenantId    String
+  authorId    String
+  type        SupportType
+  priority    SupportPriority @default(NORMAL)
+  title       String
+  content     String          @db.Text
+  status      SupportStatus   @default(OPEN)
+  imageUrl    String?
+  answer      String?         @db.Text
+  adminNote   String?         @db.Text
+  handledById String?
+  handledAt   DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  author    Profile  @relation("SupportAuthor", fields: [authorId], references: [id])
+  handledBy Profile? @relation("SupportHandler", fields: [handledById], references: [id])
+
+  @@index([tenantId])
+  @@index([authorId])
+  @@index([status])
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+}
+
+// ─── NCWatch 설비 연동 ────────────────────────────────────────────────────────
+
+// NCWatch 기계명 ↔ MES Equipment.id 매핑
+model NcwatchEquipmentMapping {
+  id          String   @id @default(cuid())
+  tenantId    String
+  siteId      String?
+  machineName String   @map("machine_name")
+  equipmentId String?  @map("equipment_id")
+  isActive    Boolean  @default(true) @map("is_active")
+  memo        String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  equipment Equipment? @relation("EquipmentNcwatchMappings", fields: [equipmentId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, machineName])
+  @@index([equipmentId])
+  @@map("ncwatch_equipment_mapping")
+}
+
+// NCWatch 기계별 현재 상태 (10초마다 upsert, 기계당 1행)
+model NcwatchStatus {
+  id           String   @id @default(cuid())
+  tenantId     String
+  siteId       String?
+  machineName  String   @map("machine_name")
+  statusCode   Int?     @map("status_code")
+  statusLabel  String?  @map("status_label")
+  runCode      Int?     @map("run_code")
+  modeCode     Int?     @map("mode_code")
+  messageCode  Int?     @map("message_code")
+  programName  String?  @map("program_name")
+  oNumber      String?  @map("o_number")
+  spindleSpeed Int?     @map("spindle_speed")
+  feedRate     Int?     @map("feed_rate")
+  positionX    Decimal? @map("position_x") @db.Decimal(18, 4)
+  positionY    Decimal? @map("position_y") @db.Decimal(18, 4)
+  positionZ    Decimal? @map("position_z") @db.Decimal(18, 4)
+  toolNo       String?  @map("tool_no")
+  partCount    Int?     @map("part_count")
+  blockNumber  Int?     @map("block_number")
+  blockTot     Int?     @map("block_tot")
+  ratio        Decimal? @db.Decimal(5, 2)
+  alarmCode    String?  @map("alarm_code")
+  alarmMessage String?  @map("alarm_message")
+  aliveCount   Int?     @map("alive_count")
+  ncwatchTs    String?  @map("ncwatch_ts")
+  rawPayload   Json?    @map("raw_payload")
+  receivedAt   DateTime @default(now()) @map("received_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, machineName])
+  @@index([machineName])
+  @@map("ncwatch_status")
+}
+
+// NCWatch 상태 변경 이력 (statusCode 변경 시 append)
+model NcwatchStatusHistory {
+  id           String   @id @default(cuid())
+  tenantId     String
+  machineName  String   @map("machine_name")
+  statusCode   Int?     @map("status_code")
+  statusLabel  String?  @map("status_label")
+  partCount    Int?     @map("part_count")
+  spindleSpeed Int?     @map("spindle_speed")
+  alarmMessage String?  @map("alarm_message")
+  changedAt    DateTime @map("changed_at")
+  receivedAt   DateTime @default(now()) @map("received_at")
+
+  @@index([tenantId, machineName, changedAt])
+  @@map("ncwatch_status_history")
+}
+
+// NCWatch 일간 가동 리포트 (기계+날짜 upsert, 1시간마다)
+model NcwatchReportDaily {
+  id          String   @id @default(cuid())
+  tenantId    String
+  machineName String   @map("machine_name")
+  reportDate  DateTime @map("report_date") @db.Date
+  runTime     String?  @map("run_time")
+  runPct      Decimal? @map("run_pct") @db.Decimal(5, 2)
+  partCount   Int?     @map("part_count")
+  stopTime    String?  @map("stop_time")
+  stopPct     Decimal? @map("stop_pct") @db.Decimal(5, 2)
+  manualPct   Decimal? @map("manual_pct") @db.Decimal(5, 2)
+  alarmPct    Decimal? @map("alarm_pct") @db.Decimal(5, 2)
+  offlinePct  Decimal? @map("offline_pct") @db.Decimal(5, 2)
+  manualTime  String?  @map("manual_time")
+  alarmTime   String?  @map("alarm_time")
+  offlineTime String?  @map("offline_time")
+  rawPayload  Json?    @map("raw_payload")
+  receivedAt  DateTime @default(now()) @map("received_at")
+
+  @@unique([tenantId, machineName, reportDate])
+  @@map("ncwatch_report_daily")
+}
+
+// NCWatch 수신/변환 로그
+model NcwatchSyncLog {
+  id           String   @id @default(cuid())
+  tenantId     String
+  machineName  String?  @map("machine_name")
+  endpoint     String
+  result       String
+  message      String?
+  payloadCount Int?     @map("payload_count")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt])
+  @@index([result])
+  @@map("ncwatch_sync_log")
+}

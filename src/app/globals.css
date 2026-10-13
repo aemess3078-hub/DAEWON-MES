@@ -1,0 +1,118 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 9%;
+
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 100%;
+
+    --success: 142 64% 40%;
+    --success-foreground: 0 0% 100%;
+
+    --secondary: 30 5% 94%;
+    --secondary-foreground: 0 0% 15%;
+
+    --muted: 30 5% 96%;
+    --muted-foreground: 30 2% 47%;
+
+    --accent: 30 4% 93%;
+    --accent-foreground: 0 0% 9%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 30 4% 90%;
+    --input: 30 4% 90%;
+    --ring: 221 83% 53%;
+    --radius: 0.375rem;
+
+    --sidebar-background: 30 6% 97%;
+    --sidebar-foreground: 0 0% 15%;
+    --sidebar-accent: 30 4% 92%;
+    --sidebar-accent-foreground: 0 0% 9%;
+    --sidebar-border: 30 4% 91%;
+    --sidebar-ring: 221 83% 53%;
+  }
+
+  .dark {
+    --background: 0 0% 11%;
+    --foreground: 0 0% 93%;
+    --card: 0 0% 13%;
+    --card-foreground: 0 0% 93%;
+    --popover: 0 0% 13%;
+    --popover-foreground: 0 0% 93%;
+    --primary: 221 83% 60%;
+    --primary-foreground: 0 0% 100%;
+    --success: 142 51% 50%;
+    --success-foreground: 0 0% 100%;
+    --secondary: 0 0% 18%;
+    --secondary-foreground: 0 0% 85%;
+    --muted: 0 0% 16%;
+    --muted-foreground: 0 0% 55%;
+    --accent: 0 0% 18%;
+    --accent-foreground: 0 0% 93%;
+    --destructive: 0 60% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 221 83% 60%;
+    --sidebar-background: 0 0% 9%;
+    --sidebar-foreground: 0 0% 80%;
+    --sidebar-accent: 0 0% 16%;
+    --sidebar-accent-foreground: 0 0% 93%;
+    --sidebar-border: 0 0% 15%;
+    --sidebar-ring: 221 83% 60%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-feature-settings: "rlig" 1, "calt" 1;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* React Flow */
+.react-flow__node {
+  border-radius: 6px;
+}
+.react-flow__handle {
+  width: 8px;
+  height: 8px;
+}
+
+/*
+ * 리포트(생산일보/품질리포트/설비리포트) 인쇄 지원.
+ * html/body가 기본적으로 overflow:hidden(위 @layer base)이고 실제 스크롤은
+ * <main class="overflow-y-auto">에서 일어나므로, 인쇄 시에도 이 값이 유지되면
+ * 브라우저가 현재 스크롤 위치의 뷰포트 분량만 인쇄해 내용이 잘린다. 인쇄
+ * 매체에서만 전체 컨텐츠가 자연스러운 높이로 흐르도록 되돌린다(사이드바/헤더
+ * 숨김은 layout.tsx의 Tailwind print: 유틸리티가 담당).
+ */
+@media print {
+  html,
+  body {
+    overflow: visible !important;
+    height: auto !important;
+  }
+}

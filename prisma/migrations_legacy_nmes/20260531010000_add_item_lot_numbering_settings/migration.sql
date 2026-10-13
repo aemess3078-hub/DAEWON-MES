@@ -1,0 +1,8 @@
+CREATE TYPE "LotNumberingType" AS ENUM ('DEFAULT', 'MANUAL', 'RAW_DATE_SEQ', 'PREFIX_MONTH_SEQ');
+
+CREATE TYPE "ManualLotPolicy" AS ENUM ('ALLOWED', 'REQUIRED', 'DISABLED');
+
+ALTER TABLE "Item"
+  ADD COLUMN "lotNumberingType" "LotNumberingType" NOT NULL DEFAULT 'DEFAULT',
+  ADD COLUMN "lotPrefix" TEXT,
+  ADD COLUMN "manualLotPolicy" "ManualLotPolicy" NOT NULL DEFAULT 'ALLOWED';
