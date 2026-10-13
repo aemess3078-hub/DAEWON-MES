@@ -36,6 +36,8 @@
     "test:mrp-period": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-period.ts",
     "test:mrp-simulation": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-simulation.ts",
     "test:order-mrp-service": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-order-mrp-service.ts",
+    "test:item-price-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-item-price-security.ts",
+    "test:item-supplier": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-item-supplier.ts",
     "test:order-mrp-engine": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-order-mrp-engine.ts",
     "test:bom-material-sufficiency": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-bom-material-sufficiency.ts",
     "test:inventory-concurrency-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-inventory-concurrency-integrity.ts",

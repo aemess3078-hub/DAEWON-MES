@@ -33,7 +33,6 @@ type ItemOption = { id: string; code: string; name: string }
 interface ItemPriceFormSheetProps {
   mode: "create" | "edit"
   itemPrice?: ItemPriceRow | null
-  tenantId: string
   partners: PartnerOption[]
   items: ItemOption[]
   open: boolean
@@ -62,7 +61,6 @@ const DEFAULT_VALUES: ItemPriceFormValues = {
 export function ItemPriceFormSheet({
   mode,
   itemPrice,
-  tenantId,
   partners,
   items,
   open,
@@ -109,7 +107,7 @@ export function ItemPriceFormSheet({
     setIsLoading(true)
     try {
       if (mode === "create") {
-        await createItemPrice(tenantId, {
+        await createItemPrice({
           itemId: values.itemId,
           partnerId: values.partnerId,
           priceType: values.priceType,

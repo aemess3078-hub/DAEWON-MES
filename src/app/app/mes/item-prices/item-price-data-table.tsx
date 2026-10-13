@@ -38,7 +38,6 @@ type ItemOption = { id: string; code: string; name: string }
 
 interface ItemPriceDataTableProps {
   data: ItemPriceRow[]
-  tenantId: string
   partners: PartnerOption[]
   items: ItemOption[]
 }
@@ -47,7 +46,6 @@ interface ItemPriceDataTableProps {
 
 export function ItemPriceDataTable({
   data,
-  tenantId,
   partners,
   items,
 }: ItemPriceDataTableProps) {
@@ -195,7 +193,6 @@ export function ItemPriceDataTable({
       <ItemPriceFormSheet
         mode={sheetMode}
         itemPrice={selectedPrice}
-        tenantId={tenantId}
         partners={partners}
         items={items}
         open={sheetOpen}

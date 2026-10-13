@@ -9,8 +9,8 @@ export default async function ItemPricesPage() {
   const tenantId = await getTenantId()
 
   const [prices, partners, items] = await Promise.all([
-    getItemPrices(tenantId),
-    getAllPartners(tenantId),
+    getItemPrices(),
+    getAllPartners(),
     getItemsForSales(tenantId),
   ])
 
@@ -24,7 +24,6 @@ export default async function ItemPricesPage() {
       </div>
       <ItemPriceDataTable
         data={prices as any}
-        tenantId={tenantId}
         partners={partners}
         items={items}
       />

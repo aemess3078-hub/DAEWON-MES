@@ -5,24 +5,37 @@ import { getTenantId, requireRole } from "@/lib/auth"
 import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import {
+  createItemPriceCore,
+  deleteItemPriceCore,
+  listItemPricesCore,
+  listPartnersForPricesCore,
+  updateItemPriceCore,
+  type ItemPriceActor,
+} from "@/lib/services/item-price.service"
+
+// tenantId 는 인증 세션에서만 결정한다. 클라이언트가 보낸 tenantId 는 받지 않는다(서비스 코어 참고).
+
+async function authorizeTenant(): Promise<string> {
+  await assertDaewonFeatureScope()
+  return getTenantId()
+}
+
+async function authorizeMutation(action: "CREATE" | "UPDATE" | "DELETE"): Promise<ItemPriceActor> {
+  await assertDaewonFeatureScope()
+  await requireResourcePermission("ITEM_PRICE", action)
+  const actor = await requireRole("OPERATOR")
+  return { id: actor.id, name: actor.name, tenantId: actor.tenantId }
+}
 
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
-export async function getItemPrices(tenantId: string) {
-  await assertDaewonFeatureScope()
-  return prisma.itemPrice.findMany({
-    where: { tenantId },
-    include: { item: true, partner: true },
-    orderBy: { createdAt: "desc" },
-  })
+export async function getItemPrices() {
+  return listItemPricesCore({ authorizeTenant, db: prisma })
 }
 
-export async function getAllPartners(tenantId: string) {
-  await assertDaewonFeatureScope()
-  return prisma.businessPartner.findMany({
-    where: { tenantId },
-    orderBy: { name: "asc" },
-  })
+export async function getAllPartners() {
+  return listPartnersForPricesCore({ authorizeTenant, db: prisma })
 }
 
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
@@ -38,25 +51,8 @@ export type CreateItemPriceInput = {
   note?: string
 }
 
-export async function createItemPrice(tenantId: string, data: CreateItemPriceInput) {
-  await assertDaewonFeatureScope()
-  await requireResourcePermission("ITEM_PRICE", "CREATE")
-  const actor = await requireRole("OPERATOR")
-  const created = await prisma.itemPrice.create({
-    data: { tenantId, ...data },
-  })
-  await prisma.auditLog.create({
-    data: {
-      tenantId,
-      actorId: actor.id,
-      actorLabel: actor.name,
-      entityType: "ItemPrice",
-      entityId: created.id,
-      action: "CREATE",
-      afterData: { itemId: data.itemId, partnerId: data.partnerId, priceType: data.priceType, unitPrice: data.unitPrice, currency: data.currency },
-      menuName: "품목 가격 관리",
-    },
-  }).catch(() => {})
+export async function createItemPrice(data: CreateItemPriceInput) {
+  await createItemPriceCore({ authorize: () => authorizeMutation("CREATE"), db: prisma }, data)
   revalidatePath("/app/mes/item-prices")
 }
 
@@ -69,50 +65,11 @@ export type UpdateItemPriceInput = {
 }
 
 export async function updateItemPrice(id: string, data: UpdateItemPriceInput) {
-  await assertDaewonFeatureScope()
-  await requireResourcePermission("ITEM_PRICE", "UPDATE")
-  const actor = await requireRole("OPERATOR")
-  const tenantId = await getTenantId()
-  const owned = await prisma.itemPrice.findUnique({ where: { id } })
-  await prisma.itemPrice.update({ where: { id }, data })
-  if (owned) {
-    await prisma.auditLog.create({
-      data: {
-        tenantId,
-        actorId: actor.id,
-        actorLabel: actor.name,
-        entityType: "ItemPrice",
-        entityId: id,
-        action: "UPDATE",
-        beforeData: { unitPrice: Number(owned.unitPrice), currency: owned.currency },
-        afterData: { unitPrice: data.unitPrice, currency: data.currency },
-        menuName: "품목 가격 관리",
-      },
-    }).catch(() => {})
-  }
+  await updateItemPriceCore({ authorize: () => authorizeMutation("UPDATE"), db: prisma }, id, data)
   revalidatePath("/app/mes/item-prices")
 }
 
 export async function deleteItemPrice(id: string) {
-  await assertDaewonFeatureScope()
-  await requireResourcePermission("ITEM_PRICE", "DELETE")
-  const actor = await requireRole("OPERATOR")
-  const tenantId = await getTenantId()
-  const owned = await prisma.itemPrice.findUnique({ where: { id } })
-  await prisma.itemPrice.delete({ where: { id } })
-  if (owned) {
-    await prisma.auditLog.create({
-      data: {
-        tenantId,
-        actorId: actor.id,
-        actorLabel: actor.name,
-        entityType: "ItemPrice",
-        entityId: id,
-        action: "DELETE",
-        beforeData: { itemId: owned.itemId, partnerId: owned.partnerId, priceType: owned.priceType, unitPrice: Number(owned.unitPrice), currency: owned.currency },
-        menuName: "품목 가격 관리",
-      },
-    }).catch(() => {})
-  }
+  await deleteItemPriceCore({ authorize: () => authorizeMutation("DELETE"), db: prisma }, id)
   revalidatePath("/app/mes/item-prices")
 }

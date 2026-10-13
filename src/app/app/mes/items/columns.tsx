@@ -1,6 +1,7 @@
 "use client"
 
 import { ColumnDef } from "@tanstack/react-table"
+import { Truck } from "lucide-react"
 import { ItemType, ItemStatus } from "@prisma/client"
 import { Badge } from "@/components/ui/badge"
 import { DataTableColumnHeader } from "@/components/common/data-table"
@@ -30,7 +31,11 @@ const itemStatusLabels: Record<ItemStatus, string> = {
 export function getColumns(callbacks: {
   onEdit:   (item: ItemWithDetails) => void
   onDelete: (item: ItemWithDetails) => void
+  onManageSuppliers?: (item: ItemWithDetails) => void
+  /** false 이면 수정/삭제를 숨기고 공급업체 조회만 노출한다(기본 true) */
+  canMutate?: boolean
 }): ColumnDef<ItemWithDetails>[] {
+  const canMutate = callbacks.canMutate !== false
   return [
     {
       accessorKey: "code",
@@ -146,8 +151,19 @@ export function getColumns(callbacks: {
       id: "actions",
       cell: ({ row }) => (
         <DataTableRowActions
-          onEdit={()   => callbacks.onEdit(row.original)}
-          onDelete={() => callbacks.onDelete(row.original)}
+          onEdit={canMutate ? () => callbacks.onEdit(row.original) : undefined}
+          onDelete={canMutate ? () => callbacks.onDelete(row.original) : undefined}
+          extraActions={
+            callbacks.onManageSuppliers
+              ? [
+                  {
+                    label: canMutate ? "공급업체 관리" : "공급업체 보기",
+                    icon: <Truck className="mr-2 h-4 w-4" />,
+                    onSelect: () => callbacks.onManageSuppliers!(row.original),
+                  },
+                ]
+              : undefined
+          }
         />
       ),
       enableSorting: false,

@@ -465,6 +465,7 @@ model Tenant {
   shipmentOrders                ShipmentOrder[]                @relation("TenantShipmentOrders")
   purchaseOrders                PurchaseOrder[]                @relation("TenantPurchaseOrders")
   itemPrices                    ItemPrice[]                    @relation("TenantItemPrices")
+  itemSuppliers                 ItemSupplier[]                 @relation("TenantItemSuppliers")
   aiUsageLogs                   AIUsageLog[]                   @relation("TenantAIUsageLogs")
   quotations                    Quotation[]                    @relation("TenantQuotations")
   projectOrders                 ProjectOrder[]                 @relation("TenantProjectOrders")
@@ -696,6 +697,7 @@ model BusinessPartner {
   salesOrders             SalesOrder[]     @relation("CustomerSalesOrders")
   purchaseOrders          PurchaseOrder[]  @relation("SupplierPurchaseOrders")
   itemPrices              ItemPrice[]      @relation("PartnerPrices")
+  itemSuppliers           ItemSupplier[]   @relation("SupplierItemSuppliers")
   quotations              Quotation[]      @relation("CustomerQuotations")
   projectOrders           ProjectOrder[]   @relation("CustomerProjectOrders")
   outsourcedWipUnits      WipUnit[]        @relation("WipUnitOutsourcingPartner")
@@ -795,6 +797,7 @@ model Item {
   shipmentItems           ShipmentItem[]          @relation("ItemShipmentItems")
   purchaseOrderItems      PurchaseOrderItem[]     @relation("ItemPurchaseOrderItems")
   itemPrices              ItemPrice[]             @relation("ItemPrices")
+  itemSuppliers           ItemSupplier[]          @relation("ItemItemSuppliers")
   quotationItems          QuotationItem[]         @relation("ItemQuotationItems")
   projectOrders           ProjectOrder[]          @relation("ItemProjectOrders")
   itemCosts               ItemCost[]              @relation("ItemCosts")
@@ -2758,6 +2761,38 @@ model ItemPrice {
 
   @@index([tenantId, itemId, partnerId])
   @@index([tenantId, priceType])
+}
+
+// ─── Phase 5A: 품목별 공급업체 기준정보 ─────────────────────────────────────────────
+//
+// 품목 ↔ 공급업체(BusinessPartner SUPPLIER|BOTH) 관계와 발주 조건(리드타임/MOQ/발주배수).
+// 가격은 저장하지 않는다(단가/이력은 ItemPrice). 안전재고는 Phase 5D(Item.safetyStock).
+// - (tenantId, itemId, supplierId) 유일.
+// - 품목당 ACTIVE Default 최대 1개: PostgreSQL partial unique index(ItemSupplier_one_active_default_per_item)로
+//   migration SQL 에서 보장한다(Prisma schema 로 표현 불가 — 서비스 로직과 이중 방어).
+// - 비활성(isActive=false) 관계는 isDefault 를 유지하지 않는다(서비스에서 함께 해제).
+// - 품목 삭제 시(이미 이력 참조 검사를 통과한 품목) 관계도 함께 정리(Cascade). 공급업체는 Restrict.
+model ItemSupplier {
+  id            String   @id @default(cuid())
+  tenantId      String
+  itemId        String
+  supplierId    String
+  isDefault     Boolean  @default(false)
+  priority      Int      @default(100) // 작을수록 우선
+  leadTimeDays  Int? // null = 미설정, 0 = 당일
+  moq           Decimal? @db.Decimal(18, 6) // null = 미설정, > 0
+  orderMultiple Decimal? @db.Decimal(18, 6) // null = 미설정, > 0
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant   Tenant          @relation("TenantItemSuppliers", fields: [tenantId], references: [id])
+  item     Item            @relation("ItemItemSuppliers", fields: [itemId], references: [id], onDelete: Cascade)
+  supplier BusinessPartner @relation("SupplierItemSuppliers", fields: [supplierId], references: [id])
+
+  @@unique([tenantId, itemId, supplierId])
+  @@index([tenantId, itemId])
+  @@index([tenantId, supplierId])
 }
 
 // ─── Phase 2d-AI: AI 사용량 로그 ────────────────────────────────────────────

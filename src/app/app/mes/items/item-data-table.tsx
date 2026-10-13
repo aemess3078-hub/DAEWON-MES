@@ -9,6 +9,7 @@ import { BulkDeleteDialog, type BulkDeleteCandidate } from "@/components/common/
 import { getColumns } from "./columns"
 import { ItemFormSheet } from "./item-form-sheet"
 import { ItemExcelUploadDialog } from "./item-excel-upload-dialog"
+import { ItemSupplierSheet } from "./item-supplier-sheet"
 import {
   deleteItem,
   updateItem,
@@ -52,6 +53,8 @@ export function ItemDataTable({ items, categories, itemGroups, warehouses, tenan
   const [formMode,     setFormMode]     = useState<"create" | "edit">("create")
   const [editingItem,  setEditingItem]  = useState<ItemWithDetails | null>(null)
   const [uploadOpen,   setUploadOpen]   = useState(false)
+  const [supplierItem, setSupplierItem]   = useState<ItemWithDetails | null>(null)
+  const [supplierOpen, setSupplierOpen]   = useState(false)
 
   const [selectedItems, setSelectedItems]   = useState<ItemWithDetails[]>([])
   const [clearSelectionSignal, setClearSelectionSignal] = useState(0)
@@ -150,8 +153,18 @@ export function ItemDataTable({ items, categories, itemGroups, warehouses, tenan
     }
   }
 
-  const allColumns = getColumns({ onEdit: handleEdit, onDelete: handleDelete })
-  const columns    = canMutate ? allColumns : allColumns.filter((c) => c.id !== "actions")
+  const handleManageSuppliers = (item: ItemWithDetails) => {
+    setSupplierItem(item)
+    setSupplierOpen(true)
+  }
+
+  // 조회 전용 사용자는 수정/삭제 없이 공급업체 조회만 가능(변경은 서버가 권한을 다시 검증한다).
+  const columns = getColumns({
+    onEdit: handleEdit,
+    onDelete: handleDelete,
+    onManageSuppliers: handleManageSuppliers,
+    canMutate,
+  })
 
   const defaultValues: Partial<ItemFormValues> | undefined = editingItem
     ? {
@@ -260,6 +273,14 @@ export function ItemDataTable({ items, categories, itemGroups, warehouses, tenan
       />
 
       <ItemExcelUploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
+
+      <ItemSupplierSheet
+        open={supplierOpen}
+        onOpenChange={setSupplierOpen}
+        item={supplierItem ? { id: supplierItem.id, code: supplierItem.code, name: supplierItem.name } : null}
+        canMutate={canMutate}
+        canDelete={canBulkDelete}
+      />
 
       <ItemFormSheet
         open={formOpen}

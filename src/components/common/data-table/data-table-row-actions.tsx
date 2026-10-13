@@ -12,16 +12,25 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 
+export interface DataTableRowExtraAction {
+  label: string
+  icon?: React.ReactNode
+  onSelect: () => void
+}
+
 interface DataTableRowActionsProps {
   onView?: () => void
   onEdit?: () => void
   onDelete?: () => void
+  /** 보기/수정 아래에 추가로 표시할 메뉴 항목(선택) */
+  extraActions?: DataTableRowExtraAction[]
 }
 
 export function DataTableRowActions({
   onView,
   onEdit,
   onDelete,
+  extraActions,
 }: DataTableRowActionsProps) {
   return (
     <DropdownMenu>
@@ -48,7 +57,13 @@ export function DataTableRowActions({
             수정
           </DropdownMenuItem>
         )}
-        {(onView || onEdit) && onDelete && <DropdownMenuSeparator />}
+        {extraActions?.map((action) => (
+          <DropdownMenuItem key={action.label} onClick={action.onSelect}>
+            {action.icon}
+            {action.label}
+          </DropdownMenuItem>
+        ))}
+        {(onView || onEdit || (extraActions && extraActions.length > 0)) && onDelete && <DropdownMenuSeparator />}
         {onDelete && (
           <DropdownMenuItem
             onClick={onDelete}
