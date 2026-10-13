@@ -48,3 +48,10 @@ UI  order-mrp-panel.tsx ─▶ Server Action runOrderBasedMrp(params)   [MRP REA
 
 - `npm run test:order-mrp-engine` — 182 checks (Phase 1)
 - `npm run test:order-mrp-service` — 66 checks (fake DB 가 `where` 를 평가: tenant 격리, 상태/Default BOM 필터, N+1, 권한, M4)
+
+## Phase 2.5 보안 hardening 메모
+
+- `runMRP`/`getPlansForMRP`/`getAISuggestion`: MRP READ 권한 + 인증 tenant (`services/mrp-plan.service.ts`, 계산 알고리즘 불변, 모든 조회에 tenantId 조건 추가)
+- `createPurchaseOrdersFromMRP`: 클라이언트 tenantId 무시, itemId/siteId 소유 검증 (`services/mrp-purchase.service.ts`)
+- `importValidatedBoms`: 본문을 `services/bom-import.service.ts` 로 이동, 부모/구성품 ID 전체를 tenant 소유로 배치 검증(M4 정책 동일)
+- 테스트: `npm run test:mrp-security` (54 checks)

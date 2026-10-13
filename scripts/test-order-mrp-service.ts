@@ -421,10 +421,12 @@ async function main() {
       [["a@1", true], ["a@2", false], ["b@1", true]],
       "M4 같은 파일 내 같은 품목은 첫 ACTIVE 만 Default"
     )
-    const src = readFileSync(join(process.cwd(), "src/lib/actions/bom-excel.actions.ts"), "utf8")
-    ok(!/isDefault:\s*false/.test(src), "M4 import 가 isDefault:false 를 하드코딩하지 않음")
-    ok(/tx\.bOM\.findMany\(\{\s*where:\s*\{\s*tenantId,\s*status:\s*BOMStatus\.ACTIVE,\s*isDefault:\s*true/.test(src), "M4 기존 Default 를 tenant·ACTIVE 로 조회(트랜잭션 내)")
-    ok(/requireResourcePermission\("BOM", "CREATE"\)/.test(src) && /prisma\.\$transaction/.test(src), "M4 권한·트랜잭션 유지")
+    // Phase 2.5: import 본문은 bom-import.service.ts 로 이동(정책 동일), 액션은 권한 + 위임만 수행
+    const svc = readFileSync(join(process.cwd(), "src/lib/services/bom-import.service.ts"), "utf8")
+    const act = readFileSync(join(process.cwd(), "src/lib/actions/bom-excel.actions.ts"), "utf8")
+    ok(!/isDefault:\s*false/.test(svc) && !/isDefault:\s*false/.test(act), "M4 import 가 isDefault:false 를 하드코딩하지 않음")
+    ok(/tx\.bOM\.findMany\(\{\s*where:\s*\{\s*tenantId,\s*status:\s*"ACTIVE",\s*isDefault:\s*true/.test(svc), "M4 기존 Default 를 tenant·ACTIVE 로 조회(트랜잭션 내)")
+    ok(/requireResourcePermission\("BOM", "CREATE"\)/.test(act) && /\$transaction/.test(svc), "M4 권한·트랜잭션 유지")
   }
 
   console.log(`\n✅ order-mrp-service: ${passed} checks passed`)

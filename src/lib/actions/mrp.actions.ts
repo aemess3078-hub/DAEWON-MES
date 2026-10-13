@@ -1,18 +1,23 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { getTenantId } from "@/lib/auth"
-import { calculateMRP } from "@/lib/services/mrp.service"
 import { suggestOptimalOrder } from "@/lib/services/mrp-ai.service"
+import { executeRunMrpRequest } from "@/lib/services/mrp-plan.service"
+import { createPurchaseOrdersFromMrp } from "@/lib/services/mrp-purchase.service"
 import type { MRPResult } from "@/lib/services/mrp.service"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 
+/**
+ * 보안 원칙(Phase 2.5): tenantId 는 인증 컨텍스트(requireResourcePermission 이 돌려준 사용자)에서만 결정한다.
+ * 클라이언트가 보낸 tenantId 는 어떤 권한/조회 범위 결정에도 사용하지 않는다.
+ */
+
 export async function getPlansForMRP() {
-  const tenantId = await getTenantId()
+  const user = await requireResourcePermission("MRP", "READ")
 
   return prisma.productionPlan.findMany({
     where: {
-      tenantId,
+      tenantId: user.tenantId,
       status: { in: ["CONFIRMED", "IN_PROGRESS"] },
     },
     include: {
@@ -24,76 +29,35 @@ export async function getPlansForMRP() {
 }
 
 export async function runMRP(planId: string): Promise<MRPResult> {
-  return calculateMRP(planId)
+  return executeRunMrpRequest(
+    { authorize: () => requireResourcePermission("MRP", "READ"), db: prisma },
+    planId
+  )
 }
 
 export async function getAISuggestion(mrpResult: MRPResult) {
-  const tenantId = await getTenantId()
-  return suggestOptimalOrder(mrpResult, tenantId)
+  const user = await requireResourcePermission("MRP", "READ")
+  return suggestOptimalOrder(mrpResult, user.tenantId)
 }
 
+/**
+ * 두 번째 인자(_tenantId)는 기존 호출부 호환을 위해서만 남아 있으며 **무시된다**.
+ * 발주 대상 tenant 는 항상 인증된 사용자의 tenant 이다.
+ */
 export async function createPurchaseOrdersFromMRP(
   items: { itemId: string; qty: number }[],
-  tenantId: string,
+  _tenantId: string | undefined,
   siteId: string
 ): Promise<{ success: boolean; orderNo?: string; error?: string }> {
-  await requireResourcePermission("MRP", "CREATE")
-  await requireResourcePermission("PURCHASE_ORDER", "CREATE")
-  try {
-    if (items.length === 0) {
-      return { success: false, error: "발주할 자재가 없습니다." }
-    }
-
-    // 공급사 자동 선택: 등록된 첫 번째 SUPPLIER
-    const defaultSupplier = await prisma.businessPartner.findFirst({
-      where: { tenantId, partnerType: { in: ["SUPPLIER", "BOTH"] } },
-    })
-    if (!defaultSupplier) {
-      return { success: false, error: "등록된 공급사가 없습니다." }
-    }
-
-    // siteId 유효성 검증: 없으면 테넌트의 첫 번째 사이트 사용
-    let resolvedSiteId = siteId
-    const siteExists = siteId
-      ? await prisma.site.findFirst({ where: { id: siteId, tenantId } })
-      : null
-    if (!siteExists) {
-      const firstSite = await prisma.site.findFirst({ where: { tenantId } })
-      if (!firstSite) {
-        return { success: false, error: "등록된 공장(사이트)이 없습니다." }
-      }
-      resolvedSiteId = firstSite.id
-    }
-
-    const orderNo = `PO-MRP-${Date.now()}`
-
-    await prisma.purchaseOrder.create({
-      data: {
-        tenantId,
-        siteId: resolvedSiteId,
-        supplierId: defaultSupplier.id,
-        orderNo,
-        orderDate: new Date(),
-        expectedDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 2주 후
-        status: "DRAFT",
-        currency: "KRW",
-        note: "MRP 자동 생성 발주",
-        items: {
-          create: items.map((item) => ({
-            itemId: item.itemId,
-            qty: item.qty,
-            unitPrice: 0,
-            stockAtOrder: 0,
-          })),
-        },
+  return createPurchaseOrdersFromMrp(
+    {
+      authorize: async () => {
+        await requireResourcePermission("MRP", "CREATE")
+        return requireResourcePermission("PURCHASE_ORDER", "CREATE")
       },
-    })
-
-    return { success: true, orderNo }
-  } catch (e) {
-    return {
-      success: false,
-      error: e instanceof Error ? e.message : "발주 생성 실패",
-    }
-  }
+      db: prisma,
+    },
+    items,
+    siteId
+  )
 }
