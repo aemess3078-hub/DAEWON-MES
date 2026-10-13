@@ -78,11 +78,32 @@ export type MrpComponentInfo = {
   supplierName?: string | null
 }
 
+/**
+ * 확정 구매발주의 미입고 잔량(예정입고) 1건 (Phase 5B).
+ * 호출자(어댑터)가 상태/외주/기준일 판정을 마친 "유효한" 입고만 전달한다.
+ * NORMAL 모드에서만 사용되며 EXCEL_COMPAT 에서는 무시된다(+INFO 경고).
+ */
+export type MrpScheduledReceipt = {
+  /** 입고되는 자재(BOM 구성품) */
+  componentItemId: string
+  /** 입고예정 수량(> 0, 미입고 잔량) */
+  quantity: number
+  /** 입고예정일(date-only) */
+  expectedDate: DateOnly
+  purchaseOrderId: string
+  purchaseOrderNo: string
+  purchaseOrderItemId?: string | null
+  /** 동일 일자/동일 발주번호의 결정적 정렬용. 없으면 배열 위치 */
+  originalIndex?: number
+}
+
 export type OrderMrpInput = {
   demands: MrpDemandLine[]
   boms: MrpBomLine[]
   stocks: MrpStockEntry[]
   componentInfo?: Record<string, MrpComponentInfo>
+  /** Phase 5B 예정입고. 없거나 비어 있으면 기존 계산과 100% 동일하다. */
+  scheduledReceipts?: MrpScheduledReceipt[]
 }
 
 export type OrderMrpOptions = {
@@ -145,6 +166,8 @@ export type MrpWarningCode =
   | "MISSING_DELIVERY_DATE"
   | "NEGATIVE_OPENING_STOCK"
   | "INVALID_STOCK_QUANTITY"
+  | "INVALID_SCHEDULED_RECEIPT"
+  | "SCHEDULED_RECEIPTS_IGNORED"
 
 export type MrpWarning = {
   code: MrpWarningCode
@@ -226,6 +249,30 @@ export type MaterialMovement = {
   isShortage: boolean
 }
 
+/**
+ * 자재별 시간축 이벤트(Phase 5B). 입고예정(SCHEDULED_RECEIPT)과 소요량이 있는 수요(DEMAND)만 담는 희소 목록이며,
+ * 예정입고 입력이 있을 때만 채워진다(없으면 빈 배열). 기존 movements(수요 단계 밀집 이력)는 그대로 유지된다.
+ */
+export type MaterialTimelineEvent = {
+  type: "SCHEDULED_RECEIPT" | "DEMAND"
+  date: DateOnly | null
+  /** 항상 양수. 입고는 잔량 증가, 수요는 잔량 차감 */
+  quantity: number
+  balanceBefore: number
+  balanceAfter: number
+  /** DEMAND: 수요 처리 순서 */
+  sequence?: number
+  orderId?: string
+  orderNo?: string
+  orderLineId?: string
+  /** SCHEDULED_RECEIPT */
+  purchaseOrderId?: string
+  purchaseOrderNo?: string
+  purchaseOrderItemId?: string | null
+  /** DEMAND 이벤트에서 balanceAfter < 0 (결품) */
+  isShortage?: boolean
+}
+
 export type MaterialFirstShortage = {
   sequence: number
   orderId: string
@@ -258,6 +305,18 @@ export type OrderMrpMaterialResult = {
   firstShortage: MaterialFirstShortage | null
   /** 처리된 모든 수주(처리 순서)에 대한 밀집 이동 이력 */
   movements: MaterialMovement[]
+  // ── Phase 5B 추가(기존 필드 의미는 변하지 않는다) ──
+  /** 계산에 반영된 예정입고 수량 합계(NORMAL + 예정입고 입력이 있을 때만 > 0) */
+  scheduledReceiptQty: number
+  scheduledReceiptCount: number
+  /** 기간 중 한 번이라도 결품(requirement>0 ∧ balanceAfter<0)이 발생했는가. 최종 잔량이 회복돼도 true */
+  hadShortage: boolean
+  /** 시간축에서 가장 낮았던 잔량의 부족 크기 = max(0, -min(잔량)). 최종 부족(finalShortageQty)과 구분된다 */
+  peakShortageQty: number
+  /** 결품 후 예정입고로 잔량이 0 이상으로 회복된 마지막 입고일(회복이 없으면 null) */
+  shortageRecoveredAt: DateOnly | null
+  /** 입고/수요 이벤트 시간축(예정입고 입력이 있을 때만) */
+  timeline: MaterialTimelineEvent[]
 }
 
 export type OrderMrpSummary = {
@@ -269,6 +328,8 @@ export type OrderMrpSummary = {
   totalFinalShortageQty: number
   /** shortageItemCount > 0 인 수주 라인 수 (결품 발생 수주 수) */
   shortageDemandCount: number
+  /** Phase 5B: 기간 중 결품이 있었지만 최종 예상재고는 0 이상인(예정입고로 회복된) 자재 수 */
+  temporaryShortageComponentCount: number
   /** 전체 자재 중 가장 먼저(처리 순서 기준) 결품이 발생한 수주 */
   firstShortage:
     | (Omit<MaterialFirstShortage, "requirement" | "balanceBefore" | "balanceAfter"> & {

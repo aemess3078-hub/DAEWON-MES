@@ -7,6 +7,11 @@ import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
+import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
+import {
+  closePurchaseOrderRemainder as closePurchaseOrderRemainderCore,
+  type PurchaseOrderCloseResult,
+} from "@/lib/services/purchase-order-close.service"
 
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
@@ -351,6 +356,34 @@ export async function updatePurchaseOrder(id: string, data: UpdatePurchaseOrderI
   })
 
   revalidatePath("/app/mes/purchase-orders")
+}
+
+/**
+ * 미입고 잔량 종결 (Phase 5B): 발주완료/부분입고 발주를 CLOSED 로 바꿔 남은 수량을 더 이상 입고예정으로 계산하지 않는다.
+ * 발주수량·입고수량은 그대로 보존된다. 권한: PURCHASE_ORDER UPDATE. tenantId 는 인증 컨텍스트에서만 결정한다.
+ */
+export async function closePurchaseOrderRemainder(
+  purchaseOrderId: string,
+  reason?: string
+): Promise<PurchaseOrderCloseResult> {
+  const result = await closePurchaseOrderRemainderCore(
+    {
+      authorize: async () => {
+        await requireResourcePermission("PURCHASE_ORDER", "UPDATE")
+        const actor = await requireRole("OPERATOR")
+        return { id: actor.id, name: actor.name, tenantId: actor.tenantId }
+      },
+      db: prisma,
+      lockItems: (tx, tenantId, ids) => lockPurchaseOrderItemsForUpdate(tx, tenantId, ids),
+    },
+    purchaseOrderId,
+    reason
+  )
+  if (result.success) {
+    revalidatePath("/app/mes/purchase-orders")
+    revalidatePath("/app/mes/material-receipt")
+  }
+  return result
 }
 
 export async function deletePurchaseOrder(id: string) {

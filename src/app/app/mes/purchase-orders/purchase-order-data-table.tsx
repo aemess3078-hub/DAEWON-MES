@@ -30,6 +30,7 @@ import { PurchaseOrderStatus } from "@prisma/client"
 
 import { getColumns, PurchaseOrderRow } from "./columns"
 import { PurchaseOrderFormSheet } from "./purchase-order-form-sheet"
+import { PurchaseOrderCloseDialog } from "./purchase-order-close-dialog"
 import { deletePurchaseOrder } from "@/lib/actions/purchase-order.actions"
 import { useUserRole } from "@/lib/contexts/user-role-context"
 
@@ -71,6 +72,8 @@ export function PurchaseOrderDataTable({
   const [sheetOpen, setSheetOpen] = useState(false)
   const [sheetMode, setSheetMode] = useState<"create" | "edit">("create")
   const [selectedOrder, setSelectedOrder] = useState<PurchaseOrderRow | null>(null)
+  const [closeTarget, setCloseTarget] = useState<PurchaseOrderRow | null>(null)
+  const [closeOpen, setCloseOpen] = useState(false)
 
   // ─── 필터 상태 ───────────────────────────────────────────────────────────────
   const [searchText, setSearchText] = useState("")
@@ -109,7 +112,11 @@ export function PurchaseOrderDataTable({
   // ─── 테이블 ──────────────────────────────────────────────────────────────────
 
   const columns = useMemo(
-    () => getColumns(handleEdit, handleDelete, canMutate),
+    () =>
+      getColumns(handleEdit, handleDelete, canMutate, (row) => {
+        setCloseTarget(row)
+        setCloseOpen(true)
+      }),
     [canMutate] // eslint-disable-line react-hooks/exhaustive-deps
   )
 
@@ -221,6 +228,13 @@ export function PurchaseOrderDataTable({
         items={items}
         open={sheetOpen}
         onOpenChange={setSheetOpen}
+      />
+
+      <PurchaseOrderCloseDialog
+        order={closeTarget}
+        open={closeOpen}
+        onOpenChange={setCloseOpen}
+        onClosed={() => router.refresh()}
       />
 
     </div>

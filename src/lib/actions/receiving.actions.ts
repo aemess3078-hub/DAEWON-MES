@@ -101,7 +101,7 @@ async function createReceivingInspectionInternal(
   const purchaseOrderItem = await prisma.purchaseOrderItem.findUniqueOrThrow({
     where: { id: data.purchaseOrderItemId },
     include: {
-      purchaseOrder: { select: { siteId: true } },
+      purchaseOrder: { select: { siteId: true, status: true } },
       item: {
         select: {
           code: true,
@@ -117,6 +117,11 @@ async function createReceivingInspectionInternal(
       },
     },
   })
+
+  const poStatus = purchaseOrderItem.purchaseOrder.status
+  if (poStatus === "CLOSED" || poStatus === "CANCELLED") {
+    throw new Error("종결되었거나 취소된 발주에는 입고할 수 없습니다.")
+  }
 
   const poSiteId = purchaseOrderItem.purchaseOrder.siteId
   if (warehouse.siteId !== poSiteId) {
@@ -215,10 +220,18 @@ async function createReceivingInspectionInternal(
             qty: true,
             receivedQty: true,
             item: { select: { uom: true } },
+            purchaseOrder: { select: { status: true } },
           },
         })
         if (!lockedPurchaseOrderItem) {
           throw new Error("발주 품목을 찾을 수 없습니다.")
+        }
+        // 잠금 이후 상태를 다시 확인한다(잔량 종결과 입고가 동시에 실행되는 경우)
+        if (
+          lockedPurchaseOrderItem.purchaseOrder.status === "CLOSED" ||
+          lockedPurchaseOrderItem.purchaseOrder.status === "CANCELLED"
+        ) {
+          throw new Error("종결되었거나 취소된 발주에는 입고할 수 없습니다.")
         }
         const lockedRemainingQty =
           Number(lockedPurchaseOrderItem.qty) - Number(lockedPurchaseOrderItem.receivedQty)

@@ -1,13 +1,12 @@
 "use client"
 
-import { Fragment, useEffect, useMemo, useState, useTransition } from "react"
-import { AlertTriangle, Calculator, ChevronDown, ChevronRight, ClipboardList, PackageX } from "lucide-react"
+import { useEffect, useMemo, useState, useTransition } from "react"
+import { AlertTriangle, Calculator, ClipboardList, PackageX } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { runOrderBasedMrp } from "@/lib/actions/mrp-order.actions"
 import type { OrderMrpPayload } from "@/lib/services/mrp-order.service"
-import type { OrderMrpMaterialView } from "@/lib/mrp/order-mrp-adapter"
 import {
   isDateOnly,
   selectionFromRange,
@@ -17,12 +16,15 @@ import {
   type PeriodSelection,
 } from "@/lib/mrp/period"
 import type { DateOnly } from "@/lib/mrp/types"
+import { MaterialRows } from "./material-rows"
 import { PeriodRequirementTable } from "./period-requirement-table"
 import { PeriodSelector } from "./period-selector"
 
 const fmt = (n: number) => n.toLocaleString("ko-KR", { maximumFractionDigits: 3 })
 
-const TABLE_HEADERS: Array<{ label: string; align?: "right" }> = [
+type Header = { label: string; align?: "right" }
+
+const TABLE_HEADERS: Header[] = [
   { label: "자재코드" },
   { label: "자재명" },
   { label: "규격" },
@@ -38,6 +40,27 @@ const TABLE_HEADERS: Array<{ label: string; align?: "right" }> = [
   { label: "결품 수주", align: "right" },
 ]
 
+/** 예정입고를 반영한 경우: 입고예정 / 최대 결품 / 다음 입고일 / 상태 컬럼이 추가된다(기존 컬럼 순서는 유지). */
+const TABLE_HEADERS_RECEIPTS: Header[] = [
+  { label: "자재코드" },
+  { label: "자재명" },
+  { label: "규격" },
+  { label: "단위" },
+  { label: "현재고", align: "right" },
+  { label: "예약재고", align: "right" },
+  { label: "가용재고", align: "right" },
+  { label: "총 소요량", align: "right" },
+  { label: "입고예정", align: "right" },
+  { label: "최종 예상재고", align: "right" },
+  { label: "최종 부족", align: "right" },
+  { label: "최대 결품", align: "right" },
+  { label: "최초 결품일" },
+  { label: "다음 입고일" },
+  { label: "상태" },
+  { label: "부족 유발 PO" },
+  { label: "결품 수주", align: "right" },
+]
+
 type Kpi = { label: string; value: string; hint: string; tone?: "danger" | "warn" }
 type ViewMode = "shortage" | "requirement"
 
@@ -47,6 +70,7 @@ export function OrderMrpPanel() {
   const [to, setTo] = useState("")
   const [today, setToday] = useState<DateOnly | null>(null)
   const [includeDraft, setIncludeDraft] = useState(false)
+  const [includeReceipts, setIncludeReceipts] = useState(true)
   const [viewMode, setViewMode] = useState<ViewMode>("shortage")
   const [payload, setPayload] = useState<OrderMrpPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -60,11 +84,21 @@ export function OrderMrpPanel() {
   const [showWarnings, setShowWarnings] = useState(false)
 
   /** 조회 실행. 상태 업데이트가 비동기이므로 실행 대상 기간/옵션을 인자로 받는다. */
-  const run = (range: { from: string | null; to: string | null }, draft: boolean, mode: ViewMode) => {
+  const run = (
+    range: { from: string | null; to: string | null },
+    draft: boolean,
+    mode: ViewMode,
+    receipts: boolean = includeReceipts
+  ) => {
     setError(null)
     startTransition(async () => {
       try {
-        const result = await runOrderBasedMrp({ from: range.from, to: range.to, includeDraft: draft })
+        const result = await runOrderBasedMrp({
+          from: range.from,
+          to: range.to,
+          includeDraft: draft,
+          includeScheduledReceipts: receipts,
+        })
         setPayload(result)
         setExpanded(null)
         // 새로고침/공유를 위해 현재 조건을 URL 에 반영(라우터 상태는 건드리지 않는다)
@@ -72,6 +106,7 @@ export function OrderMrpPanel() {
         if (range.from) q.set("from", range.from)
         if (range.to) q.set("to", range.to)
         if (draft) q.set("draft", "1")
+        if (!receipts) q.set("receipts", "0")
         if (mode !== "shortage") q.set("view", mode)
         const qs = q.toString()
         window.history.replaceState(null, "", window.location.pathname + (qs ? `?${qs}` : ""))
@@ -91,14 +126,16 @@ export function OrderMrpPanel() {
     const f = qf && isDateOnly(qf) ? qf : null
     const t = qt && isDateOnly(qt) ? qt : null
     const draft = q.get("draft") === "1"
+    const receipts = q.get("receipts") !== "0"
     const mode: ViewMode = q.get("view") === "requirement" ? "requirement" : "shortage"
     setViewMode(mode)
     setIncludeDraft(draft)
+    setIncludeReceipts(receipts)
     if (f || t) {
       setSelection(selectionFromRange(f, t))
       setFrom(f ?? "")
       setTo(t ?? "")
-      run({ from: f, to: t }, draft, mode)
+      run({ from: f, to: t }, draft, mode, receipts)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -186,6 +223,16 @@ export function OrderMrpPanel() {
             hint: "ACTIVE 기본 BOM 이 없거나 오류라 계산에서 제외된 수주 라인",
             tone: view.kpi.bomIssueLineCount > 0 ? "warn" : undefined,
           },
+          ...(view.scheduledReceipts.enabled
+            ? [
+                {
+                  label: "일시 결품",
+                  value: fmt(view.kpi.temporaryShortageMaterialCount),
+                  hint: "기간 중 결품이 있었지만 입고예정으로 최종 예상재고가 0 이상으로 회복되는 자재(납기 대응·독촉 필요)",
+                  tone: view.kpi.temporaryShortageMaterialCount > 0 ? ("warn" as const) : undefined,
+                },
+              ]
+            : []),
         ]
       : [
           { label: "대상 기간", value: periodText, hint: "납기 기준, 시작일·종료일 포함" },
@@ -208,7 +255,12 @@ export function OrderMrpPanel() {
 
   const bomIssueLines = view?.excludedLines.filter((l) => l.isBomIssue) ?? []
   const otherExcluded = view?.excludedLines.filter((l) => !l.isBomIssue) ?? []
-  const attentionWarnings = view?.warnings.filter((w) => w.severity === "WARNING") ?? []
+  // 예정일 경과 미입고는 전용 섹션에 표로 보여 주므로 일반 경고 목록에서는 제외한다
+  const attentionWarnings =
+    view?.warnings.filter((w) => w.severity === "WARNING" && w.code !== "OVERDUE_SCHEDULED_RECEIPT") ?? []
+  const receiptsOn = Boolean(view?.scheduledReceipts.enabled)
+  const overdueReceipts = view?.scheduledReceipts.overdue ?? []
+  const headers = receiptsOn ? TABLE_HEADERS_RECEIPTS : TABLE_HEADERS
 
   const emptyMessage = !view
     ? ""
@@ -244,6 +296,10 @@ export function OrderMrpPanel() {
             <Checkbox checked={includeDraft} onCheckedChange={(v) => setIncludeDraft(v === true)} />
             임시저장(DRAFT) 수주 포함
           </label>
+          <label className="flex items-center gap-2 text-[14px] cursor-pointer">
+            <Checkbox checked={includeReceipts} onCheckedChange={(v) => setIncludeReceipts(v === true)} />
+            확정 발주 입고예정 반영
+          </label>
           <Button onClick={handleRun} disabled={isPending} className="gap-2">
             <Calculator className="w-4 h-4" />
             {isPending ? "계산 중..." : "조회 / MRP 실행"}
@@ -251,6 +307,8 @@ export function OrderMrpPanel() {
         </div>
         <p className="text-[13px] text-muted-foreground">
           재고 기준 = 가용재고(격리/보류 LOT 제외) · 출하잔량 = 수주수량 − 출하확정수량(계획 출하는 차감하지 않음)
+          {includeReceipts &&
+            " · 입고예정 = 발주완료/부분입고 발주의 미입고 잔량(발주수량 − 입고수량)을 입고예정일 기준으로 반영하며, 같은 날은 입고가 수주보다 먼저입니다. 예정일이 지난 미입고는 반영하지 않습니다."}
           {selection.mode !== "ALL" &&
             " · 기간 MRP 는 선택 기간에 납기가 있는 수주만 차감하며, 기간 이전 납기의 미출하 수주는 재고를 선점하지 않습니다."}
         </p>
@@ -297,7 +355,11 @@ export function OrderMrpPanel() {
           </div>
 
           {/* KPI */}
-          <div className={`grid grid-cols-2 gap-4 ${viewMode === "shortage" ? "lg:grid-cols-5" : "lg:grid-cols-6"}`}>
+          <div
+            className={`grid grid-cols-2 gap-4 ${
+              viewMode === "shortage" ? (receiptsOn ? "lg:grid-cols-6" : "lg:grid-cols-5") : "lg:grid-cols-6"
+            }`}
+          >
             {kpis.map((k) => (
               <div
                 key={k.label}
@@ -361,6 +423,52 @@ export function OrderMrpPanel() {
                   </table>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* 예정일 경과 미입고 (가산하지 않음) */}
+          {overdueReceipts.length > 0 && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50/60">
+              <div className="flex items-center gap-2 px-4 py-3 text-[15px] font-medium text-amber-800">
+                <AlertTriangle className="w-4 h-4" />
+                입고예정일이 지난 미입고 발주 {fmt(overdueReceipts.length)}건 — 입고예정에 반영하지 않았습니다
+              </div>
+              <div className="overflow-x-auto border-t border-amber-200 bg-background rounded-b-xl">
+                <table className="w-full text-[14px] border-collapse">
+                  <thead>
+                    <tr className="bg-muted/30 border-b text-left text-[13px] text-muted-foreground">
+                      <th className="px-4 py-2.5">발주번호</th>
+                      <th className="px-4 py-2.5">공급사</th>
+                      <th className="px-4 py-2.5">자재</th>
+                      <th className="px-4 py-2.5">입고예정일</th>
+                      <th className="px-4 py-2.5 text-right">경과일</th>
+                      <th className="px-4 py-2.5 text-right">발주</th>
+                      <th className="px-4 py-2.5 text-right">입고</th>
+                      <th className="px-4 py-2.5 text-right">미입고</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {overdueReceipts.map((o, i) => (
+                      <tr key={o.purchaseOrderNo + i} className="border-b last:border-0">
+                        <td className="px-4 py-2.5 font-mono text-[13px]">{o.purchaseOrderNo}</td>
+                        <td className="px-4 py-2.5">{o.supplierName ?? "-"}</td>
+                        <td className="px-4 py-2.5">
+                          <span className="font-mono text-[13px]">{o.itemCode}</span>
+                          {o.itemName && <span className="text-muted-foreground"> {o.itemName}</span>}
+                        </td>
+                        <td className="px-4 py-2.5 whitespace-nowrap">{o.expectedDate}</td>
+                        <td className="px-4 py-2.5 text-right text-amber-700">{fmt(o.daysOverdue)}일</td>
+                        <td className="px-4 py-2.5 text-right">{fmt(o.orderedQty)}</td>
+                        <td className="px-4 py-2.5 text-right">{fmt(o.receivedQty)}</td>
+                        <td className="px-4 py-2.5 text-right font-semibold">{fmt(o.openQty)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="px-4 py-2.5 text-[13px] text-amber-800">
+                자재발주현황에서 입고예정일을 수정하거나, 더 이상 입고되지 않는 잔량이면 &quot;미입고 잔량 종결&quot;을 실행하세요.
+              </p>
             </div>
           )}
 
@@ -433,6 +541,7 @@ export function OrderMrpPanel() {
             <PeriodRequirementTable
               rows={rows}
               expanded={expanded}
+              showScheduledReceipts={receiptsOn}
               onToggle={(id) => setExpanded((cur) => (cur === id ? null : id))}
             />
           ) : (
@@ -442,7 +551,7 @@ export function OrderMrpPanel() {
                   <thead>
                     <tr className="bg-muted/30 border-b">
                       <th className="w-8 px-2 py-3" />
-                      {TABLE_HEADERS.map((h) => (
+                      {headers.map((h) => (
                         <th
                           key={h.label}
                           className={`px-3 py-3 text-[13px] font-semibold text-muted-foreground whitespace-nowrap ${
@@ -461,11 +570,13 @@ export function OrderMrpPanel() {
                         m={m}
                         open={expanded === m.componentItemId}
                         onToggle={() => setExpanded((cur) => (cur === m.componentItemId ? null : m.componentItemId))}
+                        receipts={receiptsOn}
+                        colCount={headers.length}
                       />
                     ))}
                     {rows.length === 0 && (
                       <tr>
-                        <td colSpan={TABLE_HEADERS.length + 1} className="px-4 py-8 text-center text-muted-foreground">
+                        <td colSpan={headers.length + 1} className="px-4 py-8 text-center text-muted-foreground">
                           조건에 맞는 자재가 없습니다.
                         </td>
                       </tr>
@@ -478,104 +589,5 @@ export function OrderMrpPanel() {
         </>
       )}
     </div>
-  )
-}
-
-function MaterialRows({ m, open, onToggle }: { m: OrderMrpMaterialView; open: boolean; onToggle: () => void }) {
-  const short = m.shortageQty > 0
-  const poText =
-    m.shortageOrderNos.length === 0
-      ? "-"
-      : m.shortageOrderNos.length <= 2
-        ? m.shortageOrderNos.join(", ")
-        : `${m.shortageOrderNos.slice(0, 2).join(", ")} 외 ${m.shortageOrderNos.length - 2}건`
-  return (
-    <Fragment>
-      <tr
-        className={`border-b cursor-pointer transition-colors ${short ? "bg-red-50/40 hover:bg-red-50/70" : "hover:bg-muted/10"}`}
-        onClick={onToggle}
-      >
-        <td className="px-2 py-3 text-muted-foreground">
-          {open ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-        </td>
-        <td className="px-3 py-3 font-mono text-[13px] whitespace-nowrap">{m.code}</td>
-        <td className="px-3 py-3 font-medium">{m.name}</td>
-        <td className="px-3 py-3 text-muted-foreground">{m.spec ?? "-"}</td>
-        <td className="px-3 py-3 text-muted-foreground">{m.uom}</td>
-        <td className="px-3 py-3 text-right">{fmt(m.qtyOnHand)}</td>
-        <td className="px-3 py-3 text-right text-muted-foreground">{fmt(m.qtyHold)}</td>
-        <td className="px-3 py-3 text-right">{fmt(m.qtyAvailable)}</td>
-        <td className="px-3 py-3 text-right">{fmt(m.totalRequirement)}</td>
-        <td className={`px-3 py-3 text-right font-semibold ${m.finalBalance < 0 ? "text-red-600" : ""}`}>
-          {fmt(m.finalBalance)}
-        </td>
-        <td className={`px-3 py-3 text-right font-semibold ${short ? "text-red-600" : "text-muted-foreground"}`}>
-          {short ? fmt(m.shortageQty) : "-"}
-        </td>
-        <td className="px-3 py-3 whitespace-nowrap">{m.firstShortageDate ?? "-"}</td>
-        <td className="px-3 py-3">{poText}</td>
-        <td className="px-3 py-3 text-right">{m.shortageDemandCount > 0 ? fmt(m.shortageDemandCount) : "-"}</td>
-      </tr>
-      {open && (
-        <tr className="border-b bg-muted/10">
-          <td />
-          <td colSpan={TABLE_HEADERS.length} className="px-3 py-4">
-            <p className="text-[14px] font-medium mb-1">
-              수주별 순차 차감 — {m.code} {m.name}
-            </p>
-            <p className="text-[13px] text-muted-foreground mb-3">
-              가용재고 {fmt(m.qtyAvailable)}
-              {m.qtyHold > 0 && ` (현재고 ${fmt(m.qtyOnHand)} − 예약 ${fmt(m.qtyHold)})`}
-              {m.qtyExcludedByLot > 0 && ` · 격리/보류 LOT ${fmt(m.qtyExcludedByLot)} 제외`} 에서 납기순으로 차감합니다.
-            </p>
-            <div className="overflow-x-auto rounded-lg border bg-background">
-              <table className="w-full text-[14px] border-collapse">
-                <thead>
-                  <tr className="bg-muted/30 border-b text-[13px] text-muted-foreground">
-                    <th className="px-3 py-2 text-left">순서</th>
-                    <th className="px-3 py-2 text-left">납기</th>
-                    <th className="px-3 py-2 text-left">PO</th>
-                    <th className="px-3 py-2 text-left">고객</th>
-                    <th className="px-3 py-2 text-left">제품</th>
-                    <th className="px-3 py-2 text-right">수주잔량</th>
-                    <th className="px-3 py-2 text-right">해당 자재 소요</th>
-                    <th className="px-3 py-2 text-right">차감 전</th>
-                    <th className="px-3 py-2 text-right">차감 후</th>
-                    <th className="px-3 py-2 text-left">결품</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {m.steps.map((s) => (
-                    <tr key={s.orderLineId} className={`border-b last:border-0 ${s.isShortage ? "bg-red-50/50" : ""}`}>
-                      <td className="px-3 py-2">{s.sequence}</td>
-                      <td className="px-3 py-2 whitespace-nowrap">{s.deliveryDate ?? "-"}</td>
-                      <td className="px-3 py-2 font-mono text-[13px]">{s.orderNo}</td>
-                      <td className="px-3 py-2">{s.customerName ?? "-"}</td>
-                      <td className="px-3 py-2">
-                        <span className="font-mono text-[13px]">{s.itemCode}</span>
-                        {s.itemName !== s.itemCode && <span className="text-muted-foreground"> {s.itemName}</span>}
-                      </td>
-                      <td className="px-3 py-2 text-right">{fmt(s.demandQty)}</td>
-                      <td className="px-3 py-2 text-right">{fmt(s.requirement)}</td>
-                      <td className="px-3 py-2 text-right">{fmt(s.balanceBefore)}</td>
-                      <td className={`px-3 py-2 text-right font-semibold ${s.balanceAfter < 0 ? "text-red-600" : ""}`}>
-                        {fmt(s.balanceAfter)}
-                      </td>
-                      <td className="px-3 py-2">
-                        {s.isShortage ? (
-                          <span className="text-red-600 font-medium">부족 {fmt(s.shortageAtThisDemand)}</span>
-                        ) : (
-                          <span className="text-muted-foreground">-</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </td>
-        </tr>
-      )}
-    </Fragment>
   )
 }

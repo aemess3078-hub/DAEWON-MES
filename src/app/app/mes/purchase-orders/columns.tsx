@@ -2,7 +2,7 @@
 
 import { ColumnDef } from "@tanstack/react-table"
 import { PurchaseOrderStatus } from "@prisma/client"
-import { MoreHorizontal, Pencil, Trash2, ArrowRight } from "lucide-react"
+import { MoreHorizontal, Pencil, Trash2, ArrowRight, PackageMinus } from "lucide-react"
 import { format, isPast } from "date-fns"
 import Link from "next/link"
 import { Badge } from "@/components/ui/badge"
@@ -30,7 +30,7 @@ export type PurchaseOrderRow = {
     qty: number | string
     unitPrice: number | string
     receivedQty: number | string
-    item: { id: string; code: string; name: string; isLotTracked?: boolean; defaultWarehouseId?: string | null }
+    item: { id: string; code: string; name: string; uom?: string; isLotTracked?: boolean; defaultWarehouseId?: string | null }
     receivingInspections: { id: string }[]
   }[]
 }
@@ -50,7 +50,8 @@ const STATUS_CONFIG: Record<
 export function getColumns(
   onEdit: (row: PurchaseOrderRow) => void,
   onDelete: (id: string) => void,
-  canMutate = true
+  canMutate = true,
+  onCloseRemainder?: (row: PurchaseOrderRow) => void
 ): ColumnDef<PurchaseOrderRow>[] {
   return [
     {
@@ -138,6 +139,33 @@ export function getColumns(
       },
     },
     {
+      id: "openQty",
+      header: "미입고 잔량",
+      cell: ({ row }) => {
+        const open = row.original.items.reduce(
+          (s, i) => s + Math.max(0, Number(i.qty) - Number(i.receivedQty)),
+          0
+        )
+        const status = row.original.status
+        if (!(open > 0)) return <span className="text-[13px] text-muted-foreground">—</span>
+        if (status === "CLOSED") {
+          return (
+            <span className="text-[13px] text-muted-foreground" title="종결된 발주의 미납 수량(입고예정에서 제외됨)">
+              미납 {open.toLocaleString("ko-KR", { maximumFractionDigits: 3 })} 종결
+            </span>
+          )
+        }
+        if (status === "ORDERED" || status === "PARTIAL_RECEIVED") {
+          return (
+            <span className="text-[13px] font-medium text-amber-700">
+              {open.toLocaleString("ko-KR", { maximumFractionDigits: 3 })}
+            </span>
+          )
+        }
+        return <span className="text-[13px] text-muted-foreground">—</span>
+      },
+    },
+    {
       accessorKey: "status",
       header: "상태",
       cell: ({ row }) => {
@@ -154,6 +182,8 @@ export function getColumns(
       cell: ({ row }) => {
         const canGoToReceipt =
           row.original.status === "ORDERED" || row.original.status === "PARTIAL_RECEIVED"
+        const hasOpenQty = row.original.items.some((i) => Number(i.qty) > Number(i.receivedQty))
+        const canCloseRemainder = Boolean(onCloseRemainder) && canGoToReceipt && hasOpenQty
         return (
           <div className="flex items-center gap-1.5">
             {canGoToReceipt && (
@@ -179,6 +209,11 @@ export function getColumns(
                   <DropdownMenuItem onClick={() => onEdit(row.original)}>
                     <Pencil className="mr-2 h-4 w-4" /> 수정
                   </DropdownMenuItem>
+                  {canCloseRemainder && (
+                    <DropdownMenuItem onClick={() => onCloseRemainder!(row.original)}>
+                      <PackageMinus className="mr-2 h-4 w-4" /> 미입고 잔량 종결
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
                     className="text-destructive focus:text-destructive"

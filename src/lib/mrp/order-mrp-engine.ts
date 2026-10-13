@@ -25,8 +25,10 @@ import type {
   ExcludedReason,
   MaterialFirstShortage,
   MaterialMovement,
+  MaterialTimelineEvent,
   MrpBomLine,
   MrpDemandLine,
+  MrpScheduledReceipt,
   MrpWarning,
   OrderMrpDemandResult,
   OrderMrpInput,
@@ -491,7 +493,57 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     negativeStepCount: number
     firstShortage: MaterialFirstShortage | null
     movements: MaterialMovement[]
+    // Phase 5B
+    receipts: ReceiptEntry[]
+    receiptCursor: number
+    receiptQty: number
+    receiptCount: number
+    minBalance: number
+    shortageOpen: boolean
+    recoveredAt: string | null
+    timeline: MaterialTimelineEvent[]
   }
+  // 4-A) 예정입고(Phase 5B): NORMAL 에서만 사용. 자재별 (일자, 발주번호, 품목행, 입력순서) 결정적 정렬
+  type ReceiptEntry = { receipt: MrpScheduledReceipt; date: string; seq: number }
+  const receiptsByItem = new Map<string, ReceiptEntry[]>()
+  const rawReceipts = input.scheduledReceipts ?? []
+  if (rawReceipts.length > 0) {
+    if (compat) {
+      warnings.push({
+        code: "SCHEDULED_RECEIPTS_IGNORED",
+        severity: "INFO",
+        message: "Excel 호환 모드에서는 예정입고를 계산에 반영하지 않습니다.",
+      })
+    } else {
+      rawReceipts.forEach((r, index) => {
+        const valid = Number.isFinite(r.quantity) && r.quantity > 0 && isDateOnly(r.expectedDate)
+        if (!valid) {
+          warnings.push({
+            code: "INVALID_SCHEDULED_RECEIPT",
+            severity: "WARNING",
+            message: `예정입고의 수량 또는 일자가 올바르지 않아 제외했습니다: ${r.purchaseOrderNo}`,
+            componentItemId: r.componentItemId,
+          })
+          return
+        }
+        // 수요 계산 종료일(기간 MRP 의 to) 이후 입고는 이 계산의 시간축 밖이다
+        if (opts.to !== null && r.expectedDate > opts.to) return
+        const list = receiptsByItem.get(r.componentItemId) ?? []
+        list.push({ receipt: r, date: r.expectedDate, seq: r.originalIndex ?? index })
+        receiptsByItem.set(r.componentItemId, list)
+      })
+      receiptsByItem.forEach((list) =>
+        list.sort(
+          (a, b) =>
+            cmpString(a.date, b.date) ||
+            cmpString(a.receipt.purchaseOrderNo, b.receipt.purchaseOrderNo) ||
+            cmpString(a.receipt.purchaseOrderItemId ?? "", b.receipt.purchaseOrderItemId ?? "") ||
+            a.seq - b.seq
+        )
+      )
+    }
+  }
+
   const materials = new Map<string, MaterialState>()
   const addMaterial = (entry: UnitEntry) => {
     if (materials.has(entry.componentItemId)) return
@@ -505,6 +557,14 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
       negativeStepCount: 0,
       firstShortage: null,
       movements: [],
+      receipts: receiptsByItem.get(entry.componentItemId) ?? [],
+      receiptCursor: 0,
+      receiptQty: 0,
+      receiptCount: 0,
+      minBalance: opening,
+      shortageOpen: false,
+      recoveredAt: null,
+      timeline: [],
     })
   }
   for (const e of ordered) e.units.forEach((entry) => addMaterial(entry))
@@ -533,9 +593,36 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     }
   })
 
-  // 5) 순차 차감
+  // 5) 순차 차감 (+ Phase 5B: 날짜순 입고 이벤트. 같은 날은 입고 → 수요)
   const demandResults: OrderMrpDemandResult[] = []
   const materialList = Array.from(materials.values())
+  const applyReceipts = (m: MaterialState, upTo: string | null) => {
+    while (m.receiptCursor < m.receipts.length) {
+      const entry = m.receipts[m.receiptCursor]
+      if (upTo !== null && entry.date > upTo) break
+      m.receiptCursor += 1
+      const before = m.balance
+      const after = before + entry.receipt.quantity
+      m.balance = after
+      m.receiptQty += entry.receipt.quantity
+      m.receiptCount += 1
+      if (m.shortageOpen && before < 0 && after >= 0) {
+        m.recoveredAt = entry.date
+        m.shortageOpen = false
+      }
+      m.timeline.push({
+        type: "SCHEDULED_RECEIPT",
+        date: entry.date,
+        quantity: entry.receipt.quantity,
+        balanceBefore: before,
+        balanceAfter: after,
+        purchaseOrderId: entry.receipt.purchaseOrderId,
+        purchaseOrderNo: entry.receipt.purchaseOrderNo,
+        purchaseOrderItemId: entry.receipt.purchaseOrderItemId ?? null,
+      })
+    }
+  }
+  const useReceipts = receiptsByItem.size > 0
   ordered.forEach((e, i) => {
     const sequence = i + 1
     const d = e.demand
@@ -544,6 +631,8 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     let cumulativeNegativeItemCount = 0
 
     for (const m of materialList) {
+      // 납기 미정(null) 수요는 날짜 근거가 없으므로 추가 입고를 앞당겨 반영하지 않는다(보수적)
+      if (useReceipts && d.deliveryDate !== null) applyReceipts(m, d.deliveryDate)
       const unit = e.units.get(m.entry.componentItemId)
       const requirement = unit ? unit.qty * e.demandQty : 0
       const balanceBefore = m.balance
@@ -553,6 +642,22 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
 
       m.balance = balanceAfter
       m.totalRequirement += requirement
+      if (balanceAfter < m.minBalance) m.minBalance = balanceAfter
+      if (useReceipts && requirement > 0) {
+        m.timeline.push({
+          type: "DEMAND",
+          date: d.deliveryDate,
+          quantity: requirement,
+          balanceBefore,
+          balanceAfter,
+          sequence,
+          orderId: d.orderId,
+          orderNo: d.orderNo,
+          orderLineId: d.orderLineId,
+          isShortage,
+        })
+      }
+      if (isShortage) m.shortageOpen = true
       if (balanceAfter < 0) {
         m.negativeStepCount += 1
         cumulativeNegativeItemCount += 1
@@ -613,6 +718,11 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     })
   })
 
+  // 5-A) 마지막 수요 이후 남은 예정입고(수요 계산 종료일 이내)를 최종 예상재고에 반영
+  if (useReceipts) {
+    for (const m of materialList) applyReceipts(m, null)
+  }
+
   // 6) 결과 조립
   const materialResults: OrderMrpMaterialResult[] = materialList.map((m) => {
     const info = infoOf(m.entry.componentItemId)
@@ -632,6 +742,12 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
       negativeStepCount: m.negativeStepCount,
       firstShortage: m.firstShortage,
       movements: m.movements,
+      scheduledReceiptQty: m.receiptQty,
+      scheduledReceiptCount: m.receiptCount,
+      hadShortage: m.shortageDemandCount > 0,
+      peakShortageQty: m.minBalance < 0 ? -m.minBalance : 0,
+      shortageRecoveredAt: m.balance >= 0 ? m.recoveredAt : null,
+      timeline: m.timeline,
     }
   })
 
@@ -667,6 +783,7 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     shortageComponentCount: materialResults.filter((m) => m.finalBalance < 0).length,
     totalFinalShortageQty: materialResults.reduce((sum, m) => sum + m.finalShortageQty, 0),
     shortageDemandCount: demandResults.filter((d) => d.shortageItemCount > 0).length,
+    temporaryShortageComponentCount: materialResults.filter((m) => m.hadShortage && m.finalBalance >= 0).length,
     firstShortage: globalFirst,
   }
 

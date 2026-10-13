@@ -25,13 +25,22 @@ type Props = {
   rows: OrderMrpMaterialView[]
   expanded: string | null
   onToggle: (componentItemId: string) => void
+  /** 예정입고를 반영한 결과일 때: 기간 내 입고예정(참고) 컬럼을 추가한다. 소요량 자체는 입고예정으로 줄어들지 않는다. */
+  showScheduledReceipts?: boolean
 }
 
 /**
  * 예상소요량(기간): "이 기간에 어떤 자재가 얼마나 필요한가".
  * 결품예측 화면과 같은 엔진 결과(OrderMrpView)를 다른 관점으로 보여 준다(추가 쿼리 없음).
  */
-export function PeriodRequirementTable({ rows, expanded, onToggle }: Props) {
+export function PeriodRequirementTable({ rows, expanded, onToggle, showScheduledReceipts = false }: Props) {
+  const headers: typeof HEADERS = showScheduledReceipts
+    ? [
+        ...HEADERS.slice(0, 8),
+        { label: "기간 내 입고예정", align: "right" },
+        ...HEADERS.slice(8),
+      ]
+    : HEADERS
   return (
     <div className="border rounded-xl overflow-hidden">
       <div className="overflow-x-auto">
@@ -39,7 +48,7 @@ export function PeriodRequirementTable({ rows, expanded, onToggle }: Props) {
           <thead>
             <tr className="bg-muted/30 border-b">
               <th className="w-8 px-2 py-3" />
-              {HEADERS.map((h) => (
+              {headers.map((h) => (
                 <th
                   key={h.label}
                   className={`px-3 py-3 text-[13px] font-semibold text-muted-foreground whitespace-nowrap ${
@@ -72,6 +81,15 @@ export function PeriodRequirementTable({ rows, expanded, onToggle }: Props) {
                     <td className="px-3 py-3 text-right">{fmt(m.demandLineCount)}</td>
                     <td className="px-3 py-3 text-right">{fmt(m.productCount)}</td>
                     <td className="px-3 py-3 text-right">{fmt(m.qtyAvailable)}</td>
+                    {showScheduledReceipts && (
+                      <td className="px-3 py-3 text-right">
+                        {m.scheduledReceiptQty > 0 ? (
+                          <span className="text-emerald-700">+{fmt(m.scheduledReceiptQty)}</span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
+                    )}
                     <td className={`px-3 py-3 text-right ${m.finalBalance < 0 ? "text-red-600 font-semibold" : ""}`}>
                       {fmt(m.finalBalance)}
                     </td>
@@ -84,7 +102,7 @@ export function PeriodRequirementTable({ rows, expanded, onToggle }: Props) {
                   {open && (
                     <tr className="border-b bg-muted/10">
                       <td />
-                      <td colSpan={HEADERS.length} className="px-3 py-4">
+                      <td colSpan={headers.length} className="px-3 py-4">
                         <p className="text-[14px] font-medium mb-1">
                           수요 상세 — {m.code} {m.name}
                         </p>
@@ -142,7 +160,7 @@ export function PeriodRequirementTable({ rows, expanded, onToggle }: Props) {
             })}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={HEADERS.length + 1} className="px-4 py-8 text-center text-muted-foreground">
+                <td colSpan={headers.length + 1} className="px-4 py-8 text-center text-muted-foreground">
                   조건에 맞는 자재가 없습니다.
                 </td>
               </tr>

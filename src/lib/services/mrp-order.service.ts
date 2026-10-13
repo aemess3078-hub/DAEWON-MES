@@ -10,16 +10,25 @@
  */
 
 import type { PrismaClient, SalesOrderStatus } from "@prisma/client"
-import { isDateOnly } from "../mrp/period"
+import { isDateOnly, toDateOnly } from "../mrp/period"
 import {
   DEMAND_ORDER_STATUSES,
   runOrderMrpFromRows,
   type OrderMrpView,
   type SalesOrderItemRow,
 } from "../mrp/order-mrp-adapter"
-import { loadDefaultBomRows, loadStockRows } from "./mrp-loaders"
+import type { PurchaseOrderItemRow } from "../mrp/scheduled-receipt"
+import {
+  collectComponentItemIds,
+  loadDefaultBomRows,
+  loadScheduledReceiptRows,
+  loadStockRows,
+} from "./mrp-loaders"
 
-export type OrderMrpDb = Pick<PrismaClient, "salesOrderItem" | "bOM" | "inventoryBalance">
+/** purchaseOrderItem 은 includeScheduledReceipts 를 사용할 때만 필요하다(기존 호출/테스트 호환). */
+export type OrderMrpDb = Pick<PrismaClient, "salesOrderItem" | "bOM" | "inventoryBalance"> & {
+  purchaseOrderItem?: PrismaClient["purchaseOrderItem"]
+}
 
 export type OrderMrpParams = {
   /** 납기 시작(포함), YYYY-MM-DD. 비우면 하한 없음 */
@@ -28,6 +37,11 @@ export type OrderMrpParams = {
   to?: string | null
   /** DRAFT(임시) 수주를 수요에 포함. 기본 false */
   includeDraft?: boolean
+  /**
+   * Phase 5B: 확정 구매발주(ORDERED/PARTIAL_RECEIVED)의 미입고 잔량을 예정입고로 시간축에 반영. 기본 false(옵트인).
+   * 기준일은 서버가 KST 오늘로 결정한다(클라이언트 값 없음).
+   */
+  includeScheduledReceipts?: boolean
 }
 
 export type OrderMrpPayload = {
@@ -40,6 +54,7 @@ export function normalizeOrderMrpParams(raw: unknown): {
   from: string | null
   to: string | null
   includeDraft: boolean
+  includeScheduledReceipts?: true
 } {
   const obj = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>
   const read = (key: "from" | "to"): string | null => {
@@ -56,13 +71,19 @@ export function normalizeOrderMrpParams(raw: unknown): {
     throw new Error("시작일이 종료일보다 늦습니다.")
   }
   // tenantId 등 그 외 키는 의도적으로 무시한다(클라이언트 값을 신뢰하지 않음)
-  return { from, to, includeDraft: obj.includeDraft === true }
+  return {
+    from,
+    to,
+    includeDraft: obj.includeDraft === true,
+    // true 일 때만 키를 둔다(기존 응답 형태 유지)
+    ...(obj.includeScheduledReceipts === true ? { includeScheduledReceipts: true as const } : {}),
+  }
 }
 
 export async function loadAndRunOrderMrp(
   db: OrderMrpDb,
   tenantId: string,
-  params: { from: string | null; to: string | null; includeDraft: boolean },
+  params: { from: string | null; to: string | null; includeDraft: boolean; includeScheduledReceipts?: boolean },
   now: () => Date = () => new Date()
 ): Promise<OrderMrpPayload> {
   let queryCount = 0
@@ -108,17 +129,34 @@ export async function loadAndRunOrderMrp(
   const { stockRows, queried } = await loadStockRows(db, tenantId, bomRows)
   if (queried) queryCount += 1
 
+  // 4) 예정입고(Phase 5B, 옵트인): 구성품 전체의 확정 구매발주 잔량을 1회 조회. 기준일 = KST 오늘(date-only)
+  const calculatedAt = now()
+  let scheduledReceiptRows: PurchaseOrderItemRow[] | undefined
+  let baseDate: string | undefined
+  if (params.includeScheduledReceipts) {
+    if (!db.purchaseOrderItem) throw new Error("예정입고 조회를 사용할 수 없습니다.")
+    const loaded = await loadScheduledReceiptRows(
+      { purchaseOrderItem: db.purchaseOrderItem },
+      tenantId,
+      collectComponentItemIds(bomRows, tenantId)
+    )
+    if (loaded.queried) queryCount += 1
+    scheduledReceiptRows = loaded.rows
+    baseDate = toDateOnly(calculatedAt)
+  }
+
   const view = runOrderMrpFromRows({
     tenantId,
     demandRows,
     bomRows,
     stockRows,
     params: { from: params.from, to: params.to, includeDraft: params.includeDraft },
+    ...(scheduledReceiptRows !== undefined ? { scheduledReceiptRows, baseDate } : {}),
   })
 
   return {
     view,
-    calculatedAt: now().toISOString(),
+    calculatedAt: calculatedAt.toISOString(),
     diagnostics: { queryCount, bomLevels },
   }
 }

@@ -10,10 +10,17 @@
  *          shippedQty 는 출하 확정(confirmShipment)에서만 증가한다. PLANNED 출하는 차감하지 않는다.
  *  - BOM: tenant 일치 + status=ACTIVE + isDefault=true 인 BOM 정확히 1개.
  *          0개 → MISSING_DEFAULT_BOM, 2개 이상 → MULTIPLE_DEFAULT_BOM (임의 선택 금지, 계산 제외)
+ *  - (Phase 5B) 예정입고: scheduledReceiptRows 와 baseDate 가 모두 주어질 때만 시간축에 반영한다.
+ *          분류 규칙은 scheduled-receipt.ts. 주어지지 않으면 기존 계산과 동일하다.
  */
 
 import { runOrderMrp } from "./order-mrp-engine"
 import { toDateOnly } from "./period"
+import {
+  classifyScheduledReceipts,
+  type PurchaseOrderItemRow,
+  type ScheduledReceiptClassification,
+} from "./scheduled-receipt"
 import type {
   DateOnly,
   ExcludedOrderLine,
@@ -274,6 +281,70 @@ export type OrderMrpMaterialView = {
   lastNeedDate: DateOnly | null
   /** requirement > 0 인 수주만 (잔량 체인은 0 소요 단계에서 변하지 않으므로 손실 없음) */
   steps: OrderMrpStepView[]
+  // ── Phase 5B: 예정입고 / 시간축 (예정입고를 반영하지 않으면 0·null·빈 배열) ──
+  /** 계산에 반영된 입고예정 수량 합계 */
+  scheduledReceiptQty: number
+  scheduledReceiptCount: number
+  /** 반영된 입고예정 중 가장 이른 입고일 */
+  nextReceiptDate: DateOnly | null
+  /** 기간 중 결품이 한 번이라도 있었는가(최종 잔량이 회복돼도 true) */
+  hadShortage: boolean
+  /** 시간축 최저 잔량의 부족 크기 */
+  peakShortageQty: number
+  /** 결품 후 입고예정으로 회복되어 최종 예상재고가 0 이상인가(일시 결품) */
+  temporaryShortage: boolean
+  /** 일시 결품이 입고로 해소된 일자 */
+  shortageRecoveredAt: DateOnly | null
+  /** 예정일이 지나 가산하지 않은 미입고 잔량 합계/건수 */
+  overdueReceiptQty: number
+  overdueReceiptCount: number
+  /** 입고/수요 이벤트 시간축(예정입고를 반영한 경우에만) */
+  timeline: OrderMrpTimelineEventView[]
+}
+
+export type OrderMrpTimelineEventView = {
+  type: "SCHEDULED_RECEIPT" | "DEMAND"
+  date: DateOnly | null
+  /** 입고: 발주번호, 수요: 수주번호 */
+  referenceNo: string
+  /** 입고: 공급사, 수요: 고객 */
+  partyName: string | null
+  /** 수요: 제품 코드 */
+  itemCode: string | null
+  /** 항상 양수 */
+  quantity: number
+  /** 입고 +, 수요 − */
+  signedQuantity: number
+  balanceBefore: number
+  balanceAfter: number
+  isShortage: boolean
+  /** 수요 처리 순서 */
+  sequence: number | null
+}
+
+export type OrderMrpOverdueReceiptView = {
+  purchaseOrderNo: string
+  supplierName: string | null
+  itemCode: string
+  itemName: string
+  expectedDate: DateOnly
+  orderedQty: number
+  receivedQty: number
+  openQty: number
+  daysOverdue: number
+}
+
+export type OrderMrpScheduledReceiptsView = {
+  /** 예정입고를 계산에 반영했는가 */
+  enabled: boolean
+  baseDate: DateOnly | null
+  /** 계산에 반영된 입고예정 건수(발주 품목 행) / 해당 자재 수 */
+  appliedReceiptCount: number
+  appliedMaterialCount: number
+  /** 예정일 경과로 가산하지 않은 미입고 건(결과 자재 한정) */
+  overdue: OrderMrpOverdueReceiptView[]
+  /** 외주발주라서 제외한 건수(참고) */
+  excludedOutsourcingCount: number
 }
 
 export type OrderMrpExcludedLineView = {
@@ -315,6 +386,12 @@ export type OrderMrpKpi = {
   productCount: number
   /** (수주 라인 × 자재) 소요 라인 수. 단위가 달라 수량 합계는 만들지 않는다 */
   requirementLineCount: number
+  /** Phase 5B: 기간 중 결품이 있었으나 입고예정으로 회복되어 최종 예상재고가 0 이상인 자재 수 */
+  temporaryShortageMaterialCount: number
+  /** Phase 5B: 입고예정이 계산에 반영된 자재 수 */
+  scheduledReceiptMaterialCount: number
+  /** Phase 5B: 예정일 경과로 가산하지 않은 미입고 건수 */
+  overdueReceiptCount: number
 }
 
 export type OrderMrpView = {
@@ -322,6 +399,8 @@ export type OrderMrpView = {
   params: { from: DateOnly | null; to: DateOnly | null; includeDraft: boolean }
   kpi: OrderMrpKpi
   materials: OrderMrpMaterialView[]
+  /** Phase 5B 예정입고 요약(반영하지 않았으면 enabled=false) */
+  scheduledReceipts: OrderMrpScheduledReceiptsView
   /** 사용자 조치가 필요한 제외 라인(BOM 문제, 비정상 수량/날짜 등) */
   excludedLines: OrderMrpExcludedLineView[]
   /** 사유별 제외 건수(기간 밖/잔량 없음 포함) */
@@ -370,10 +449,19 @@ export type BuildViewArgs = {
   bomIssues: ReadonlyMap<string, BomIssueCode>
   adapterWarnings: readonly AdapterWarning[]
   params: { from: DateOnly | null; to: DateOnly | null; includeDraft: boolean }
+  /** Phase 5B: 예정입고 분류 결과(없으면 반영하지 않음) */
+  scheduled?: { baseDate: DateOnly; classification: ScheduledReceiptClassification } | null
+}
+
+function daysBetween(from: DateOnly, to: DateOnly): number {
+  const f = from.split("-").map(Number)
+  const t = to.split("-").map(Number)
+  return Math.round((Date.UTC(t[0], t[1] - 1, t[2]) - Date.UTC(f[0], f[1] - 1, f[2])) / 86_400_000)
 }
 
 export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
   const { result, demandRows, componentMeta, stock, bomIssues, adapterWarnings, params } = args
+  const scheduled = args.scheduled ?? null
   const rowByLineId = new Map(demandRows.map((r) => [r.id, r]))
 
   const relabel = (e: ExcludedOrderLine): string => {
@@ -405,6 +493,21 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
   }
 
   const demandBySeq = new Map(result.demands.map((d) => [d.orderLineId, d]))
+  const resultMaterialIds = new Set(result.materials.map((m) => m.componentItemId))
+  const overdueByItem = new Map<string, { qty: number; count: number }>()
+  if (scheduled) {
+    for (const o of scheduled.classification.overdue) {
+      if (!resultMaterialIds.has(o.itemId)) continue
+      const agg = overdueByItem.get(o.itemId) ?? { qty: 0, count: 0 }
+      agg.qty += o.openQty
+      agg.count += 1
+      overdueByItem.set(o.itemId, agg)
+    }
+  }
+  const supplierByPoLine = new Map<string, string | null>()
+  if (scheduled) {
+    for (const d of scheduled.classification.details) supplierByPoLine.set(d.purchaseOrderItemId, d.supplierName)
+  }
   const materials: OrderMrpMaterialView[] = []
   for (const m of result.materials) {
     if (!(m.totalRequirement > 0) && !(m.finalBalance < 0)) continue
@@ -459,14 +562,59 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
       firstNeedDate: steps.reduce<DateOnly | null>((min, st) => (st.deliveryDate !== null && (min === null || st.deliveryDate < min) ? st.deliveryDate : min), null),
       lastNeedDate: steps.reduce<DateOnly | null>((max, st) => (st.deliveryDate !== null && (max === null || st.deliveryDate > max) ? st.deliveryDate : max), null),
       steps,
+      scheduledReceiptQty: m.scheduledReceiptQty,
+      scheduledReceiptCount: m.scheduledReceiptCount,
+      nextReceiptDate: m.timeline.reduce<DateOnly | null>(
+        (min, ev) => (ev.type === "SCHEDULED_RECEIPT" && ev.date !== null && (min === null || ev.date < min) ? ev.date : min),
+        null
+      ),
+      hadShortage: m.hadShortage,
+      peakShortageQty: m.peakShortageQty,
+      temporaryShortage: m.hadShortage && m.finalBalance >= 0,
+      shortageRecoveredAt: m.hadShortage && m.finalBalance >= 0 ? m.shortageRecoveredAt : null,
+      overdueReceiptQty: overdueByItem.get(m.componentItemId)?.qty ?? 0,
+      overdueReceiptCount: overdueByItem.get(m.componentItemId)?.count ?? 0,
+      timeline: m.timeline.map<OrderMrpTimelineEventView>((ev) => {
+        if (ev.type === "SCHEDULED_RECEIPT") {
+          return {
+            type: "SCHEDULED_RECEIPT",
+            date: ev.date,
+            referenceNo: ev.purchaseOrderNo ?? "",
+            partyName: ev.purchaseOrderItemId ? supplierByPoLine.get(ev.purchaseOrderItemId) ?? null : null,
+            itemCode: null,
+            quantity: ev.quantity,
+            signedQuantity: ev.quantity,
+            balanceBefore: ev.balanceBefore,
+            balanceAfter: ev.balanceAfter,
+            isShortage: false,
+            sequence: null,
+          }
+        }
+        const row = ev.orderLineId ? rowByLineId.get(ev.orderLineId) : undefined
+        const demand = ev.orderLineId ? demandBySeq.get(ev.orderLineId) : undefined
+        return {
+          type: "DEMAND",
+          date: ev.date,
+          referenceNo: ev.orderNo ?? "",
+          partyName: row?.salesOrder.customer?.name ?? null,
+          itemCode: demand?.itemCode ?? null,
+          quantity: ev.quantity,
+          signedQuantity: -ev.quantity,
+          balanceBefore: ev.balanceBefore,
+          balanceAfter: ev.balanceAfter,
+          isShortage: ev.isShortage === true,
+          sequence: ev.sequence ?? null,
+        }
+      }),
     })
   }
 
   // 결품 자재 먼저(최초 결품 처리 순서), 그 다음 코드순
   const firstSeq = (v: OrderMrpMaterialView) => v.steps.find((s) => s.isShortage)?.sequence ?? Number.POSITIVE_INFINITY
   materials.sort((a, b) => {
-    const as = a.shortageQty > 0 ? 0 : 1
-    const bs = b.shortageQty > 0 ? 0 : 1
+    // 최종 부족 → 일시 결품(입고로 회복) → 정상. 예정입고가 없으면 일시 결품이 없어 기존 정렬과 동일하다.
+    const as = a.shortageQty > 0 ? 0 : a.temporaryShortage ? 1 : 2
+    const bs = b.shortageQty > 0 ? 0 : b.temporaryShortage ? 1 : 2
     if (as !== bs) return as - bs
     const f = firstSeq(a) - firstSeq(b)
     if (f !== 0 && Number.isFinite(f)) return f
@@ -491,6 +639,17 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
         itemCode: w.itemCode,
         relatedOrderLineIds: w.relatedOrderLineIds,
       })),
+    // Phase 5B: 결과 자재와 관련된 예정입고 이슈만 노출(경과 / 날짜 없음 / 수량 이상)
+    ...(scheduled
+      ? scheduled.classification.issues
+          .filter((i) => resultMaterialIds.has(i.itemId))
+          .map<OrderMrpWarningView>((i) => ({
+            code: i.code,
+            severity: i.severity,
+            message: i.message,
+            itemCode: componentMeta.get(i.itemId)?.code,
+          }))
+      : []),
   ]
 
   return {
@@ -504,8 +663,40 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
       bomIssueLineCount: excludedLines.filter((l) => l.isBomIssue).length,
       productCount: new Set(result.demands.map((d) => d.itemId)).size,
       requirementLineCount: result.demands.reduce((sum, d) => sum + d.requirements.length, 0),
+      temporaryShortageMaterialCount: result.summary.temporaryShortageComponentCount,
+      scheduledReceiptMaterialCount: result.materials.filter((m) => m.scheduledReceiptCount > 0).length,
+      overdueReceiptCount: Array.from(overdueByItem.values()).reduce((sum, v) => sum + v.count, 0),
     },
     materials,
+    scheduledReceipts: scheduled
+      ? {
+          enabled: true,
+          baseDate: scheduled.baseDate,
+          appliedReceiptCount: result.materials.reduce((sum, m) => sum + m.scheduledReceiptCount, 0),
+          appliedMaterialCount: result.materials.filter((m) => m.scheduledReceiptCount > 0).length,
+          overdue: scheduled.classification.overdue
+            .filter((o) => resultMaterialIds.has(o.itemId))
+            .map<OrderMrpOverdueReceiptView>((o) => ({
+              purchaseOrderNo: o.purchaseOrderNo,
+              supplierName: o.supplierName,
+              itemCode: componentMeta.get(o.itemId)?.code ?? o.itemId,
+              itemName: componentMeta.get(o.itemId)?.name ?? "",
+              expectedDate: o.expectedDate,
+              orderedQty: o.orderedQty,
+              receivedQty: o.receivedQty,
+              openQty: o.openQty,
+              daysOverdue: daysBetween(o.expectedDate, scheduled.baseDate),
+            })),
+          excludedOutsourcingCount: scheduled.classification.excludedOutsourcingCount,
+        }
+      : {
+          enabled: false,
+          baseDate: null,
+          appliedReceiptCount: 0,
+          appliedMaterialCount: 0,
+          overdue: [],
+          excludedOutsourcingCount: 0,
+        },
     excludedLines,
     excludedCounts,
     warnings,
@@ -520,6 +711,10 @@ export type RunAdapterArgs = {
   bomRows: readonly BomRow[]
   stockRows: readonly InventoryBalanceRow[]
   params: { from: DateOnly | null; to: DateOnly | null; includeDraft: boolean }
+  /** Phase 5B: 구매발주 품목 후보 행. baseDate 와 함께 주어질 때만 예정입고를 반영한다. */
+  scheduledReceiptRows?: readonly PurchaseOrderItemRow[]
+  /** Phase 5B: 기준일(KST 오늘, date-only). 엔진/어댑터는 현재 시각을 읽지 않는다. */
+  baseDate?: DateOnly | null
 }
 
 export function runOrderMrpFromRows(args: RunAdapterArgs): OrderMrpView {
@@ -559,10 +754,22 @@ export function runOrderMrpFromRows(args: RunAdapterArgs): OrderMrpView {
     })
   })
 
+  const scheduled =
+    args.scheduledReceiptRows !== undefined && args.baseDate
+      ? {
+          baseDate: args.baseDate,
+          classification: classifyScheduledReceipts(args.scheduledReceiptRows, {
+            tenantId: args.tenantId,
+            baseDate: args.baseDate,
+          }),
+        }
+      : null
+
   const input: OrderMrpInput = {
     demands,
     boms: toBomLines(selected),
     stocks: toStockEntries(stock),
+    ...(scheduled ? { scheduledReceipts: scheduled.classification.receipts } : {}),
   }
   const result = runOrderMrp(input, {
     mode: "NORMAL",
@@ -579,5 +786,6 @@ export function runOrderMrpFromRows(args: RunAdapterArgs): OrderMrpView {
     bomIssues,
     adapterWarnings,
     params: args.params,
+    scheduled,
   })
 }
