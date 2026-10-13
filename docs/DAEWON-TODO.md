@@ -43,7 +43,7 @@
 
 ## 6. 실제 로고 / 기준정보 입력
 
-- **로고:** 현재 텍스트 임시 표시(`src/components/brand-logo.tsx`, "DAEWON PRECISION / 대원정밀 MES"). 로고 파일 확보 후 `next/image` 로 교체.
+- **로고:** ✅ 적용 완료 — `public/brand/daewon-logo.png`(투명 배경 960px), `src/components/brand-logo.tsx`(로그인/홈/비밀번호 변경/사이드바/POP 헤더), 파비콘 `src/app/icon.png`·`apple-icon.png`. 어두운 배경(POP 헤더)은 `tone="onDark"` 흰색 칩. 원본 벡터(SVG/AI)를 확보하면 `public/brand/` 에 교체.
 - **기준정보:** 품목/BOM/라우팅/검사기준/설비/거래처는 seed 에 넣지 않았다. 고객 자료(엑셀) 확보 후 화면의 엑셀 업로드(품목·BOM·라우팅·공정·거래처)로 반영하는 방식을 권장.
 - **공정:** seed 는 흐름 구분만(가공/검사/세척/포장/완제품입고). 세부 공정은 고객 확인 후 등록.
 

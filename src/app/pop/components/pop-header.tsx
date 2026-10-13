@@ -44,7 +44,7 @@ export function PopHeader({ workerName = "작업자", onLogout }: Props) {
     <header className="bg-slate-800 text-white">
       {/* 상단 바 */}
       <div className="px-6 py-3 flex items-center justify-between">
-        <BrandLogo size="sm" className="text-white" />
+        <BrandLogo size="sm" tone="onDark" />
         <div className="text-center">
           <div className="text-xl font-mono tabular-nums">
             {now ? format(now, "HH:mm:ss") : "--:--:--"}
