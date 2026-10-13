@@ -186,7 +186,7 @@ Vercel Production 에 `DIRECT_URL` 불필요(§2). 서버리스 인스턴스가 
 ## 10. 사용자 결정이 필요한 항목
 
 1. GitHub 저장소 URL(독립 private 저장소) — 생성/제공 필요
-2. ~~prisma/seed.ts 처리~~ → 결정됨: 현재 트리에서 제거 완료, 이력 제거는 filter-repo 설치 후 첫 push 전에 수행(`prisma/seed-demo-data.ts` 는 별도 — 미사용 NMES demo 데이터, 필요 시 같은 방식으로 제거)
+2. ~~prisma/seed.ts 처리~~ → 결정됨: 현재 트리에서 제거 완료, 이력 제거는 filter-repo 설치 후 첫 push 전에 수행(`prisma/seed-demo-data.ts` 미사용 NMES demo 데이터도 제거 완료)
 3. ~~§5-3 코드 보완~~ → 적용 완료(잠금 자동 해제, IP 제한). 복구용 OWNER 는 만들지 않기로 결정
 4. Preview 환경 정책(§2-B)
 5. Vercel 플랜, 도메인
