@@ -14,12 +14,10 @@ import { isDateOnly } from "../mrp/period"
 import {
   DEMAND_ORDER_STATUSES,
   runOrderMrpFromRows,
-  selectDefaultBoms,
-  type BomRow,
-  type InventoryBalanceRow,
   type OrderMrpView,
   type SalesOrderItemRow,
 } from "../mrp/order-mrp-adapter"
+import { loadDefaultBomRows, loadStockRows } from "./mrp-loaders"
 
 export type OrderMrpDb = Pick<PrismaClient, "salesOrderItem" | "bOM" | "inventoryBalance">
 
@@ -37,9 +35,6 @@ export type OrderMrpPayload = {
   calculatedAt: string
   diagnostics: { queryCount: number; bomLevels: number }
 }
-
-/** BOM 다단계 조회 상한(엔진 maxBomDepth 10 + 최상위 1) */
-const MAX_BOM_LEVELS = 11
 
 export function normalizeOrderMrpParams(raw: unknown): {
   from: string | null
@@ -101,76 +96,17 @@ export async function loadAndRunOrderMrp(
     orderBy: [{ salesOrder: { orderNo: "asc" } }, { id: "asc" }],
   })) as SalesOrderItemRow[]
 
-  // 2) BOM: 레벨별 배치 조회 (ACTIVE + isDefault, tenant 한정)
-  const bomRows: BomRow[] = []
-  const seen = new Set<string>()
-  let frontier = Array.from(new Set(demandRows.map((r) => r.itemId)))
-  let bomLevels = 0
-  while (frontier.length > 0 && bomLevels < MAX_BOM_LEVELS) {
-    frontier.forEach((id) => seen.add(id))
-    queryCount += 1
-    bomLevels += 1
-    const rows = (await db.bOM.findMany({
-      where: { tenantId, status: "ACTIVE", isDefault: true, itemId: { in: frontier } },
-      select: {
-        id: true,
-        tenantId: true,
-        itemId: true,
-        version: true,
-        status: true,
-        isDefault: true,
-        bomItems: {
-          orderBy: { seq: "asc" },
-          select: {
-            componentItemId: true,
-            seq: true,
-            qtyPer: true,
-            scrapRate: true,
-            componentItem: {
-              select: { code: true, name: true, spec: true, uom: true, itemType: true },
-            },
-          },
-        },
-      },
-    })) as BomRow[]
-    bomRows.push(...rows)
-    const { selected } = selectDefaultBoms(rows, tenantId)
-    const next = new Set<string>()
-    selected.forEach((bom) => {
-      for (const bi of bom.bomItems) {
-        if (bi.componentItem.itemType === "SEMI_FINISHED" && !seen.has(bi.componentItemId)) {
-          next.add(bi.componentItemId)
-        }
-      }
-    })
-    frontier = Array.from(next)
-  }
+  // 2) BOM: 레벨별 배치 조회 (ACTIVE + isDefault, tenant 한정) — 공용 로더
+  const { bomRows, levels: bomLevels } = await loadDefaultBomRows(
+    db,
+    tenantId,
+    demandRows.map((r) => r.itemId)
+  )
+  queryCount += bomLevels
 
-  // 3) 재고: 구성품 전체를 한 번에 (tenant 한정, LOT 도 같은 tenant 일 때만)
-  const componentIds = new Set<string>()
-  selectDefaultBoms(bomRows, tenantId).selected.forEach((bom) => {
-    for (const bi of bom.bomItems) componentIds.add(bi.componentItemId)
-  })
-  let stockRows: InventoryBalanceRow[] = []
-  if (componentIds.size > 0) {
-    queryCount += 1
-    stockRows = (await db.inventoryBalance.findMany({
-      where: {
-        tenantId,
-        itemId: { in: Array.from(componentIds) },
-        item: { tenantId },
-        OR: [{ lotId: null }, { lot: { tenantId } }],
-      },
-      select: {
-        itemId: true,
-        qtyOnHand: true,
-        qtyAvailable: true,
-        qtyHold: true,
-        lotId: true,
-        lot: { select: { status: true } },
-      },
-    })) as InventoryBalanceRow[]
-  }
+  // 3) 재고: 구성품 전체를 한 번에 (tenant 한정, LOT 도 같은 tenant 일 때만) — 공용 로더
+  const { stockRows, queried } = await loadStockRows(db, tenantId, bomRows)
+  if (queried) queryCount += 1
 
   const view = runOrderMrpFromRows({
     tenantId,
