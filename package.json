@@ -33,6 +33,7 @@
     "test:quality-release-gate": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-quality-release-gate.ts",
     "test:equipment-result-attribution": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-equipment-result-attribution.ts",
     "test:mrp-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-security.ts",
+    "test:mrp-period": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-period.ts",
     "test:order-mrp-service": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-order-mrp-service.ts",
     "test:order-mrp-engine": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-order-mrp-engine.ts",
     "test:bom-material-sufficiency": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-bom-material-sufficiency.ts",

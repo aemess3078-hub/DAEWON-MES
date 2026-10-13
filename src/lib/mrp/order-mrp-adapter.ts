@@ -234,7 +234,11 @@ export type OrderMrpStepView = {
   itemCode: string
   itemName: string
   deliveryDate: DateOnly | null
+  /** 수주 잔량(계산에 사용된 수요 수량) */
   demandQty: number
+  /** 제품 1단위당 이 자재의 BOM 소요량 = requirement / demandQty (다단계·스크랩 반영, 소수 6자리) */
+  bomQtyPerUnit: number
+  /** 이 수주에서 이 자재의 소요량 */
   requirement: number
   balanceBefore: number
   balanceAfter: number
@@ -261,6 +265,13 @@ export type OrderMrpMaterialView = {
   shortageDemandCount: number
   /** 결품을 유발한 PO(수주번호) — 처리 순서, 중복 제거 */
   shortageOrderNos: string[]
+  /** 이 자재를 필요로 하는 수주 라인 수 (기간 소요량) */
+  demandLineCount: number
+  /** 이 자재를 필요로 하는 제품(품목) 종류 수 */
+  productCount: number
+  /** 이 자재가 처음/마지막으로 필요한 납기일 */
+  firstNeedDate: DateOnly | null
+  lastNeedDate: DateOnly | null
   /** requirement > 0 인 수주만 (잔량 체인은 0 소요 단계에서 변하지 않으므로 손실 없음) */
   steps: OrderMrpStepView[]
 }
@@ -300,6 +311,10 @@ export type OrderMrpKpi = {
   shortageDemandCount: number
   /** 기본 BOM 문제(누락/다중/비어 있음/비정상)로 제외된 수주 라인 수 */
   bomIssueLineCount: number
+  /** 계산에 포함된 수주 라인의 고유 제품(품목) 수 */
+  productCount: number
+  /** (수주 라인 × 자재) 소요 라인 수. 단위가 달라 수량 합계는 만들지 않는다 */
+  requirementLineCount: number
 }
 
 export type OrderMrpView = {
@@ -412,6 +427,7 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
         itemName: row?.item.name ?? demand.itemCode,
         deliveryDate: demand.deliveryDate,
         demandQty: demand.demandQty,
+        bomQtyPerUnit: demand.demandQty > 0 ? Math.round((mv.requirement / demand.demandQty) * 1e6) / 1e6 : 0,
         requirement: mv.requirement,
         balanceBefore: mv.balanceBefore,
         balanceAfter: mv.balanceAfter,
@@ -438,6 +454,10 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
       firstShortageOrderNo: m.firstShortage?.orderNo ?? null,
       shortageDemandCount: m.shortageDemandCount,
       shortageOrderNos,
+      demandLineCount: steps.length,
+      productCount: new Set(steps.map((st) => st.itemCode)).size,
+      firstNeedDate: steps.reduce<DateOnly | null>((min, st) => (st.deliveryDate !== null && (min === null || st.deliveryDate < min) ? st.deliveryDate : min), null),
+      lastNeedDate: steps.reduce<DateOnly | null>((max, st) => (st.deliveryDate !== null && (max === null || st.deliveryDate > max) ? st.deliveryDate : max), null),
       steps,
     })
   }
@@ -482,6 +502,8 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
       shortageMaterialCount: result.summary.shortageComponentCount,
       shortageDemandCount: result.summary.shortageDemandCount,
       bomIssueLineCount: excludedLines.filter((l) => l.isBomIssue).length,
+      productCount: new Set(result.demands.map((d) => d.itemId)).size,
+      requirementLineCount: result.demands.reduce((sum, d) => sum + d.requirements.length, 0),
     },
     materials,
     excludedLines,
