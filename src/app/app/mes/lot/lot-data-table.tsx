@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { DataTable } from "@/components/common/data-table"
 import { getColumns } from "./columns"
 import { LotFormSheet } from "./lot-form-sheet"
+import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
 import { LotWithDetails, updateLotStatus } from "@/lib/actions/lot.actions"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -23,6 +24,8 @@ interface LotDataTableProps {
 export function LotDataTable({ data, items, tenantId }: LotDataTableProps) {
   const router = useRouter()
   const [formOpen, setFormOpen] = useState(false)
+  // 라벨 출력 대상 LOT — 이미 출력 이력이 있어도 "재출력"으로 표시된다(서버가 감사 이력으로 최초/재출력 판정).
+  const [labelLot, setLabelLot] = useState<LotWithDetails | null>(null)
 
   const handleStatusChange = async (lot: LotWithDetails, status: string) => {
     const LOT_STATUS_LABELS: Record<string, string> = {
@@ -47,7 +50,7 @@ export function LotDataTable({ data, items, tenantId }: LotDataTableProps) {
     }
   }
 
-  const columns = getColumns({ onStatusChange: handleStatusChange })
+  const columns = getColumns({ onStatusChange: handleStatusChange, onPrintLabel: setLabelLot })
 
   const filterableColumns = [
     {
@@ -93,6 +96,29 @@ export function LotDataTable({ data, items, tenantId }: LotDataTableProps) {
           { id: "itemName" as keyof LotWithDetails, title: "품목명" },
         ]}
         filterableColumns={filterableColumns}
+      />
+
+      <BarcodePrintDialog
+        open={labelLot !== null}
+        onOpenChange={(next) => {
+          if (!next) setLabelLot(null)
+        }}
+        title={labelLot ? `LOT 라벨 — ${labelLot.lotNo}` : "LOT 라벨"}
+        reprint
+        items={
+          labelLot
+            ? [
+                {
+                  itemCode: labelLot.item.code,
+                  itemName: labelLot.item.name,
+                  lotNo: labelLot.lotNo,
+                  quantity: Number(labelLot.qty),
+                  uom: labelLot.item.uom,
+                  dateLabel: labelLot.item.itemType === "FINISHED" ? "생산일" : "입고일",
+                },
+              ]
+            : []
+        }
       />
 
       <LotFormSheet

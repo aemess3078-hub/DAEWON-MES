@@ -7,6 +7,8 @@ import {
   submitProductionResult,
 } from "@/lib/actions/pop.actions"
 import { PopQuantityInput } from "../../components/pop-quantity-input"
+import { CameraQrScanner, type CameraScanFeedback } from "@/components/common/barcode/camera-qr-scanner"
+import { lookupLotForPop } from "@/lib/actions/lot-qr.actions"
 import { formatQuantity } from "@/lib/utils"
 
 type ProductionResult = {
@@ -125,6 +127,9 @@ export function ProductionClient({ operation }: Props) {
   const [selectedToolIds, setSelectedToolIds] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+  // 자재 LOT 적합성 확인(스캔) — 식별/검증만 하며 재고·투입 mutation 은 하지 않는다.
+  const [lotCheckOpen, setLotCheckOpen] = useState(false)
+  const [lotCheckFeedback, setLotCheckFeedback] = useState<CameraScanFeedback>(null)
 
   const defectCodes = operation.defectCodes ?? []
   const availableTools = operation.availableTools ?? []
@@ -201,6 +206,24 @@ export function ProductionClient({ operation }: Props) {
     plannedQty > 0
       ? Math.min(100, Math.round((completedQty / plannedQty) * 100))
       : 0
+
+  const handleLotCheck = async (raw: string) => {
+    try {
+      const res = await lookupLotForPop(raw, operation.id)
+      if (!res.ok) {
+        setLotCheckFeedback({ ok: false, message: res.message })
+        return
+      }
+      const summary = `${res.lot.item.name} · ${res.lot.lotNo} · 가용 ${res.lot.qtyAvailable.toLocaleString()} ${res.lot.item.uom}`
+      setLotCheckFeedback(
+        res.usable
+          ? { ok: true, message: `사용 가능: ${summary}` }
+          : { ok: false, message: `${res.blockReason ?? "사용할 수 없는 LOT 입니다."} (${summary})` },
+      )
+    } catch {
+      setLotCheckFeedback({ ok: false, message: "조회하지 못했습니다. 네트워크 연결을 확인해 주세요." })
+    }
+  }
 
   const handleStart = async () => {
     setLoading(true)
@@ -423,6 +446,33 @@ export function ProductionClient({ operation }: Props) {
           )}
         </div>
       </div>
+
+      {/* 자재 LOT 적합성 확인 — 스캔은 식별/검증만 한다(투입/재고 변경 없음). 자재출고는 기존 자재출고 화면에서만 처리. */}
+      {status !== "COMPLETED" && (
+        <div className="rounded-2xl border border-slate-200 bg-white p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-slate-800">자재 LOT 확인</h2>
+              <p className="text-[14px] text-slate-500">자재 라벨 QR 을 스캔해 이 작업에 맞는 LOT 인지 확인합니다.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setLotCheckFeedback(null)
+                setLotCheckOpen((v) => !v)
+              }}
+              className="h-14 shrink-0 rounded-xl border border-slate-300 px-5 text-[16px] font-semibold text-slate-700 active:scale-[0.98]"
+            >
+              {lotCheckOpen ? "닫기" : "QR 스캔"}
+            </button>
+          </div>
+          {lotCheckOpen && (
+            <div className="mt-4">
+              <CameraQrScanner onDecoded={handleLotCheck} continuous feedback={lotCheckFeedback} autoStart />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 자재출고 미완료 안내 */}
       {materialBlocked && status !== "COMPLETED" && (

@@ -71,7 +71,7 @@ async function generateTxNo(tenantId: string): Promise<string> {
 
 export async function createReceivingInspection(
   data: CreateReceivingInspectionInput,
-): Promise<{ success: boolean; message?: string }> {
+): Promise<{ success: boolean; message?: string; lotNo?: string }> {
   await requireResourcePermission("PURCHASE_ORDER", "CREATE")
   try {
     return await createReceivingInspectionInternal(data)
@@ -89,7 +89,7 @@ export async function createReceivingInspection(
 
 async function createReceivingInspectionInternal(
   data: CreateReceivingInspectionInput,
-): Promise<{ success: boolean; message?: string }> {
+): Promise<{ success: boolean; message?: string; lotNo?: string }> {
   const user = await requireRole("OPERATOR")
   const tenantId = user.tenantId
 
@@ -210,7 +210,10 @@ async function createReceivingInspectionInternal(
   // 동시에 실행되어도, 두 경로 모두 같은 테이블의 (tenantId, lotNo) unique 제약을 통해서만
   // 번호를 "소유"할 수 있으므로 Lot 테이블과 예약 테이블 사이의 경합이 사라진다.
   const maxAttempts = data.acceptedQty > 0 || lotResolutionMode === "AUTO" ? BUSINESS_NUMBER_MAX_ATTEMPTS : 1
+  // Phase 11: 트랜잭션이 커밋된 뒤 DB 에서 Lot 행을 다시 확인한 값만 호출자에게 돌려준다(라벨 출력 게이트).
+  const committed: { lotNo: string | null } = { lotNo: null }
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    committed.lotNo = null
     const txNo = data.acceptedQty > 0 ? await generateTxNo(tenantId) : null
     try {
       await prisma.$transaction(async (tx) => {
@@ -444,6 +447,7 @@ async function createReceivingInspectionInternal(
         data: { status: "PARTIAL_RECEIVED" },
       })
     }
+    committed.lotNo = resolvedLotNo
     await recordAuditLog(tx, {
       tenantId,
       actor: user,
@@ -493,5 +497,11 @@ async function createReceivingInspectionInternal(
   revalidatePath("/app/mes/material/stock")
   revalidatePath("/app/mes/inventory-transactions")
 
-  return { success: true }
+  // LOT 번호는 Lot 행이 실제로 영속화된 경우에만 반환한다(입고 라벨 출력은 이 값이 있어야 가능).
+  let persistedLotNo: string | undefined
+  if (isLotTracked && committed.lotNo) {
+    const persisted = await prisma.lot.findFirst({ where: { tenantId, lotNo: committed.lotNo }, select: { id: true } })
+    if (persisted) persistedLotNo = committed.lotNo
+  }
+  return { success: true, lotNo: persistedLotNo }
 }

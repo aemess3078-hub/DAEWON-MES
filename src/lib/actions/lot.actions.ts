@@ -121,15 +121,27 @@ export async function createLot(data: CreateLotInput, tenantId: string) {
     throw new Error(`LOT번호 '${data.lotNo}'는 이미 존재합니다.`)
   }
 
-  await prisma.lot.create({
-    data: {
+  await prisma.$transaction(async (tx) => {
+    const created = await tx.lot.create({
+      data: {
+        tenantId: actor.tenantId,
+        itemId: data.itemId,
+        lotNo,
+        status: "ACTIVE",
+        manufactureDate: data.manufactureDate ? new Date(data.manufactureDate) : null,
+        expiryDate: data.expiryDate ? new Date(data.expiryDate) : null,
+      },
+    })
+    // Phase 11 / DG-030: LOT 생성 감사(LOT_CREATE). 생성 후 lotNo 는 변하지 않는다 — LOT QR 의 식별자.
+    await recordAuditLog(tx, {
       tenantId: actor.tenantId,
-      itemId: data.itemId,
-      lotNo,
-      status: "ACTIVE",
-      manufactureDate: data.manufactureDate ? new Date(data.manufactureDate) : null,
-      expiryDate: data.expiryDate ? new Date(data.expiryDate) : null,
-    },
+      actor,
+      entityType: "Lot",
+      entityId: created.id,
+      action: "CREATE",
+      afterData: { event: "LOT_CREATE", lotNo, itemId: data.itemId, status: "ACTIVE" },
+      menuName: "LOT관리",
+    })
   })
 
   revalidatePath("/app/mes/lot")

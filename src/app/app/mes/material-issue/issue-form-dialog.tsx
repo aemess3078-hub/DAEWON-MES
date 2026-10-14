@@ -34,6 +34,10 @@ function isLotManaged(item: MaterialRequirement["item"]): boolean {
 }
 import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
+import { lookupLotByQr } from "@/lib/actions/lot-qr.actions"
+import { encodeLotQr } from "@/lib/qr/lot-qr"
+import { planLotScanSelection } from "@/lib/qr/scan-apply"
+import { createScanDebouncer } from "@/lib/qr/scan-guard"
 
 // ── 다중 LOT 분할 행 타입 ─────────────────────────────────────────────────────
 
@@ -70,6 +74,7 @@ export function IssueFormDialog({
   const [printOpen, setPrintOpen] = useState(false)
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const scanGuardRef = useRef(createScanDebouncer(1500))
 
   const pendingMaterials = workOrder?.materials.filter((material) => material.pendingQty > 0) ?? []
 
@@ -165,15 +170,86 @@ export function IssueFormDialog({
     setWarehouseMap((prev) => ({ ...prev, [itemId]: nextWarehouseId }))
   }
 
+  function highlightMaterial(itemId: string) {
+    setHighlightedItemId(itemId)
+    rowRefs.current[itemId]?.scrollIntoView({ behavior: "smooth", block: "center" })
+    setTimeout(() => setHighlightedItemId(null), 3000)
+  }
+
+  /**
+   * LOT QR 스캔 → 출고 후보 목록(서버가 ACTIVE·가용재고 기준으로 내려준 목록)에서 선택만 한다.
+   * 재고 차감/BOM/상태 검증은 제출 시 issueMaterialsForWorkOrder(DG-014)가 다시 수행한다.
+   */
+  async function handleLotScan(lotNo: string) {
+    const candidates = pendingMaterials
+      .filter((material) => isLotManaged(material.item))
+      .map((material) => ({
+        key: material.itemId,
+        options: (lotStockMap[material.itemId] ?? []).map((l) => ({
+          lotId: l.lotId,
+          lotNo: l.lotNo,
+          warehouseId: l.warehouseId,
+          qtyAvailable: l.qtyAvailable,
+        })),
+        selectedLotIds: getLotSplits(material.itemId)
+          .map((row) => getLotFromSplitRow(material.itemId, row)?.lotId)
+          .filter((id): id is string => Boolean(id)),
+      }))
+    const plan = planLotScanSelection(lotNo, candidates)
+
+    if (plan.kind === "ALREADY_SELECTED") {
+      highlightMaterial(plan.key)
+      alert(`이미 선택된 LOT 입니다: ${plan.lotNo}`)
+      return
+    }
+    if (plan.kind === "SELECT") {
+      const itemId = plan.key
+      const material = pendingMaterials.find((m) => m.itemId === itemId)
+      const value = `${plan.option.lotId}:${plan.option.warehouseId}`
+      const available = plan.option.qtyAvailable
+      setLotSplitsMap((prev) => {
+        const rows = prev[itemId] ?? [{ key: `${itemId}-0`, lotValue: "", qty: String(material?.pendingQty ?? "") }]
+        const target = rows.find((r) => !r.lotValue)
+        const wanted = Number(target?.qty) > 0 ? Number(target?.qty) : Number(material?.pendingQty ?? 0)
+        const qty = String(Math.min(wanted > 0 ? wanted : available, available))
+        if (target) {
+          return { ...prev, [itemId]: rows.map((r) => (r.key === target.key ? { ...r, lotValue: value, qty } : r)) }
+        }
+        return { ...prev, [itemId]: [...rows, { key: `${itemId}-scan-${Date.now()}`, lotValue: value, qty }] }
+      })
+      highlightMaterial(itemId)
+      return
+    }
+
+    // 목록에 없는 LOT — 서버가 이유(상태/BOM 구성품/타 작업지시)를 알려준다.
+    const res = await lookupLotByQr(encodeLotQr(plan.lotNo), { purpose: "MATERIAL_ISSUE", workOrderId: workOrder?.id })
+    if (!res.ok) {
+      alert(res.message)
+    } else if (!res.usable) {
+      alert(`${res.lot.lotNo}: ${res.blockReason ?? "사용할 수 없는 LOT 입니다."}`)
+    } else {
+      alert(`${res.lot.lotNo}: 출고 가능한 재고 목록에 없습니다. 창고 재고/이미 필요수량 출고 여부를 확인해 주세요.`)
+    }
+  }
+
   function handleScan(parsed: ParsedBarcode) {
-    const matched = pendingMaterials.find((material) => material.item.code === parsed.itemCode)
-    if (!matched) {
+    // 같은 값의 연속 인식/더블 스캔은 무시한다(처리 중 재스캔 포함).
+    if (!scanGuardRef.current.accept(parsed.raw, Date.now())) return
+    const byCode = pendingMaterials.find((material) => material.item.code === parsed.itemCode)
+    if (parsed.kind !== "LOT_QR" && byCode) {
+      highlightMaterial(byCode.itemId)
+      return
+    }
+    if (parsed.kind === "LEGACY_ITEM_LOT") {
       alert(`품목 코드 "${parsed.itemCode}"가 이 작업지시의 출고 원자재에 없습니다.`)
       return
     }
-    setHighlightedItemId(matched.itemId)
-    rowRefs.current[matched.itemId]?.scrollIntoView({ behavior: "smooth", block: "center" })
-    setTimeout(() => setHighlightedItemId(null), 3000)
+    if (parsed.lotNo) {
+      scanGuardRef.current.begin()
+      void handleLotScan(parsed.lotNo).finally(() => scanGuardRef.current.end())
+      return
+    }
+    alert(`품목 코드 "${parsed.itemCode}"가 이 작업지시의 출고 원자재에 없습니다.`)
   }
 
   const handleOpen = (nextOpen: boolean) => {
@@ -348,7 +424,8 @@ export function IssueFormDialog({
             <p className="text-[13px] font-medium text-muted-foreground">바코드 스캔</p>
             <BarcodeScanInput
               onScan={handleScan}
-              placeholder="자재 바코드를 스캔하면 해당 행으로 이동합니다."
+              placeholder="자재 LOT QR/바코드를 스캔하면 해당 LOT 가 선택됩니다."
+              cameraContext={{ purpose: "MATERIAL_ISSUE", workOrderId: workOrder.id }}
             />
           </div>
 
