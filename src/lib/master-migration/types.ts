@@ -94,6 +94,8 @@ export type ItemCandidate = {
   key: string
   code: string
   proposed: { name: string | null; spec: string | null; uom: string | null; itemType: ItemTypeName | null }
+  /** 원본 단위 문자열(공백 등 보정하지 않은 값). 없으면 null */
+  uomRaw: string | null
   /** 확정하지 못한 속성에 대한 "제안값"(승인 전에는 사용하지 않는다) */
   suggestions: { name?: string; uom?: string; itemType?: ItemTypeName }
   flags: { inSettings: boolean; isBomParent: boolean; isBomComponent: boolean; orderOnly: boolean; stockSheetOnly: boolean }
@@ -184,7 +186,20 @@ export type ExistingMasterSnapshot = {
   itemSuppliers: Array<{ itemCode: string; supplierCode: string }>
 }
 
-export type DatasetItem = { code: string; name: string; spec: string | null; uom: UomName; itemType: ItemTypeName; provenance: SrcRef[] }
+export type DatasetItem = {
+  code: string
+  name: string
+  spec: string | null
+  uom: UomName
+  itemType: ItemTypeName
+  provenance: SrcRef[]
+  /** 품명/규격/단위가 Excel 에 없어 임시값(placeholder)을 쓴 항목 — Production import 전에 실제 값 확보가 필요하다 */
+  needsMasterEnrichment?: boolean
+  /** 임시값을 쓴 필드(name / spec / uom) */
+  placeholderFields?: string[]
+  /** 적용한 단순 정규화(예: UOM_TRIMMED) */
+  normalizations?: string[]
+}
 export type DatasetBom = {
   parentCode: string
   version: string
@@ -219,6 +234,11 @@ export type MasterDecisions = {
   /** key = `${partnerType}|${name}` */
   partners?: Record<string, { accept: boolean; code: string; partnerType?: PartnerTypeName }>
   itemSuppliers?: Record<string, { accept: boolean }>
+  /**
+   * 이미 부여된 거래처 코드(키 = `${partnerType}|${name}`). 데이터셋을 다시 만들어도 같은 거래처는 같은 코드를 유지한다.
+   * 새 거래처만 남은 번호 중 가장 큰 번호 다음부터 부여한다(기존 코드는 재정렬되지 않는다).
+   */
+  partnerCodeMap?: Record<string, string>
   bulk?: {
     /** BOM 상위 제품(FINISHED)의 품명이 없을 때 제품코드를 품명으로 쓴다 */
     finishedUseCodeAsName?: boolean
@@ -228,6 +248,8 @@ export type MasterDecisions = {
     allowMissingSpec?: boolean
     /** 거래처 코드 생성 규칙(이름순 일련번호). 규칙을 승인한 경우에만 코드가 만들어진다 */
     partnerCodeRule?: { customerPrefix: string; supplierPrefix: string; width: number }
+    /** 단위가 앞/뒤 공백만 달라 정확히 EA 등 enum 이 되는 항목의 trim 정규화 승인(대소문자/그 외 보정은 하지 않는다) */
+    trimUomWhitespace?: boolean
     /** 승인된 거래처를 사용하는 ItemSupplier 후보를 모두 포함(isDefault=false 유지) */
     acceptItemSuppliersOfAcceptedPartners?: boolean
     /** 위 정책으로 승인 가능한 REVIEW 이유가 아닌 항목(BOM REVIEW 줄 등)은 포함하지 않는다 */

@@ -184,3 +184,58 @@ MRP 엔진·Golden 은 변경하지 않는다.
 - 운영 import CLI(승인 UI/AuditLog 포함), Process/Routing/Equipment/Inspection Master(별도 자료 확보 필요, 이번 Excel 에는 없음)
 - 거래처 사업자번호/연락처(별도 자료), 품목 기본 창고/LOT 추적 정책, 제품 품명/규격 확보
 - 기초재고: Excel 수량을 이관하지 않고 Go-Live 시점의 **실사 후 등록**
+
+---
+
+## 13. Phase 7B-1 — 개발용 실제 Master seed (확정 정책 적용)
+
+확정 정책은 `scripts/master-migration/daewon-7b1.policy.json`(실제 품번/거래처명 없음)에 있고, `analyze --decisions` 로 적용한다.
+
+| 정책 | 적용 |
+|---|---|
+| FINISHED 163 | BOM Parent Master 로 포함. **임시값**: name=제품코드, uom=EA, spec=null → 항목마다 `needsMasterEnrichment=true`, `placeholderFields=[name,spec,uom]` (Dataset 메타데이터. DB Master row 에는 컬럼을 추가하지 않음) |
+| RAW SAFE 262 | 포함 |
+| 단위 공백(`EA `) 2건 | `trimUomWhitespace` 승인 — 앞/뒤 공백만 제거(대소문자 등 다른 보정은 안 함). 항목에 `normalizations=[UOM_TRIMMED]` → RAW 264 |
+| BOM 줄과 품명/규격 불일치 RAW 5, 미참조 자재 4 | REVIEW 유지, 기본 seed 제외 |
+| 수주에만 있는 제품 3 | 제외(Production 도 제외) |
+| 수량 `"."` BOM 1 | 해당 Parent BOM 전체 제외(NEEDS_USER_DECISION). 제품 Item 은 정책 2 에 따라 포함 |
+| 위 REVIEW RAW 5 를 쓰는 BOM 28 | 구성품 미승인 → 제외(종속) |
+| 고객 1 / 공급업체 19 | `CUS-###` / `SUP-###`, 정규화한 이름순 일련번호. `partner-code-map.json` 으로 고정(재생성해도 코드 유지, 신규 거래처만 다음 번호) |
+| ItemSupplier | 포함된 RAW 의 공급업체 관계만(264), `isDefault=false`, LT/MOQ/배수 null |
+
+### 결과 (Approved Dataset, hash `dbc3a123…e368`)
+| | 건수 |
+|---|---:|
+| Item | **427** (FINISHED 163 + RAW 264, SEMI 0) |
+| BOM / BOM 줄 | **134 / 909** |
+| 고객 / 공급업체 | **1 / 19** |
+| ItemSupplier | **264** (Default 0) |
+| 제외: REVIEW 12(RAW 5 + 미참조 4 + 수주 전용 3) / REJECT 1(BOM) / 종속 제외 36(BOM 28 + ItemSupplier 8) | |
+| 운영 정보 행(재고/수주/발주/입출고/생산/WIP) | **0** |
+
+BOM 이 없는 FINISHED 는 29종(수량 오류 1 + 불일치 자재 사용 28).
+
+### 개발 DB 검증
+- 개발 DB: 로컬 in-memory PostgreSQL(PGlite) + 저장소의 실제 migration 5건 + `seed-daewon.ts`(seed:base). 운영 Supabase 와 무관.
+- `seed --dry-run`: 쓰기 0, CREATE Item 427 / BOM 134 / 거래처 20 / ItemSupplier 264.
+- `seed`(적용): Item 427 / BOM 134 / BOMItem 909 / 고객 1 / 공급업체 19 / ItemSupplier 264. 재고·수주·발주·작업지시·WIP·생산실적·LOT row **0**.
+- 2회차: CREATE 0, MATCH 전체(427/134/20/264), CONFLICT 0, 행 수 불변.
+- 충돌: 같은 코드/다른 내용 → ABORT(쓰기 0, overwrite 없음) — fake DB 로 검증(개발 DB 데이터는 훼손하지 않음).
+- MRP 검증(`verify-mrp`, 읽기 전용): 실제 BOM + 메모리상 가상 수요(`SO-DEMO-###`, 각 10EA, 재고 0) → 수요 134줄, 소요 자재 243종, 소요 줄 909, 독립 계산(Σ 수량×qtyPer)과 불일치 0. BOM 없는 29제품은 `MISSING_DEFAULT_BOM` 으로 제외 보고.
+
+### Production Import 미리보기 (쓰기 0, SELECT 만)
+운영 Master 가 비어 있어 예상: Item CREATE 427 / BOM 134 / 거래처 20 / ItemSupplier 264, MATCH 0, CONFLICT 0.
+**FINISHED 163종의 name/spec/uom 은 임시값이다** — 실제 Production import 승인 시 이 정책 수용 여부를 다시 확인해야 한다.
+
+### 남은 REVIEW (실제 코드/이름은 로컬 `review-remaining.json` 에만 있음)
+BOM 불일치 RAW 5 · 미참조 자재 4 · 수량 오류 BOM 1 · 수주 전용 제품 3 · 불일치 RAW 로 막힌 BOM 28 ·
+고객/공급업체 20곳의 현재 거래 여부 및 사업자번호/연락처 · FINISHED 163 실제 품명/규격/단위.
+
+### 로컬 개발 DB 실행 방법
+```bash
+# 1) 로컬 개발 DB 기동(예: PGlite socket) 후 seed:base → master seed
+MASTER_SEED_CONFIRM=DEV_ONLY MASTER_SEED_DATABASE_URL=<개발DB>?pgbouncer=true&connection_limit=1 \
+  npm run seed:daewon-master -- --dataset <dataset.json> --tenant <tenantId> [--dry-run]
+MASTER_SEED_CONFIRM=DEV_ONLY MASTER_SEED_DATABASE_URL=... npm run master:verify-mrp -- --tenant <tenantId> --qty 10
+npm run master:preview -- --dataset <dataset.json> --existing <existing.json>      # 운영 대조(오프라인)
+```

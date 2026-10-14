@@ -23,7 +23,7 @@ import { summarizeAnalysis, summarizeSeedDataset } from "../src/lib/master-migra
 import { assertDevSeedTarget, isSeedGuardError } from "../src/lib/master-migration/seed-guard"
 import { buildSheetReport } from "../src/lib/master-migration/sheet-report"
 import { inspectCode, parseQty } from "../src/lib/master-migration/text"
-import type { ApprovedMasterDataset, ExistingMasterSnapshot, GridCell, GridLike } from "../src/lib/master-migration/types"
+import type { ApprovedMasterDataset, ExistingMasterSnapshot, GridCell, GridLike, MasterDecisions } from "../src/lib/master-migration/types"
 import { makeFakeDb } from "./helpers/fake-db"
 
 let passed = 0
@@ -499,6 +499,141 @@ async function main() {
     const d2 = buildApprovedDataset(p, { workbookSha256: "h" })
     eq(d1.datasetHash, d2.datasetHash, "같은 입력 → 같은 datasetHash")
     ok(/^[0-9a-f]{64}$/.test(d1.datasetHash), "datasetHash = sha256")
+  }
+
+  // ═══ MS1~MS15 Phase 7B-1 확정 정책 ═══════════════════════════════════════════
+  section("MS1~MS15 Phase 7B-1 확정 정책(승인된 정책 파일 사용)")
+  {
+    const policy = JSON.parse(readFileSync(join(__dirname, "master-migration", "daewon-7b1.policy.json"), "utf8")) as MasterDecisions
+    const sheets = workbook({
+      materials: [
+        { code: "M-001", name: "자재A", spec: "SPEC-A", supplier: "공급가", uom: "EA" },
+        { code: "M-002", name: "자재B", spec: "SPEC-B", supplier: "공급나", uom: "EA" },
+        { code: "M-003", name: "자재C", spec: "SPEC-C", supplier: "공급가", uom: "SET" },
+        { code: "M-TRIM", name: "공백단위", spec: "SPEC-T", supplier: "공급다", uom: "EA " },
+        { code: "M-CASE", name: "소문자단위", spec: "SPEC-K", supplier: "공급다", uom: "ea" },
+        { code: "M-MIS", name: "불일치", spec: "SPEC-M", supplier: "공급나", uom: "EA" },
+        { code: "M-UNUSED", name: "미참조", spec: "SPEC-U", supplier: "공급가", uom: "EA" },
+      ],
+      boms: [
+        { no: 1, product: "P-1", lines: [{ code: "M-001", name: "자재A", spec: "SPEC-A", qty: 2, uom: "EA" }, { code: "M-TRIM", name: "공백단위", spec: "SPEC-T", qty: 1, uom: "EA" }] },
+        { no: 2, product: "P-2", lines: [{ code: "M-002", name: "자재B", spec: "SPEC-B", qty: 1, uom: "EA" }, { code: "M-MIS", name: "불일치", spec: "다른 규격", qty: 1, uom: "EA" }] },
+        { no: 3, product: "P-3", lines: [{ code: "M-003", name: "자재C", spec: "SPEC-C", qty: ".", uom: "SET" }] },
+        { no: 4, product: "P-4", lines: [{ code: "M-CASE", name: "소문자단위", spec: "SPEC-K", qty: 1, uom: "EA" }] },
+      ],
+      orders: [{ product: "P-ORDER-ONLY", customer: "고객가" }, { product: "P-1", customer: "고객가" }],
+    })
+    const { a } = analyze(sheets)
+    const ds = buildApprovedDataset(a, { workbookSha256: "h", decisions: policy })
+    const codes = new Set(ds.items.map((i) => i.code))
+    const find = (c: string) => ds.items.find((i) => i.code === c)
+
+    // MS1 FINISHED placeholder
+    const p1 = find("P-1")!
+    eq([p1.name, p1.uom, p1.spec, p1.itemType], ["P-1", "EA", null, "FINISHED"], "MS1 FINISHED: name=code / EA / spec=null")
+    eq([p1.needsMasterEnrichment, p1.placeholderFields], [true, ["name", "spec", "uom"]], "MS1 placeholder 임시값 표시(needsMasterEnrichment + 필드)")
+    ok(ds.items.filter((i) => i.itemType === "FINISHED").every((i) => i.needsMasterEnrichment === true), "MS1 모든 FINISHED 가 enrichment 필요로 표시")
+    ok(find("M-001")!.needsMasterEnrichment === undefined, "RAW 정상 자재는 placeholder 표시 없음")
+    // MS2 공백만 문제인 단위 정규화
+    const trim = find("M-TRIM")!
+    eq([trim.uom, trim.normalizations], ["EA", ["UOM_TRIMMED"]], "MS2 단위 공백(EA + 공백) → EA (trim 정규화, 기록 남김)")
+    ok(!codes.has("M-CASE"), "MS2 소문자 ea 는 자동 보정하지 않고 제외(대소문자 보정 미승인)")
+    eq(item(a, "M-TRIM")!.uomRaw, "EA ", "원본 단위 문자열은 분석 결과에 보존")
+    // MS3 불일치 RAW → REVIEW 유지 + 제외, 그 자재를 쓰는 BOM 도 제외
+    ok(!codes.has("M-MIS") && item(a, "M-MIS")!.grade === "REVIEW", "MS3 BOM 규격 불일치 RAW 는 REVIEW 유지·제외(자동 수정 안 함)")
+    ok(!ds.boms.some((b) => b.parentCode === "P-2"), "MS3 불일치 자재를 쓰는 BOM 은 제외")
+    ok(codes.has("P-2"), "(제품 Item 자체는 FINISHED 정책으로 포함, BOM 만 제외)")
+    // MS4 미참조 자재 제외
+    ok(!codes.has("M-UNUSED"), "MS4 어떤 BOM 에도 쓰이지 않는 자재는 제외")
+    // MS5 수주 전용 제품 제외
+    ok(!codes.has("P-ORDER-ONLY"), "MS5 수주관리대장에서만 발견된 제품은 제외")
+    // invalid qty BOM 제외
+    ok(!ds.boms.some((b) => b.parentCode === "P-3") && ds.boms.some((b) => b.parentCode === "P-1"), "수량 . 인 BOM 은 제외, 정상 BOM 은 포함")
+    eq(ds.boms.find((b) => b.parentCode === "P-1")!.lines.map((l) => l.qtyPer), [2, 1], "정상 BOM 수량 그대로")
+    ok(ds.excluded.droppedDependents >= 1, "종속 제외 집계")
+
+    // MS6/MS7 거래처 코드: 결정적 + 재생성 안정
+    const custs = ds.partners.filter((p) => p.partnerType === "CUSTOMER")
+    const sups = ds.partners.filter((p) => p.partnerType === "SUPPLIER")
+    eq(custs.map((c) => c.code), ["CUS-001"], "MS6 고객 코드 CUS-001")
+    eq(
+      sups.map((s) => [s.code, s.name]).sort(),
+      [["SUP-001", "공급가"], ["SUP-002", "공급나"], ["SUP-003", "공급다"]],
+      "MS7 공급업체 코드는 이름순 SUP-001.."
+    )
+    const ds2 = buildApprovedDataset(a, { workbookSha256: "h", decisions: policy })
+    eq(ds2.partners, ds.partners, "MS7 같은 입력 재생성 → 같은 코드(결정적)")
+    // 매핑 고정: 이름이 정렬상 앞서는 새 공급업체가 추가돼도 기존 코드는 유지
+    const map: Record<string, string> = {}
+    ds.partners.forEach((p) => (map[`${p.partnerType}|${p.name}`] = p.code))
+    const sheets2 = workbook({
+      materials: [
+        { code: "M-001", name: "자재A", spec: "SPEC-A", supplier: "공급가", uom: "EA" },
+        { code: "M-002", name: "자재B", spec: "SPEC-B", supplier: "공급나", uom: "EA" },
+        { code: "M-NEW", name: "신규", spec: "SPEC-N", supplier: "가가공급", uom: "EA" },
+      ],
+      boms: [{ no: 1, product: "P-1", lines: [{ code: "M-001", qty: 1 }, { code: "M-NEW", qty: 1 }] }],
+      orders: [{ product: "P-1", customer: "고객가" }],
+    })
+    const a2 = analyze(sheets2).a
+    const withMap = buildApprovedDataset(a2, { workbookSha256: "h", decisions: { ...policy, partnerCodeMap: map } })
+    const codeOf = (d: ApprovedMasterDataset, n: string) => d.partners.find((p) => p.name === n)?.code
+    eq(
+      [codeOf(withMap, "공급가"), codeOf(withMap, "공급나"), codeOf(withMap, "가가공급")],
+      ["SUP-001", "SUP-002", "SUP-004"],
+      "MS7 매핑 고정: 기존 코드 유지, 신규 공급업체는 다음 번호(SUP-004, 번호 재사용 없음)"
+    )
+    const noMap = buildApprovedDataset(a2, { workbookSha256: "h", decisions: policy })
+    eq(codeOf(noMap, "가가공급"), "SUP-001", "(매핑 없이 재정렬하면 번호가 밀린다 — 그래서 partner-code-map 을 유지한다)")
+
+    // MS8/MS9 ItemSupplier
+    ok(ds.itemSuppliers.every((s) => s.isDefault === false), "MS8 ItemSupplier isDefault 전부 false")
+    ok(ds.itemSuppliers.every((s) => codes.has(s.itemCode)), "제외된 품목은 ItemSupplier 에서도 제외")
+    ok(!ds.itemSuppliers.some((s) => s.itemCode === "M-MIS" || s.itemCode === "M-UNUSED"), "불일치/미참조 자재의 공급업체 관계 제외")
+    eq(ds.itemSuppliers.map((s) => s.itemCode).sort(), ["M-001", "M-002", "M-003", "M-TRIM"], "최종 ItemSupplier = 포함된 RAW 중 공급업체가 있는 것")
+    const fdb = makeFakeDb(
+      { item: [], bOM: [], bOMItem: [], businessPartner: [], itemSupplier: [] },
+      { uniques: { item: [["tenantId", "code"]], businessPartner: [["tenantId", "code"]], bOM: [["tenantId", "itemId", "version"]], itemSupplier: [["tenantId", "itemId", "supplierId"]] } }
+    )
+    const r1 = await applyMasterDataset(fdb.db as unknown as MasterApplyDb, { tenantId: "t", dataset: ds, dryRun: false })
+    ok(fdb.tables.itemSupplier.every((r) => r.isDefault === false && r.leadTimeDays === undefined && r.moq === undefined && r.orderMultiple === undefined), "MS9 LT/MOQ/배수 null(미설정), Default 없음")
+    // MS10 운영 정보 키 없음
+    for (const key of ["inventory", "salesOrders", "purchaseOrders", "receipts", "shipments", "wip", "productionResults"]) {
+      ok(!(key in ds) && !validateDatasetShape({ ...ds, [key]: [] }).ok, `MS10 데이터셋에 ${key} 키 없음/주입 시 거부`)
+    }
+    // MS11/MS12 첫 실행 CREATE / 두 번째 MATCH
+    eq(
+      [r1.summary.ITEM.CREATE, r1.summary.BOM.CREATE, r1.summary.PARTNER.CREATE, r1.summary.ITEM_SUPPLIER.CREATE],
+      [ds.items.length, ds.boms.length, ds.partners.length, ds.itemSuppliers.length],
+      "MS11 첫 seed: 전부 CREATE"
+    )
+    const r2 = await applyMasterDataset(fdb.db as unknown as MasterApplyDb, { tenantId: "t", dataset: ds, dryRun: false })
+    eq(
+      [r2.summary.ITEM.MATCH, r2.summary.BOM.MATCH, r2.summary.PARTNER.MATCH, r2.summary.ITEM_SUPPLIER.MATCH, r2.created.items + r2.created.boms + r2.created.partners + r2.created.itemSuppliers, r2.conflicts.length],
+      [ds.items.length, ds.boms.length, ds.partners.length, ds.itemSuppliers.length, 0, 0],
+      "MS12 두 번째 seed: 전부 MATCH, 생성 0, CONFLICT 0"
+    )
+    // MS13 충돌 시 overwrite 없음
+    const cdb = makeFakeDb(
+      { item: [{ id: "i1", tenantId: "t", code: "P-1", name: "다른 이름", spec: null, uom: "EA", itemType: "FINISHED", status: "ACTIVE" }], bOM: [], bOMItem: [], businessPartner: [], itemSupplier: [] },
+      { uniques: { item: [["tenantId", "code"]] } }
+    )
+    const rc = await applyMasterDataset(cdb.db as unknown as MasterApplyDb, { tenantId: "t", dataset: ds, dryRun: false })
+    ok(rc.aborted && rc.conflicts.length === 1 && cdb.countWrites() === 0 && cdb.tables.item[0].name === "다른 이름", "MS13 같은 코드/다른 name → CONFLICT 중단, overwrite 없음, 쓰기 0")
+
+    // MS14/MS15 가드
+    const g = (env: Record<string, string>) => {
+      try {
+        assertDevSeedTarget(env)
+        return "OK"
+      } catch (e) {
+        return isSeedGuardError(e) ? e.message : "OTHER"
+      }
+    }
+    const prod = { DATABASE_URL: "postgresql://u:p@db.prod.example.com:5432/postgres", DIRECT_URL: "postgresql://u:p@db.prod.example.com:6543/postgres" }
+    ok(/DATABASE_URL 와 같습니다/.test(g({ ...prod, MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://x:y@db.prod.example.com:5432/other" })), "MS14 운영 DB 와 같은 호스트면 거부")
+    ok(/Vercel/.test(g({ VERCEL: "1", VERCEL_ENV: "production", MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://x:y@127.0.0.1:5432/dev" })), "MS15 Vercel 에서는 거부")
+    ok(g({ ...prod, MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://x:y@127.0.0.1:5432/dev" }) === "OK", "별도 개발 DB 는 허용")
   }
 
   // ═══ 요약 / provenance ══════════════════════════════════════════════════════

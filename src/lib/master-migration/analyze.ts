@@ -143,6 +143,7 @@ export function analyzeMaster(ex: RawExtraction): MasterAnalysis {
         key: `EMPTY@${m.src.sheet}!${m.src.row}`,
         code: "",
         proposed: { name: m.name, spec: m.spec, uom: m.uom, itemType: null },
+        uomRaw: m.uom,
         suggestions: {},
         flags: { inSettings: true, isBomParent: false, isBomComponent: false, orderOnly: false, stockSheetOnly: false },
         typeBasis: "코드 없음",
@@ -160,6 +161,7 @@ export function analyzeMaster(ex: RawExtraction): MasterAnalysis {
         key: `EMPTY@${p.src.sheet}!${p.src.row}`,
         code: "",
         proposed: { name: null, spec: null, uom: null, itemType: null },
+        uomRaw: null,
         suggestions: {},
         flags: { inSettings: false, isBomParent: false, isBomComponent: false, orderOnly: false, stockSheetOnly: false },
         typeBasis: "코드 없음",
@@ -267,7 +269,7 @@ export function analyzeMaster(ex: RawExtraction): MasterAnalysis {
       if (spec !== null && bomSpecs.some((s) => s !== spec)) {
         issues.push({ code: "SPEC_MISMATCH_BOM", grade: "REVIEW", message: "BOM 줄의 규격이 자재 목록의 규격과 다릅니다" })
       }
-      if (uomRaw !== null && bomUoms.some((u) => u !== uomRaw)) {
+      if (uomRaw !== null && bomUoms.some((u) => u.trim() !== (uomRaw as string).trim())) {
         issues.push({ code: "UOM_MISMATCH_BOM", grade: "REVIEW", message: "BOM 줄의 단위가 자재 목록의 단위와 다릅니다" })
       }
     }
@@ -345,6 +347,7 @@ export function analyzeMaster(ex: RawExtraction): MasterAnalysis {
       key: code,
       code,
       proposed: { name, spec, uom, itemType },
+      uomRaw,
       suggestions,
       flags: { inSettings, isBomParent: parents.has(code), isBomComponent: isComponent, orderOnly, stockSheetOnly: stockOnly },
       typeBasis,

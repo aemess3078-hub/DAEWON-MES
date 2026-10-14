@@ -69,6 +69,15 @@ export function buildApprovedDataset(
     return { accept: true, name: bulk.finishedUseCodeAsName ? c.code : undefined, uom: bulk.finishedDefaultUom }
   }
 
+  /** 단위가 앞/뒤 공백만 문제인 항목(다른 이슈 없음)의 trim 정규화. 대소문자 등 다른 보정은 하지 않는다. */
+  const trimUomDecision = (c: MasterAnalysis["items"][number]): { accept: true; name?: string; spec?: string | null; uom?: UomName; itemType?: ItemTypeName } | undefined => {
+    if (!bulk.trimUomWhitespace || c.uomRaw === null) return undefined
+    if (c.issues.length !== 1 || c.issues[0].code !== "UOM_NOT_EXACT") return undefined
+    if (c.uomRaw === c.uomRaw.trim()) return undefined
+    const exact = exactUom(c.uomRaw.trim())
+    return exact === null ? undefined : { accept: true, uom: exact }
+  }
+
   // ── Item ──
   const items: DatasetItem[] = []
   const itemCodes = new Set<string>()
@@ -78,7 +87,9 @@ export function buildApprovedDataset(
       return
     }
     const explicit = decisions.items?.[c.code]
-    const decision = explicit ? (explicit.accept === true ? explicit : undefined) : c.grade === "REVIEW" ? bulkItemDecision(c) : undefined
+    const bulkDecision = c.grade === "REVIEW" ? bulkItemDecision(c) : undefined
+    const trimDecision = c.grade === "REVIEW" && !bulkDecision ? trimUomDecision(c) : undefined
+    const decision = explicit ? (explicit.accept === true ? explicit : undefined) : (bulkDecision ?? trimDecision)
     if (c.grade === "REVIEW" && !decision) {
       excluded.review += 1
       return
@@ -98,7 +109,20 @@ export function buildApprovedDataset(
       return
     }
     itemCodes.add(c.code)
-    items.push({ code: c.code, name, spec: spec === null || spec === undefined ? null : spec, uom, itemType, provenance: c.sources.slice(0, 5) })
+    const record: DatasetItem = { code: c.code, name, spec: spec === null || spec === undefined ? null : spec, uom, itemType, provenance: c.sources.slice(0, 5) }
+    if (!explicit && bulkDecision) {
+      // 임시값(placeholder): Excel 에 실제 값이 없었던 필드만 표시
+      const fields: string[] = []
+      if (c.issues.some((i) => i.code === "NAME_MISSING")) fields.push("name")
+      if (c.issues.some((i) => i.code === "SPEC_MISSING")) fields.push("spec")
+      if (c.issues.some((i) => i.code === "UOM_MISSING")) fields.push("uom")
+      if (fields.length > 0) {
+        record.needsMasterEnrichment = true
+        record.placeholderFields = fields
+      }
+    }
+    if (!explicit && trimDecision) record.normalizations = ["UOM_TRIMMED"]
+    items.push(record)
   })
 
   // ── Partner (코드는 사람이 정한다) ──
@@ -106,16 +130,40 @@ export function buildApprovedDataset(
   const partnerCodeByName = new Map<string, DatasetPartner[]>()
   const usedPartnerCodes = new Set<string>()
   // 승인된 코드 규칙(이름순 일련번호): 규칙이 있을 때만, BOTH 는 제외(명시 결정 필요)
+  // 거래처 코드: 이미 부여된 코드(partnerCodeMap)는 그대로, 새 거래처만 정규화한 이름순으로 다음 번호를 받는다(재정렬 없음).
   const ruledCode = new Map<string, string>()
   if (bulk.partnerCodeRule) {
-    const r = bulk.partnerCodeRule
-    const pad = (n: number) => String(n).padStart(Math.max(1, r.width), "0")
-    const sorted = analysis.partners.slice().sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    let c = 0
-    let s = 0
-    sorted.forEach((p) => {
-      if (p.partnerType === "CUSTOMER") ruledCode.set(`${p.partnerType}|${p.name}`, r.customerPrefix + pad(++c))
-      else if (p.partnerType === "SUPPLIER") ruledCode.set(`${p.partnerType}|${p.name}`, r.supplierPrefix + pad(++s))
+    const rule = bulk.partnerCodeRule
+    const pad = (n: number) => String(n).padStart(Math.max(1, rule.width), "0")
+    const sortKey = (name: string) => name.normalize("NFKC").trim().replace(/\s+/g, " ")
+    const given = decisions.partnerCodeMap ?? {}
+    const nextOf = (prefix: string) => {
+      let max = 0
+      Object.keys(given).forEach((k) => {
+        const code = given[k]
+        if (code.startsWith(prefix)) {
+          const n = Number(code.slice(prefix.length))
+          if (Number.isInteger(n) && n > max) max = n
+        }
+      })
+      return max + 1
+    }
+    let nextC = nextOf(rule.customerPrefix)
+    let nextS = nextOf(rule.supplierPrefix)
+    const fresh = analysis.partners
+      .filter((p) => (p.partnerType === "CUSTOMER" || p.partnerType === "SUPPLIER") && given[`${p.partnerType}|${p.name}`] === undefined)
+      .sort((a, b) => {
+        const ka = sortKey(a.name)
+        const kb = sortKey(b.name)
+        return ka < kb ? -1 : ka > kb ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+      })
+    analysis.partners.forEach((p) => {
+      const k = `${p.partnerType}|${p.name}`
+      if (given[k] !== undefined) ruledCode.set(k, given[k])
+    })
+    fresh.forEach((p) => {
+      const k = `${p.partnerType}|${p.name}`
+      ruledCode.set(k, p.partnerType === "CUSTOMER" ? rule.customerPrefix + pad(nextC++) : rule.supplierPrefix + pad(nextS++))
     })
   }
   analysis.partners.forEach((p) => {

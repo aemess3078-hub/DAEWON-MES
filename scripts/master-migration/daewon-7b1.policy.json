@@ -1,0 +1,11 @@
+{
+  "_comment": "Phase 7B-1 확정 정책(사용자 승인). 실제 품번/거래처명은 포함하지 않는다. 개별 REVIEW 항목(불일치 RAW 5, 미참조 자재 4, 수량 오류 BOM 1, 수주 전용 제품 3)은 승인하지 않는다.",
+  "bulk": {
+    "finishedUseCodeAsName": true,
+    "finishedDefaultUom": "EA",
+    "allowMissingSpec": true,
+    "trimUomWhitespace": true,
+    "partnerCodeRule": { "customerPrefix": "CUS-", "supplierPrefix": "SUP-", "width": 3 },
+    "acceptItemSuppliersOfAcceptedPartners": true
+  }
+}
