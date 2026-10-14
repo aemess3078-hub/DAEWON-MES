@@ -1,7 +1,13 @@
 "use client"
 
 import { describeTermsViolation, validateQtyAgainstTerms } from "../../../../lib/mrp/purchase-policy"
-import { deriveForSupplier, type PolicyFields, type PurchaseSuggestionRow } from "../../../../lib/mrp/purchase-suggestion"
+import {
+  deriveCoverageForSupplier,
+  deriveForSupplier,
+  type CoverageFields,
+  type PolicyFields,
+  type PurchaseSuggestionRow,
+} from "../../../../lib/mrp/purchase-suggestion"
 
 const fmt = (n: number) => n.toLocaleString("ko-KR", { maximumFractionDigits: 3 })
 
@@ -14,10 +20,28 @@ export type SuggestionRowEdit = {
   requiredDate: string
   /** 사용자가 수량을 직접 고쳤는가(공급업체를 바꿔도 수동 수량은 덮어쓰지 않고 구매조건 위반만 경고한다) */
   qtyEdited?: boolean
+  /** (Phase 6) 기존 DRAFT 로 충족된(또는 필요 없는) 품목을 알면서도 추가 발주 — 확인 + 사유 필수 */
+  override?: boolean
+  overrideReason?: string
+}
+
+/** 이 행이 "추가 발주 확인/사유"를 요구하는가 — 서버 검증(정책 필요량 − 기존 DRAFT ≤ 0)과 같은 기준 */
+export function rowNeedsOverride(
+  row: Pick<PurchaseSuggestionRow, "suppliers"> & Partial<PolicyFields> & Partial<CoverageFields>,
+  supplierId: string | null
+): boolean {
+  if (row.draftCoverageQty === undefined || row.rawSuggestedQty === undefined) return false
+  const supplier = row.suppliers.find((s) => s.supplierId === supplierId) ?? null
+  return (
+    deriveCoverageForSupplier(
+      { rawSuggestedQty: row.rawSuggestedQty, draftCoverageQty: row.draftCoverageQty, draftCoverageBySupplier: row.draftCoverageBySupplier ?? {} },
+      supplier
+    ).remainingRawNeed <= 0
+  )
 }
 
 /** 5C 행 + (있으면) Phase 5D 정책 필드. 정책 필드가 없는 행은 5C 화면 그대로 렌더링된다. */
-export type SuggestionTableRow = PurchaseSuggestionRow & Partial<PolicyFields>
+export type SuggestionTableRow = PurchaseSuggestionRow & Partial<PolicyFields> & Partial<CoverageFields>
 
 function parseDateOrNull(v: string): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null
@@ -117,6 +141,19 @@ export function PurchaseSuggestionTable({ rows, edits, priceVisible, disabled, o
                       supplier
                     )
                   : null
+              // Phase 6: DRAFT Coverage(미확정 발주) — 입고예정/재고가 아니라 중복 발주 방지용 별도 표시
+              const cov =
+                r.draftCoverageQty !== undefined && r.rawSuggestedQty !== undefined
+                  ? deriveCoverageForSupplier(
+                      {
+                        rawSuggestedQty: r.rawSuggestedQty,
+                        draftCoverageQty: r.draftCoverageQty,
+                        draftCoverageBySupplier: r.draftCoverageBySupplier ?? {},
+                      },
+                      supplier
+                    )
+                  : null
+              const needsOverride = cov !== null && cov.remainingRawNeed <= 0
               const qtyNumber = parseQtyLocal(e.qty)
               const termsWarning =
                 policy && supplier && qtyNumber !== null
@@ -147,7 +184,13 @@ export function PurchaseSuggestionTable({ rows, edits, priceVisible, disabled, o
                       <div className="text-[13px] text-amber-700">
                         DRAFT 발주 {fmt(r.draftOpenQty)}
                         {r.uom} 존재(미확정 · 입고예정 미반영)
+                        {r.draftOrders && r.draftOrders.length > 0 && (
+                          <span className="text-muted-foreground"> · {r.draftOrders.map((o) => o.orderNo).join(", ")}</span>
+                        )}
                       </div>
+                    )}
+                    {cov && cov.otherSupplierDraftQty > 0 && e.supplierId && (
+                      <div className="text-[13px] text-amber-700">다른 공급업체 DRAFT {fmt(cov.otherSupplierDraftQty)} 존재</div>
                     )}
                   </td>
                   <td className="px-3 py-3 text-muted-foreground">{r.uom}</td>
@@ -244,11 +287,56 @@ export function PurchaseSuggestionTable({ rows, edits, priceVisible, disabled, o
                         최대결품 기준(최종부족 {fmt(r.finalShortageQty)})
                       </div>
                     )}
-                    {derived && !temporary && (r.rawSuggestedQty ?? 0) > 0 && (
+                    {cov && !temporary && (r.rawSuggestedQty ?? 0) > 0 ? (
                       <div className="mt-1 text-[13px] text-muted-foreground">
-                        정책 필요량 {fmt(r.rawSuggestedQty ?? 0)}
-                        {derived.moqApplied && <> → MOQ {fmt(derived.qtyAfterMoq)}</>}
-                        {derived.multipleApplied && <> → 배수 올림 {fmt(derived.qty)}</>}
+                        MRP 정책 필요량 {fmt(r.rawSuggestedQty ?? 0)}
+                        {cov.status !== "NONE" && (
+                          <>
+                            {" "}
+                            / 기존 DRAFT(미확정) {fmt(r.draftCoverageQty ?? 0)} / 추가 DRAFT 필요 {fmt(cov.remainingRawNeed)}
+                          </>
+                        )}
+                        {cov.remainingRawNeed > 0 && cov.moqApplied && <> → MOQ {fmt(cov.qtyAfterMoq)}</>}
+                        {cov.remainingRawNeed > 0 && cov.multipleApplied && <> → 배수 올림 {fmt(cov.additionalQty)}</>}
+                        {cov.status !== "NONE" && <div>DRAFT 는 입고예정/재고가 아닙니다.</div>}
+                      </div>
+                    ) : (
+                      derived &&
+                      !temporary &&
+                      (r.rawSuggestedQty ?? 0) > 0 && (
+                        <div className="mt-1 text-[13px] text-muted-foreground">
+                          정책 필요량 {fmt(r.rawSuggestedQty ?? 0)}
+                          {derived.moqApplied && <> → MOQ {fmt(derived.qtyAfterMoq)}</>}
+                          {derived.multipleApplied && <> → 배수 올림 {fmt(derived.qty)}</>}
+                        </div>
+                      )
+                    )}
+                    {cov && cov.status === "COVERED" && !temporary && (
+                      <div className="mt-1 text-[13px] text-emerald-700">기존 DRAFT 발주로 제안량 충족 · 추가 발주 0</div>
+                    )}
+                    {needsOverride && e.selected && (
+                      <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/60 p-2">
+                        <label className="flex cursor-pointer items-start gap-2 text-[13px] text-amber-900">
+                          <input
+                            type="checkbox"
+                            aria-label={`${r.code} 추가 발주 확인`}
+                            className="mt-0.5"
+                            checked={e.override === true}
+                            disabled={disabled}
+                            onChange={(ev) => onChange(r.componentItemId, { override: ev.target.checked })}
+                          />
+                          <span>기존 DRAFT 로 이미 충족되었음을 알고 있으며 추가 발주합니다.</span>
+                        </label>
+                        <input
+                          type="text"
+                          aria-label={`${r.code} 추가 발주 사유`}
+                          maxLength={200}
+                          placeholder="추가 발주 사유(필수)"
+                          className="mt-1.5 h-9 w-full rounded-md border bg-background px-2 text-[14px]"
+                          value={e.overrideReason ?? ""}
+                          disabled={disabled || e.override !== true}
+                          onChange={(ev) => onChange(r.componentItemId, { overrideReason: ev.target.value })}
+                        />
                       </div>
                     )}
                     {derived?.termsInvalid && <div className="mt-1 text-[13px] text-red-600">구매조건 데이터 오류</div>}
@@ -323,6 +411,20 @@ export function PurchaseSuggestionTable({ rows, edits, priceVisible, disabled, o
                     {r.supplierReason === "NONE" && (
                       <div className="mt-1">
                         <span className="rounded-full border px-2 py-0.5 text-[13px] text-muted-foreground">공급업체 미지정</span>
+                      </div>
+                    )}
+                    {cov && cov.status === "COVERED" && !temporary && (
+                      <div className="mt-1">
+                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[13px] text-emerald-800">
+                          기존 DRAFT 충족
+                        </span>
+                      </div>
+                    )}
+                    {cov && cov.status === "PARTIAL" && !temporary && (
+                      <div className="mt-1">
+                        <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[13px] text-amber-800">
+                          기존 DRAFT 일부 충족
+                        </span>
                       </div>
                     )}
                   </td>

@@ -466,6 +466,9 @@ model Tenant {
   purchaseOrders                PurchaseOrder[]                @relation("TenantPurchaseOrders")
   itemPrices                    ItemPrice[]                    @relation("TenantItemPrices")
   itemSuppliers                 ItemSupplier[]                 @relation("TenantItemSuppliers")
+  mrpRuns                       MrpRun[]                       @relation("TenantMrpRuns")
+  mrpRunSuggestions             MrpRunSuggestion[]             @relation("TenantMrpRunSuggestions")
+  mrpRunPurchases               MrpRunPurchase[]               @relation("TenantMrpRunPurchases")
   aiUsageLogs                   AIUsageLog[]                   @relation("TenantAIUsageLogs")
   quotations                    Quotation[]                    @relation("TenantQuotations")
   projectOrders                 ProjectOrder[]                 @relation("TenantProjectOrders")
@@ -515,6 +518,7 @@ model Profile {
   tenantUsers                         TenantUser[]
   qualityInspections                  QualityInspection[]
   auditLogs                           AuditLog[]
+  mrpRuns                             MrpRun[]                      @relation("MrpRunCreator")
   approvalRequests                    ApprovalRequest[]             @relation("Requester")
   approvals                           ApprovalRequest[]             @relation("Approver")
   receivingInspections                ReceivingInspection[]         @relation("ReceivingInspector")
@@ -2616,6 +2620,7 @@ model PurchaseOrder {
   items                 PurchaseOrderItem[]
   lotNumberReservations LotNumberReservation[]
   materialReturns       MaterialReturn[]
+  mrpRunPurchases       MrpRunPurchase[]      @relation("MrpRunPurchaseOrder")
 
   @@unique([tenantId, orderNo])
   @@index([tenantId])
@@ -2797,6 +2802,111 @@ model ItemSupplier {
   @@unique([tenantId, itemId, supplierId])
   @@index([tenantId, itemId])
   @@index([tenantId, supplierId])
+}
+
+// ─── Phase 6: MRP 실행이력 / Snapshot / DRAFT 연결 ─────────────────────────────────────
+//
+// MrpRun            : 사용자가 저장하거나 DRAFT 발주 생성 시 보장되는 MRP 결과 Snapshot(불변).
+//                     snapshot(JSON)에 당시 수요/재고/입고예정/반제품 Netting/안전재고/공급업체 정책/제안량을 담고,
+//                     목록/검색용 요약 컬럼만 구조화한다. 저장 후 UPDATE 불가(DB trigger).
+// MrpRunSuggestion  : Snapshot 의 발주제안 행(자재별). 중복 발주 방지 시 '당시 정책 필요량'의 기준이 된다.
+// MrpRunPurchase    : Snapshot 에서 생성된 DRAFT 구매발주 연결. 요청 단위 멱등키(requestKey) unique,
+//                     PO 가 삭제되어도 연결/발주번호/품목 요약은 보존(purchaseOrderId SetNull).
+// 품목/공급업체는 이력 불변성을 위해 FK 없이 id + 당시 코드/이름을 복사해 둔다(마스터 변경/삭제와 무관).
+model MrpRun {
+  id                       String   @id @default(cuid())
+  tenantId                 String
+  runType                  String   @default("ORDER_MRP")
+  mode                     String   @default("NORMAL")
+  status                   String   @default("SAVED")
+  baseDate                 DateTime @db.Date
+  fromDate                 DateTime? @db.Date
+  toDate                   DateTime? @db.Date
+  includeDraft             Boolean  @default(false)
+  includeScheduledReceipts Boolean  @default(true)
+  semiFinishedNetting      Boolean  @default(true)
+  demandLineCount          Int      @default(0)
+  materialCount            Int      @default(0)
+  shortageMaterialCount    Int      @default(0)
+  purchaseNeededCount      Int      @default(0)
+  warningCount             Int      @default(0)
+  snapshotVersion          Int      @default(1)
+  snapshot                 Json
+  sourceHash               String
+  resultHash               String
+  requestKey               String?
+  createdById              String?
+  createdByName            String?
+  createdAt                DateTime @default(now())
+
+  tenant      Tenant             @relation("TenantMrpRuns", fields: [tenantId], references: [id])
+  createdBy   Profile?           @relation("MrpRunCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  suggestions MrpRunSuggestion[]
+  purchases   MrpRunPurchase[]
+
+  @@unique([tenantId, requestKey])
+  @@index([tenantId, createdAt])
+}
+
+model MrpRunSuggestion {
+  id               String    @id @default(cuid())
+  tenantId         String
+  runId            String
+  itemId           String
+  itemCode         String
+  itemName         String
+  kind             String
+  /// 구매조건 적용 전 정책 필요량(DRAFT 미고려). 중복 발주 방지의 기준값
+  rawNeed          Decimal   @db.Decimal(18, 6)
+  /// 당시 추천 공급업체 구매조건을 적용한 MRP 제안량(DRAFT 미고려)
+  suggestedQty     Decimal   @db.Decimal(18, 6)
+  /// 당시 활성 DRAFT 미입고 합계(입고예정/재고 아님)
+  draftCoverageQty Decimal   @db.Decimal(18, 6)
+  /// 당시 기존 DRAFT 를 반영한 추가 DRAFT 제안량
+  additionalQty    Decimal   @db.Decimal(18, 6)
+  supplierId       String?
+  supplierName     String?
+  targetReceiptDate DateTime? @db.Date
+  orderByDate      DateTime? @db.Date
+  payload          Json
+
+  tenant Tenant @relation("TenantMrpRunSuggestions", fields: [tenantId], references: [id])
+  run    MrpRun @relation(fields: [runId], references: [id], onDelete: Restrict)
+
+  @@unique([runId, itemId])
+  @@index([tenantId, itemId])
+}
+
+model MrpRunPurchase {
+  id              String   @id @default(cuid())
+  tenantId        String
+  runId           String
+  /// PO 가 삭제(DRAFT 삭제)되면 NULL 이 되지만 아래 복사 필드와 lines 는 남는다
+  purchaseOrderId String?
+  orderNo         String
+  supplierId      String
+  supplierName    String
+  /// 사용자 생성 요청 단위 멱등키(같은 요청의 재전송/더블클릭은 PO 를 다시 만들지 않는다)
+  requestKey      String
+  itemCount       Int
+  totalQty        Decimal  @db.Decimal(18, 6)
+  overrideUsed    Boolean  @default(false)
+  overrideReason  String?
+  /// 라인별 근거: itemId/code/qty/당시 정책 필요량/기존 DRAFT/추가 필요량/override 사유
+  lines           Json
+  /// 생성 결과 DTO(멱등 재전송 응답용)
+  result          Json
+  createdById     String?
+  createdByName   String?
+  createdAt       DateTime @default(now())
+
+  tenant        Tenant         @relation("TenantMrpRunPurchases", fields: [tenantId], references: [id])
+  run           MrpRun         @relation(fields: [runId], references: [id], onDelete: Restrict)
+  purchaseOrder PurchaseOrder? @relation("MrpRunPurchaseOrder", fields: [purchaseOrderId], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, requestKey, supplierId])
+  @@unique([purchaseOrderId])
+  @@index([tenantId, runId])
 }
 
 // ─── Phase 2d-AI: AI 사용량 로그 ────────────────────────────────────────────

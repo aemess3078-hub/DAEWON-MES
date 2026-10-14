@@ -5,7 +5,10 @@
  *  - 관계는 행에 중첩 객체로 직접 넣어 둔다(예: itemSupplier.supplier, purchaseOrderItem.purchaseOrder).
  *  - purchaseOrder.create 의 items.create 는 purchaseOrderItem 행으로 풀어 넣는다.
  *  - (tenantId, orderNo) unique 위반 시 P2002.
- *  - $transaction: 스냅샷 롤백 + 트랜잭션 범위 잠금(mutex) 지원. 동시 요청 인터리빙을 위해 읽기에서 양보한다.
+ *  - $transaction: 트랜잭션별 undo 로그 롤백 + 트랜잭션 범위 잠금(mutex) 지원. 동시 요청 인터리빙을 위해 읽기에서 양보한다.
+ *    (스냅샷 복원이 아니라 이 트랜잭션이 만든/바꾼 행만 되돌리므로, 다른 트랜잭션이 커밋한 행을 지우지 않는다.)
+ *  - create / createMany 는 uniques(테이블별 unique 키 조합)를 검사해 P2002 를 던진다(NULL 값이 있는 조합은 제외 = PostgreSQL 동작).
+ *  - count / skip / take 지원.
  *  - reads / writes 를 기록해 "쿼리 수", "DB write 0건" 을 검증한다.
  */
 
@@ -100,10 +103,28 @@ class Mutex {
   }
 }
 
-export function makeFakeDb(seed: Record<string, Row[]>) {
+/** 기본 unique 제약(테이블 → 컬럼 조합 목록). 필요하면 makeFakeDb 두 번째 인자로 추가/덮어쓴다. */
+const DEFAULT_UNIQUES: Record<string, string[][]> = {
+  purchaseOrder: [["tenantId", "orderNo"]],
+  mrpRun: [["tenantId", "requestKey"]],
+  mrpRunSuggestion: [["runId", "itemId"]],
+  mrpRunPurchase: [["tenantId", "requestKey", "supplierId"], ["purchaseOrderId"]],
+}
+
+export function makeFakeDb(seed: Record<string, Row[]>, options?: { uniques?: Record<string, string[][]> }) {
   const tables: Record<string, Row[]> = {}
   for (const [k, v] of Object.entries(seed)) tables[k] = v.map((r) => ({ ...r }))
-  for (const k of ["auditLog", "purchaseOrder", "purchaseOrderItem"]) tables[k] = tables[k] ?? []
+  for (const k of ["auditLog", "purchaseOrder", "purchaseOrderItem", "mrpRun", "mrpRunSuggestion", "mrpRunPurchase"]) tables[k] = tables[k] ?? []
+  const uniques: Record<string, string[][]> = { ...DEFAULT_UNIQUES, ...(options?.uniques ?? {}) }
+  type Undo = Array<() => void>
+  const checkUnique = (name: string, row: Row) => {
+    for (const cols of uniques[name] ?? []) {
+      if (cols.some((c) => row[c] === null || row[c] === undefined)) continue
+      if (tables[name].some((r) => cols.every((c) => r[c] === row[c]))) {
+        throw Object.assign(new Error(`Unique constraint failed on (${cols.join(", ")})`), { code: "P2002" })
+      }
+    }
+  }
   const reads: Array<{ model: string; op: string; where: Row }> = []
   const writes: Array<{ model: string; op: string; data?: Row }> = []
   const failNext = { auditLogAfter: -1 as number } // N번째(0부터) auditLog.create 에서 실패
@@ -114,12 +135,19 @@ export function makeFakeDb(seed: Record<string, Row[]>) {
 
   const yieldTurn = () => new Promise<void>((r) => setImmediate(r))
 
-  const model = (name: string) => ({
-    findMany: async (args?: { where?: Row; orderBy?: any; take?: number }) => {
+  const model = (name: string, undo?: Undo) => ({
+    count: async (args?: { where?: Row }) => {
+      reads.push({ model: name, op: "count", where: args?.where ?? {} })
+      const n = tables[name].filter((r) => (args?.where ? matches(r, args.where) : true)).length
+      await yieldTurn()
+      return n
+    },
+    findMany: async (args?: { where?: Row; orderBy?: any; take?: number; skip?: number }) => {
       reads.push({ model: name, op: "findMany", where: args?.where ?? {} })
       // 읽기 시점의 스냅샷을 먼저 만들고 양보한다(다른 트랜잭션이 끼어들어도 읽은 값은 그대로 = 커밋 전 읽기)
       let rows = tables[name].filter((r) => (args?.where ? matches(r, args.where) : true))
       rows = sortRows(rows, args?.orderBy)
+      if (args?.skip !== undefined) rows = rows.slice(args.skip)
       if (args?.take !== undefined) rows = rows.slice(0, args.take)
       const snapshot = rows.map((r) => ({ ...r }))
       await yieldTurn()
@@ -140,16 +168,18 @@ export function makeFakeDb(seed: Record<string, Row[]>) {
       }
       const { items, ...rest } = args.data as Row
       const row: Row = { id: `${name}-${seq++}`, createdAt: new Date("2026-10-01T00:00:00Z"), ...rest }
+      checkUnique(name, row)
       if (name === "purchaseOrder") {
-        if (tables.purchaseOrder.some((p) => p.tenantId === row.tenantId && p.orderNo === row.orderNo)) {
-          throw Object.assign(new Error("Unique constraint failed on (tenantId, orderNo)"), { code: "P2002" })
-        }
         row.supplier = tables.businessPartner?.find((b) => b.id === row.supplierId) ?? { id: row.supplierId, name: "" }
       }
       tables[name].push(row)
+      undo?.push(() => {
+        const i = tables[name].indexOf(row)
+        if (i >= 0) tables[name].splice(i, 1)
+      })
       if (name === "purchaseOrder" && items?.create) {
         for (const it of items.create as Row[]) {
-          tables.purchaseOrderItem.push({
+          const itemRow: Row = {
             id: `purchaseOrderItem-${seq++}`,
             purchaseOrderId: row.id,
             receivedQty: 0,
@@ -157,15 +187,40 @@ export function makeFakeDb(seed: Record<string, Row[]>) {
             ...it,
             item: { tenantId: row.tenantId },
             purchaseOrder: row,
+          }
+          tables.purchaseOrderItem.push(itemRow)
+          undo?.push(() => {
+            const i = tables.purchaseOrderItem.indexOf(itemRow)
+            if (i >= 0) tables.purchaseOrderItem.splice(i, 1)
           })
         }
       }
       return { ...row }
     },
+    createMany: async (args: { data: Row[] }) => {
+      writes.push({ model: name, op: "createMany" })
+      for (const d of args.data) {
+        const row: Row = { id: `${name}-${seq++}`, createdAt: new Date("2026-10-01T00:00:00Z"), ...d }
+        checkUnique(name, row)
+        tables[name].push(row)
+        undo?.push(() => {
+          const i = tables[name].indexOf(row)
+          if (i >= 0) tables[name].splice(i, 1)
+        })
+      }
+      return { count: args.data.length }
+    },
     updateMany: async (args: { where: Row; data: Row }) => {
       writes.push({ model: name, op: "updateMany", data: args.data })
       const targets = tables[name].filter((r) => matches(r, args.where))
-      targets.forEach((t) => Object.assign(t, args.data))
+      targets.forEach((t) => {
+        const prev = { ...t }
+        Object.assign(t, args.data)
+        undo?.push(() => {
+          Object.keys(t).forEach((k) => delete t[k])
+          Object.assign(t, prev)
+        })
+      })
       return { count: targets.length }
     },
   })
@@ -183,20 +238,22 @@ export function makeFakeDb(seed: Record<string, Row[]>) {
     }
   )
 
-  async function transaction(cb: (tx: any) => Promise<unknown>) {
-    const snapshot: Record<string, Row[]> = {}
-    for (const [k, rows] of Object.entries(tables)) snapshot[k] = rows.map((r) => ({ ...r }))
+  async function transaction(cb: (tx: any) => Promise<unknown>, _options?: unknown) {
+    void _options
+    const undo: Undo = []
     const releases: Array<() => void> = []
     const tx: any = new Proxy(db, {
       get(target, prop: string) {
         if (prop === "__locks") return releases
+        if (typeof prop === "string" && knownModels().includes(prop)) return model(prop, undo)
         return (target as any)[prop]
       },
     })
     try {
       return await cb(tx)
     } catch (e) {
-      for (const k of Object.keys(tables)) tables[k] = snapshot[k]
+      // 이 트랜잭션이 만든/바꾼 행만 역순으로 되돌린다(다른 트랜잭션의 커밋은 보존)
+      for (let i = undo.length - 1; i >= 0; i--) undo[i]()
       throw e
     } finally {
       releases.forEach((r) => r())

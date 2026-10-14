@@ -19,7 +19,8 @@ import {
 } from "../mrp/purchase-suggestion"
 import type { DateOnly } from "../mrp/types"
 import { loadSupplierPolicies } from "./item-supplier.service"
-import { loadCurrentPurchasePrices, loadDraftOpenQuantities } from "./mrp-loaders"
+import { loadCurrentPurchasePrices, loadDraftCoverage } from "./mrp-loaders"
+import type { OrderMrpView } from "../mrp/order-mrp-adapter"
 import { loadAndRunOrderMrp, normalizeOrderMrpParams, type OrderMrpDb } from "./mrp-order.service"
 
 export type PurchaseSuggestionDb = OrderMrpDb &
@@ -54,6 +55,17 @@ export type PurchaseSuggestionPayload = {
     /** 자동 제안 대상 중 추천 공급업체의 리드타임이 없어 발주 필요일을 계산하지 못한 자재 수 */
     leadTimeMissingCount: number
   }
+  /**
+   * Phase 6 DRAFT Coverage 요약 — DRAFT 는 입고예정/재고에 가산하지 않고 "미확정 발주"로 따로 표시한다.
+   */
+  coverageSummary: {
+    /** 자동 제안 대상 중 기존 DRAFT 로 필요량이 모두 충족된 자재 수(추가 DRAFT 0) */
+    coveredCount: number
+    /** 기존 DRAFT 가 일부만 충족한 자재 수 */
+    partialCount: number
+    /** 기존 DRAFT 가 존재하는 제안 자재 수(상태 무관) */
+    draftExistsCount: number
+  }
   /** 예정일이 지나 가산하지 않은 미입고 발주 건수(제안 수량에 영향을 줄 수 있는 참고 정보) */
   overdueReceiptCount: number
   diagnostics: { queryCount: number }
@@ -65,8 +77,22 @@ export async function loadPurchaseSuggestions(
   params: { from: string | null; to: string | null; includeDraft: boolean },
   options: { now?: () => Date; includePrices: boolean }
 ): Promise<PurchaseSuggestionPayload> {
+  return (await computePurchaseSuggestions(db, tenantId, params, options)).payload
+}
+
+/**
+ * 발주제안 + 계산에 쓴 MRP View. Snapshot(Phase 6)은 같은 계산 결과를 그대로 저장하므로 View 도 함께 돌려준다.
+ * (view 는 서버 내부 전용이며 클라이언트 응답에는 포함하지 않는다.)
+ */
+export async function computePurchaseSuggestions(
+  db: PurchaseSuggestionDb,
+  tenantId: string,
+  params: { from: string | null; to: string | null; includeDraft: boolean },
+  options: { now?: () => Date; includePrices: boolean }
+): Promise<{ payload: PurchaseSuggestionPayload; view: OrderMrpView; calculatedAt: Date }> {
   const now = options.now ?? (() => new Date())
-  const mrp = await loadAndRunOrderMrp(db, tenantId, { ...params, includeScheduledReceipts: true }, now)
+  const calculatedAt = now()
+  const mrp = await loadAndRunOrderMrp(db, tenantId, { ...params, includeScheduledReceipts: true }, () => calculatedAt)
   let queryCount = mrp.diagnostics.queryCount
   const view = mrp.view
 
@@ -113,8 +139,11 @@ export async function loadPurchaseSuggestions(
     if (loaded.queried) queryCount += 1
   }
 
-  const drafts = await loadDraftOpenQuantities(db, tenantId, targetIds)
+  // Phase 6: DRAFT Coverage(품목/공급업체/발주서별) — 입고예정/재고에는 가산하지 않는다. 같은 쿼리 1회.
+  const drafts = await loadDraftCoverage(db, tenantId, targetIds)
   if (drafts.queried) queryCount += 1
+  const draftTotals = new Map<string, number>()
+  drafts.byItem.forEach((c, itemId) => draftTotals.set(itemId, c.total))
 
   const site = await db.site.findFirst({
     where: { tenantId },
@@ -127,10 +156,11 @@ export async function loadPurchaseSuggestions(
     view,
     suppliersByItem,
     prices,
-    draftOpenQty: drafts.byItem,
+    draftOpenQty: draftTotals,
+    draftCoverage: drafts.byItem,
   })
 
-  return {
+  const payload: PurchaseSuggestionPayload = {
     params: view.params,
     calculatedAt: mrp.calculatedAt,
     baseDate: view.scheduledReceipts.baseDate,
@@ -151,9 +181,15 @@ export async function loadPurchaseSuggestions(
         (r) => AUTO_SUGGEST_KINDS.includes(r.kind) && r.recommendedSupplierId !== null && r.orderTiming === "LEAD_TIME_MISSING"
       ).length,
     },
+    coverageSummary: {
+      coveredCount: rows.filter((r) => AUTO_SUGGEST_KINDS.includes(r.kind) && r.coverageStatus === "COVERED").length,
+      partialCount: rows.filter((r) => AUTO_SUGGEST_KINDS.includes(r.kind) && r.coverageStatus === "PARTIAL").length,
+      draftExistsCount: rows.filter((r) => r.draftCoverageQty > 0).length,
+    },
     overdueReceiptCount: view.kpi.overdueReceiptCount,
     diagnostics: { queryCount },
   }
+  return { payload, view, calculatedAt }
 }
 
 /**

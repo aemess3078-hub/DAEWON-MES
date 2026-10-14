@@ -354,8 +354,9 @@ async function main() {
     ok(!/Date\.now|new Date\(/.test(engine), "엔진: 현재 시각 비의존")
     const loaders = code(read("src", "lib", "services", "mrp-loaders.ts"))
     ok(!/wipUnit|wipMovement/i.test(loaders), "로더: 재공(WIP) 조회 없음")
-    const migs = readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n))
-    ok(migs.length === 4 && migs[migs.length - 1] === "20261014010000_add_item_safety_stock", "migration 추가 없음(5D 까지 4건)")
+    // 5E 는 migration 을 추가하지 않는다(5D 까지 4건). Phase 6 migration 은 이 시점 이후이므로 제외하고 센다.
+    const migs = readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n) && n < "20261014020000")
+    ok(migs.length === 4 && migs[migs.length - 1] === "20261014010000_add_item_safety_stock", "5E 는 migration 추가 없음(5D 까지 4건)")
     const planService = read("src", "lib", "services", "mrp-plan.service.ts")
     ok(!/netSemiFinished|semiNetting/.test(planService), "기존 생산계획 MRP(calculateMRP)는 변경하지 않음")
   }

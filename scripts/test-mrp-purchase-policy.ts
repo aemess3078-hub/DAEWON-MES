@@ -445,7 +445,10 @@ async function main() {
     ok(/ALTER TABLE "Item" ADD COLUMN\s+"safetyStock" DOUBLE PRECISION NOT NULL DEFAULT 0/.test(sql), "migration: NOT NULL DEFAULT 0 컬럼 추가(기존 행 0)")
     ok(/CHECK \("safetyStock" >= 0 AND "safetyStock" < 1000000000000\)/.test(sql), "migration: 음수/NaN/Infinity 차단 CHECK")
     ok(!/CREATE TABLE|DROP |TRUNCATE|DELETE FROM|ENABLE ROW LEVEL SECURITY/.test(sql), "migration: additive(신규 테이블/삭제/RLS 변경 없음)")
-    ok(readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n)).length === 4, "migration 4건(baseline, hardening, 5A, 5D)")
+    ok(
+      readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n) && n <= migDir).length === 4,
+      "5D 시점 migration 4건(baseline, hardening, 5A, 5D) — 이후 Phase 의 migration 은 별도 테스트가 검증"
+    )
 
     const itemActions = code(read("src", "lib", "actions", "item.actions.ts"))
     ok((itemActions.match(/normalizeSafetyStock\(data\.safetyStock\)/g) ?? []).length === 2, "품목 등록/수정 모두 서버에서 안전재고 검증")

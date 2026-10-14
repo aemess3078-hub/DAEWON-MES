@@ -8,6 +8,7 @@
  */
 
 import type { PrismaClient } from "@prisma/client"
+import { aggregateDraftCoverage, type ItemDraftCoverage } from "../mrp/draft-coverage"
 import { selectDefaultBoms, type BomRow, type InventoryBalanceRow } from "../mrp/order-mrp-adapter"
 import { SCHEDULED_RECEIPT_PO_STATUSES, type PurchaseOrderItemRow } from "../mrp/scheduled-receipt"
 
@@ -188,16 +189,16 @@ export async function loadCurrentPurchasePrices(
 }
 
 /**
- * DRAFT 구매발주의 미입고 수량(참고용) — MRP 예정입고/재고에는 가산하지 않는다(Phase 5B 정책: ORDERED/PARTIAL_RECEIVED 만).
- * 외주발주(OS- / [OUTSOURCING] / 공정 연결 행)는 제외한다.
+ * DRAFT 구매발주의 미입고 수량 Coverage (Phase 6) — MRP 예정입고/재고/예상잔량에는 가산하지 않는다(Phase 5B 정책: ORDERED/PARTIAL_RECEIVED 만).
+ *  - tenant 한정(발주 헤더와 품목), 상태 DRAFT, 미입고(qty − receivedQty) > 0 인 행만. 외주발주(OS- / [OUTSOURCING] / 공정 연결 행)는 제외한다.
+ *  - 쿼리 1회(자재 수와 무관). 품목별 합계 + 공급업체별 + 발주서별(표시용)을 함께 돌려준다.
  */
-export async function loadDraftOpenQuantities(
+export async function loadDraftCoverage(
   db: Pick<PrismaClient, "purchaseOrderItem">,
   tenantId: string,
   itemIds: readonly string[]
-): Promise<{ byItem: Map<string, number>; queried: boolean }> {
-  const byItem = new Map<string, number>()
-  if (itemIds.length === 0) return { byItem, queried: false }
+): Promise<{ byItem: Map<string, ItemDraftCoverage>; queried: boolean }> {
+  if (itemIds.length === 0) return { byItem: new Map(), queried: false }
   const rows = await db.purchaseOrderItem.findMany({
     where: {
       itemId: { in: Array.from(new Set(itemIds)) },
@@ -209,14 +210,27 @@ export async function loadDraftOpenQuantities(
       qty: true,
       receivedQty: true,
       workOrderOperationId: true,
-      purchaseOrder: { select: { orderNo: true, note: true } },
+      purchaseOrder: { select: { orderNo: true, note: true, supplierId: true } },
     },
   })
+  const open: Array<{ itemId: string; supplierId: string; orderNo: string; openQty: number }> = []
   for (const r of rows) {
     const po = r.purchaseOrder
     if (po.orderNo.startsWith("OS-") || (po.note ?? "").includes("[OUTSOURCING]") || r.workOrderOperationId) continue
-    const open = Math.max(0, Number(r.qty) - Number(r.receivedQty))
-    if (open > 0) byItem.set(r.itemId, (byItem.get(r.itemId) ?? 0) + open)
+    const openQty = Math.max(0, Number(r.qty) - Number(r.receivedQty))
+    if (openQty > 0) open.push({ itemId: r.itemId, supplierId: po.supplierId ?? "", orderNo: po.orderNo, openQty })
   }
-  return { byItem, queried: true }
+  return { byItem: aggregateDraftCoverage(open), queried: true }
+}
+
+/** DRAFT 구매발주 미입고 합계(품목별, 참고용). loadDraftCoverage 의 합계만 돌려준다. */
+export async function loadDraftOpenQuantities(
+  db: Pick<PrismaClient, "purchaseOrderItem">,
+  tenantId: string,
+  itemIds: readonly string[]
+): Promise<{ byItem: Map<string, number>; queried: boolean }> {
+  const { byItem, queried } = await loadDraftCoverage(db, tenantId, itemIds)
+  const totals = new Map<string, number>()
+  byItem.forEach((c, itemId) => totals.set(itemId, c.total))
+  return { byItem: totals, queried }
 }

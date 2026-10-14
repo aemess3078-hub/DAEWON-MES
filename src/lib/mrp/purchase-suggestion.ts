@@ -33,6 +33,13 @@
  *  4) 관계 없음 → NONE. "tenant 의 첫 공급업체"나 최근 PO 는 사용하지 않는다.
  */
 
+import {
+  emptyItemCoverage,
+  evaluateCoverage,
+  type CoverageStatus,
+  type DraftCoverageOrder,
+  type ItemDraftCoverage,
+} from "./draft-coverage"
 import type { OrderMrpMaterialView, OrderMrpView } from "./order-mrp-adapter"
 import { applySupplierTerms, evaluateOrderTiming, type OrderTiming } from "./purchase-policy"
 import type { DateOnly } from "./types"
@@ -159,8 +166,28 @@ export type PolicyFields = {
   baseDate: DateOnly | null
 }
 
-/** 5C 행 + Phase 5D 정책 필드 */
-export type PurchaseSuggestionLine = PurchaseSuggestionRow & PolicyFields
+/**
+ * Phase 6 DRAFT Coverage 필드 (표시/중복 발주 방지용 — MRP 재고/입고예정/예상잔량에는 영향이 없다)
+ *  - suggestedQty / rawSuggestedQty 는 DRAFT 를 고려하지 않은 "MRP 제안"으로 그대로 유지된다.
+ *  - additionalQty = max(0, rawSuggestedQty − draftCoverageQty) 에 추천 공급업체 MOQ/배수를 적용한 값.
+ */
+export type CoverageFields = {
+  /** 품목 전체 활성 DRAFT 미입고 합계(= draftOpenQty). 입고예정/재고 아님 */
+  draftCoverageQty: number
+  /** supplierId → 해당 공급업체 DRAFT 미입고 */
+  draftCoverageBySupplier: Record<string, number>
+  /** 발주서별 DRAFT 미입고(상위 일부, 발주번호 순) */
+  draftOrders: DraftCoverageOrder[]
+  draftOrderCount: number
+  /** max(0, rawSuggestedQty − draftCoverageQty): 구매조건 적용 전 남은 필요량 */
+  remainingRawNeed: number
+  /** 추천 공급업체 구매조건을 적용한 추가 DRAFT 제안량 */
+  additionalQty: number
+  coverageStatus: CoverageStatus
+}
+
+/** 5C 행 + Phase 5D 정책 필드 + Phase 6 DRAFT Coverage 필드 */
+export type PurchaseSuggestionLine = PurchaseSuggestionRow & PolicyFields & CoverageFields
 
 /** 제안 대상 판정(Phase 5D): 안전재고 목표 하한 기준. kind=null → 제안 불필요 */
 export function classifyByPolicy(args: {
@@ -187,6 +214,11 @@ export type BuildSuggestionArgs = {
   prices: ReadonlyMap<string, SupplierPrice>
   /** itemId → DRAFT 발주 미입고 합계(참고) */
   draftOpenQty: ReadonlyMap<string, number>
+  /**
+   * (Phase 6) itemId → DRAFT Coverage 상세(공급업체별/발주서별). 없으면 draftOpenQty 합계만 사용한다.
+   * 입고예정/재고에는 가산하지 않는다.
+   */
+  draftCoverage?: ReadonlyMap<string, ItemDraftCoverage>
 }
 
 export function priceKey(itemId: string, supplierId: string): string {
@@ -259,6 +291,18 @@ export function buildPurchaseSuggestionRows(args: BuildSuggestionArgs): Purchase
     }
     const timing = evaluateOrderTiming(requiredDate, recommended?.leadTimeDays ?? null, baseDate)
 
+    // Phase 6: 기존 DRAFT 를 먼저 빼고(remaining) 남은 필요량에만 MOQ/배수를 적용한다
+    const detail = args.draftCoverage?.get(m.componentItemId)
+    const coverage: ItemDraftCoverage = detail ?? {
+      ...emptyItemCoverage(),
+      total: roundQty(args.draftOpenQty.get(m.componentItemId) ?? 0),
+    }
+    const coverageEval = evaluateCoverage({
+      rawNeed: rawQty,
+      coverageQty: coverage.total,
+      supplier: recommended ? { moq: recommended.moq, orderMultiple: recommended.orderMultiple } : null,
+    })
+
     rows.push({
       componentItemId: m.componentItemId,
       code: m.code,
@@ -301,6 +345,14 @@ export function buildPurchaseSuggestionRows(args: BuildSuggestionArgs): Purchase
       orderTiming: timing.status,
       orderOverdueDays: timing.status === "OVERDUE" ? timing.overdueDays : 0,
       baseDate,
+      // Phase 6
+      draftCoverageQty: coverage.total,
+      draftCoverageBySupplier: coverage.bySupplier,
+      draftOrders: coverage.orders,
+      draftOrderCount: coverage.orderCount,
+      remainingRawNeed: coverageEval.remainingRawNeed,
+      additionalQty: coverageEval.additionalQty,
+      coverageStatus: coverageEval.status,
     })
   }
   // 자동 제안 대상(최종 부족/안전재고 부족) 먼저(필요일 빠른 순, 날짜 없음은 뒤) → 일시 미달·결품, 같으면 자재코드
@@ -314,6 +366,43 @@ export function buildPurchaseSuggestionRows(args: BuildSuggestionArgs): Purchase
     return a.code < b.code ? -1 : a.code > b.code ? 1 : 0
   })
   return rows
+}
+
+/**
+ * (Phase 6) 선택한 공급업체 기준 추가 DRAFT 제안(순수 — 화면 공급업체 변경 / 서버 검증이 같은 함수를 쓴다)
+ *  - Coverage 는 품목 전체 DRAFT 기준(공급업체 무관). 선택 공급업체 DRAFT 와 다른 공급업체 DRAFT 는 분해해서 돌려준다.
+ */
+export function deriveCoverageForSupplier(
+  line: Pick<CoverageFields, "draftCoverageQty" | "draftCoverageBySupplier"> & Pick<PolicyFields, "rawSuggestedQty">,
+  supplier: Pick<SupplierChoice, "supplierId" | "moq" | "orderMultiple"> | null
+): {
+  remainingRawNeed: number
+  additionalQty: number
+  qtyAfterMoq: number
+  moqApplied: boolean
+  multipleApplied: boolean
+  termsInvalid: boolean
+  status: CoverageStatus
+  selectedSupplierDraftQty: number
+  otherSupplierDraftQty: number
+} {
+  const ev = evaluateCoverage({
+    rawNeed: line.rawSuggestedQty,
+    coverageQty: line.draftCoverageQty,
+    supplier: supplier ? { moq: supplier.moq, orderMultiple: supplier.orderMultiple } : null,
+  })
+  const selected = supplier ? line.draftCoverageBySupplier[supplier.supplierId] ?? 0 : 0
+  return {
+    remainingRawNeed: ev.remainingRawNeed,
+    additionalQty: ev.additionalQty,
+    qtyAfterMoq: ev.qtyAfterMoq,
+    moqApplied: ev.moqApplied,
+    multipleApplied: ev.multipleApplied,
+    termsInvalid: ev.termsInvalid,
+    status: ev.status,
+    selectedSupplierDraftQty: roundQty(selected),
+    otherSupplierDraftQty: roundQty(Math.max(0, line.draftCoverageQty - selected)),
+  }
 }
 
 /**

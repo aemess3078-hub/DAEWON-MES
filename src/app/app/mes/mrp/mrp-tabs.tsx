@@ -2,6 +2,7 @@
 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { MrpDashboard } from "./mrp-dashboard"
+import { MrpRunHistoryPanel } from "./mrp-run-history-panel"
 import { OrderMrpPanel } from "./order-mrp-panel"
 import { SimulationPanel } from "./simulation-panel"
 
@@ -12,8 +13,8 @@ type Props = {
 }
 
 /**
- * 수주기준 MRP(대원정밀 기본) + 품목 시뮬레이션(What-if, 실제 수주와 독립) + 기존 생산계획 MRP(그대로 유지).
- * 세 탭은 서로 다른 입력(수주 / 제품·수량 가상 입력 / 생산계획)을 사용한다.
+ * 수주기준 MRP(대원정밀 기본) + 품목 시뮬레이션(What-if, 실제 수주와 독립) + 실행이력(Phase 6 Snapshot) + 기존 생산계획 MRP(그대로 유지).
+ * 실행이력 탭은 저장된 결과를 보여 줄 뿐 계산하지 않는다.
  */
 export function MrpTabs({ plans, tenantId, siteId }: Props) {
   return (
@@ -25,6 +26,9 @@ export function MrpTabs({ plans, tenantId, siteId }: Props) {
         <TabsTrigger value="simulation" className="text-[14px]">
           품목 시뮬레이션
         </TabsTrigger>
+        <TabsTrigger value="history" className="text-[14px]">
+          실행이력
+        </TabsTrigger>
         <TabsTrigger value="plan" className="text-[14px]">
           생산계획 MRP
         </TabsTrigger>
@@ -34,6 +38,9 @@ export function MrpTabs({ plans, tenantId, siteId }: Props) {
       </TabsContent>
       <TabsContent value="simulation" className="mt-0">
         <SimulationPanel />
+      </TabsContent>
+      <TabsContent value="history" className="mt-0">
+        <MrpRunHistoryPanel />
       </TabsContent>
       <TabsContent value="plan" className="mt-0 space-y-4">
         <div>
