@@ -9,6 +9,7 @@
  *  MD16~18   CREATE / MATCH / CONFLICT
  *  MD19~23   운영 정보(재고/수주/발주/WIP/생산) 제외
  *  MD24~25   seed 멱등 / seed 에 운영 정보 행 0
+ *  PI1~PI13  Phase 7B-2 운영 import 가드 / CREATE-only / 감사 / 롤백
  *  + 승인 결정/일괄 정책, 데이터셋 변조 검출, seed 가드, 정적 점검(운영 seed/배포 자동 실행 금지, 개인정보 산출물 gitignore)
  */
 import assert from "node:assert/strict"
@@ -16,11 +17,11 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { analyzeMaster, partnerFoldKey } from "../src/lib/master-migration/analyze"
 import { applyMasterDataset, loadExistingSnapshot, type MasterApplyDb } from "../src/lib/master-migration/apply"
-import { buildApprovedDataset, validateDatasetShape } from "../src/lib/master-migration/dataset"
+import { buildApprovedDataset, datasetCounts, validateDatasetShape } from "../src/lib/master-migration/dataset"
 import { extractDaewonWorkbook } from "../src/lib/master-migration/extract"
 import { reconcileCandidates, reconcileDataset, summarize } from "../src/lib/master-migration/reconcile"
 import { summarizeAnalysis, summarizeSeedDataset } from "../src/lib/master-migration/report"
-import { assertDevSeedTarget, isSeedGuardError } from "../src/lib/master-migration/seed-guard"
+import { assertDevSeedTarget, assertProductionImportAllowed, isProductionImportGuardError, isSeedGuardError } from "../src/lib/master-migration/seed-guard"
 import { buildSheetReport } from "../src/lib/master-migration/sheet-report"
 import { inspectCode, parseQty } from "../src/lib/master-migration/text"
 import type { ApprovedMasterDataset, ExistingMasterSnapshot, GridCell, GridLike, MasterDecisions } from "../src/lib/master-migration/types"
@@ -634,6 +635,114 @@ async function main() {
     ok(/DATABASE_URL 와 같습니다/.test(g({ ...prod, MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://x:y@db.prod.example.com:5432/other" })), "MS14 운영 DB 와 같은 호스트면 거부")
     ok(/Vercel/.test(g({ VERCEL: "1", VERCEL_ENV: "production", MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://x:y@127.0.0.1:5432/dev" })), "MS15 Vercel 에서는 거부")
     ok(g({ ...prod, MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://x:y@127.0.0.1:5432/dev" }) === "OK", "별도 개발 DB 는 허용")
+  }
+
+  // ═══ PI1~PI13 Phase 7B-2 운영 import 가드 / 적용 ═══════════════════════════════
+  section("PI1~PI13 운영 Master import (가드 / CREATE-only / 감사 / 롤백)")
+  {
+    const policy = JSON.parse(readFileSync(join(__dirname, "master-migration", "daewon-7b1.policy.json"), "utf8")) as MasterDecisions
+    const { a } = analyze(
+      workbook({
+        materials: MATS,
+        boms: BASE_BOMS,
+        orders: [{ product: "P-1", customer: "고객가" }],
+      })
+    )
+    const ds = buildApprovedDataset(a, { workbookSha256: "h", decisions: policy })
+    const counts = datasetCounts(ds)
+    const expectedCounts = { ...counts }
+    const base = { env: {} as Record<string, string>, apply: false, datasetHash: ds.datasetHash, expectedHash: ds.datasetHash, tenantId: "t1", expectedTenantId: "t1", counts, expectedCounts }
+    const code = (over: Partial<typeof base>) => {
+      try {
+        assertProductionImportAllowed({ ...base, ...over })
+        return "OK"
+      } catch (e) {
+        return isProductionImportGuardError(e) ? e.code : "OTHER"
+      }
+    }
+    eq(code({}), "OK", "dry-run 은 승인 확인 변수 없이 가능(hash/tenant/건수는 필수)")
+    eq(code({ apply: true }), "CONFIRM_REQUIRED", "PI1 apply 는 MASTER_IMPORT_CONFIRM=PRODUCTION_APPROVED 필요")
+    eq(code({ apply: true, env: { MASTER_IMPORT_CONFIRM: "yes" } }), "CONFIRM_REQUIRED", "PI1 값이 정확히 PRODUCTION_APPROVED 가 아니면 거부")
+    eq(code({ apply: true, env: { MASTER_IMPORT_CONFIRM: "PRODUCTION_APPROVED" } }), "OK", "PI1 승인 값이 있으면 통과")
+    eq(code({ expectedHash: "0".repeat(64) }), "HASH_MISMATCH", "PI2 dataset hash 불일치 거부")
+    eq(code({ expectedHash: ds.datasetHash.slice(0, 16) }), "HASH_MISMATCH", "PI2 hash prefix 만으로는 불충분(전체 일치 필요)")
+    eq(code({ expectedTenantId: "other" }), "TENANT_MISMATCH", "PI3 tenant 불일치 거부")
+    eq(code({ expectedCounts: { ...counts, items: counts.items + 1 } }), "COUNT_MISMATCH", "PI4 건수 불일치 거부")
+    eq(code({ expectedHash: undefined }), "EXPECTATION_MISSING", "기대값이 없으면 거부")
+    eq(code({ env: { VERCEL: "1" } }), "VERCEL", "Vercel 에서는 무조건 거부")
+
+    const mk = (seed: Record<string, Array<Record<string, unknown>>> = {}) =>
+      makeFakeDb(
+        {
+          item: [],
+          bOM: [],
+          bOMItem: [],
+          businessPartner: [],
+          itemSupplier: [],
+          // 업무 테이블: 증가하면 안 된다
+          salesOrder: [{ id: "so-1", tenantId: "t1" }],
+          inventoryBalance: [{ id: "ib-1", tenantId: "t1" }],
+          ...seed,
+        } as never,
+        { uniques: { item: [["tenantId", "code"]], businessPartner: [["tenantId", "code"]], bOM: [["tenantId", "itemId", "version"]], itemSupplier: [["tenantId", "itemId", "supplierId"]] } }
+      )
+    const expectedCreate = { items: counts.items, boms: counts.boms, partners: counts.customers + counts.suppliers, itemSuppliers: counts.itemSuppliers }
+    const audit = { actorId: "actor-1", actorLabel: "소유자", source: "DAEWON_MASTER_MIGRATION" }
+
+    // PI6 운영 정보 키가 있는 데이터셋 거부
+    ok(!validateDatasetShape({ ...ds, salesOrders: [{ qty: 1 }] }).ok && !validateDatasetShape({ ...ds, inventory: [] }).ok, "PI6 운영 정보(재고/수주) 키가 있는 데이터셋 거부")
+
+    // PI7 정상 CREATE + PI9 감사 + PI11/12/13
+    const f = mk()
+    const dry = await applyMasterDataset(f.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: true, createOnly: true, expectedCreate })
+    ok(!dry.aborted && !dry.abortReason && dry.entries.every((e) => e.class === "CREATE") && f.countWrites() === 0, "PI7 dry-run: 전부 CREATE, 쓰기 0")
+    const res = await applyMasterDataset(f.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, createOnly: true, expectedCreate, audit, now: () => new Date("2026-10-14T00:00:00Z") })
+    ok(!res.aborted && res.created.items === counts.items && res.created.boms === counts.boms && res.created.bomLines === counts.bomItems, "PI7 정상 import: 건수 일치")
+    eq([f.tables.item.length, f.tables.bOM.length, f.tables.bOMItem.length, f.tables.businessPartner.length, f.tables.itemSupplier.length], [counts.items, counts.boms, counts.bomItems, counts.customers + counts.suppliers, counts.itemSuppliers], "PI7 DB 행 수 = 승인 건수")
+    const au = f.tables.auditLog
+    ok(au.length === 1 && au[0].entityType === "MasterImport" && au[0].actorId === "actor-1" && au[0].action === "CREATE", "PI9 요약 AuditLog 1건(actor/entityType)")
+    eq([au[0].afterData.source, au[0].afterData.datasetHash === ds.datasetHash, au[0].afterData.items.total, au[0].afterData.boms, au[0].afterData.bomItems, au[0].afterData.itemSuppliers, au[0].afterData.placeholderFinishedItems], ["DAEWON_MASTER_MIGRATION", true, counts.items, counts.boms, counts.bomItems, counts.itemSuppliers, counts.finished], "PI9 감사 내용(source/hash/건수/placeholder 수)")
+    ok(res.auditId === au[0].id, "감사 id 반환")
+    eq([f.tables.salesOrder.length, f.tables.inventoryBalance.length], [1, 1], "PI11 업무 테이블 row 증가 0")
+    eq(Array.from(new Set(f.writes.map((w) => w.model))).sort(), ["auditLog", "bOM", "bOMItem", "businessPartner", "item", "itemSupplier"], "쓰기 대상은 Master 5개 + AuditLog 뿐")
+    ok(f.tables.item.filter((i) => i.itemType === "FINISHED").every((i) => i.name === i.code && i.uom === "EA" && i.spec === null), "PI12 FINISHED placeholder 유지(name=code / EA / spec null)")
+    eq(ds.items.filter((i) => i.needsMasterEnrichment).length, counts.finished, "PI12 needsMasterEnrichment 표시는 데이터셋/보고에 유지(DB 컬럼 없음)")
+    ok(f.tables.itemSupplier.every((r) => r.isDefault === false && r.leadTimeDays === undefined && r.moq === undefined && r.orderMultiple === undefined), "PI13 ItemSupplier Default 전부 false, LT/MOQ/배수 미설정")
+    // PI10 두 번째 dry-run
+    const second = await applyMasterDataset(f.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: true })
+    eq(
+      [second.summary.ITEM.CREATE + second.summary.BOM.CREATE + second.summary.PARTNER.CREATE + second.summary.ITEM_SUPPLIER.CREATE, second.summary.ITEM.MATCH, second.summary.BOM.MATCH, second.summary.PARTNER.MATCH, second.summary.ITEM_SUPPLIER.MATCH, second.conflicts.length],
+      [0, counts.items, counts.boms, counts.customers + counts.suppliers, counts.itemSuppliers, 0],
+      "PI10 두 번째 dry-run: CREATE 0 / MATCH 전체 / CONFLICT 0"
+    )
+    // 두 번째 createOnly 는 거부(전부 MATCH)
+    const again = await applyMasterDataset(f.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, createOnly: true, audit })
+    ok(again.aborted && again.abortReason === "NOT_CREATE_ONLY" && f.tables.auditLog.length === 1, "createOnly: 이미 존재하는 항목이 있으면 거부(쓰기 0, 감사 추가 없음)")
+
+    // PI5 충돌 거부
+    const c = mk({ item: [{ id: "i-x", tenantId: "t1", code: "M-001", name: "다른 이름", spec: "SPEC-A", uom: "EA", itemType: "RAW_MATERIAL", status: "ACTIVE" }] })
+    const rc = await applyMasterDataset(c.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, createOnly: true, expectedCreate, audit })
+    ok(rc.aborted && rc.abortReason === "CONFLICT" && c.countWrites() === 0 && c.tables.item[0].name === "다른 이름", "PI5 CONFLICT → 중단(overwrite/update/삭제 없음, 쓰기 0)")
+    // 기대 건수 불일치 → 쓰기 0
+    const cm = mk()
+    const bad = await applyMasterDataset(cm.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, createOnly: true, expectedCreate: { ...expectedCreate, items: expectedCreate.items + 1 }, audit })
+    ok(bad.aborted && bad.abortReason === "COUNT_MISMATCH" && cm.countWrites() === 0, "PI4 CREATE 예정 건수가 기대와 다르면 쓰기 0")
+
+    // PI8 중간 실패 → 전체 롤백
+    const rb = mk()
+    rb.failNext.auditLogAfter = 0 // 감사 기록(마지막 단계)에서 실패
+    let threw = false
+    try {
+      await applyMasterDataset(rb.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, createOnly: true, expectedCreate, audit })
+    } catch {
+      threw = true
+    }
+    ok(threw, "PI8 중간(감사) 실패는 예외로 전파")
+    eq([rb.tables.item.length, rb.tables.bOM.length, rb.tables.bOMItem.length, rb.tables.businessPartner.length, rb.tables.itemSupplier.length, rb.tables.auditLog.length], [0, 0, 0, 0, 0, 0], "PI8 전체 롤백: Item/BOM/BOMItem/거래처/ItemSupplier/감사 모두 0(부분 import 없음)")
+    // 롤백 후 재시도 가능
+    rb.failNext.auditLogAfter = -1
+    const retry = await applyMasterDataset(rb.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, createOnly: true, expectedCreate, audit })
+    ok(!retry.aborted && rb.tables.item.length === counts.items, "롤백 후 재시도 성공")
   }
 
   // ═══ 요약 / provenance ══════════════════════════════════════════════════════

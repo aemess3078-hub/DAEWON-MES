@@ -48,3 +48,58 @@ export function assertDevSeedTarget(env: SeedEnv): { databaseUrl: string; host: 
 
 export const isSeedGuardError = (e: unknown): e is SeedGuardError =>
   typeof e === "object" && e !== null && (e as { isSeedGuardError?: boolean }).isSeedGuardError === true
+
+// ─── Production Master import 가드 (Phase 7B-2) ────────────────────────────────
+
+export type ProductionGuardCode = "VERCEL" | "CONFIRM_REQUIRED" | "HASH_MISMATCH" | "TENANT_MISMATCH" | "COUNT_MISMATCH" | "EXPECTATION_MISSING"
+
+export class ProductionImportGuardError extends Error {
+  readonly isProductionImportGuardError = true
+  constructor(readonly code: ProductionGuardCode, message: string) {
+    super(message)
+    Object.setPrototypeOf(this, ProductionImportGuardError.prototype)
+  }
+}
+export const isProductionImportGuardError = (e: unknown): e is ProductionImportGuardError =>
+  typeof e === "object" && e !== null && (e as { isProductionImportGuardError?: boolean }).isProductionImportGuardError === true
+
+export const PRODUCTION_IMPORT_CONFIRM_VALUE = "PRODUCTION_APPROVED"
+
+/**
+ * 운영 Master import 사전 가드(순수).
+ *  - Vercel 빌드/배포 환경에서는 무조건 거부
+ *  - 승인된 데이터셋 전체 sha256 / tenant / 건수가 "기대값"과 정확히 같아야 한다(기대값이 없으면 거부)
+ *  - 실제 적용(apply)에는 MASTER_IMPORT_CONFIRM=PRODUCTION_APPROVED 가 추가로 필요하다
+ */
+export function assertProductionImportAllowed(input: {
+  env: SeedEnv
+  apply: boolean
+  datasetHash: string
+  expectedHash: string | undefined
+  tenantId: string
+  expectedTenantId: string | undefined
+  counts: Record<string, number>
+  expectedCounts: Record<string, number> | undefined
+}): void {
+  const { env } = input
+  if (env.VERCEL || env.VERCEL_ENV || env.CI === "true") {
+    throw new ProductionImportGuardError("VERCEL", "Vercel/CI 환경에서는 운영 Master import 를 실행할 수 없습니다.")
+  }
+  if (!input.expectedHash || !input.expectedTenantId || !input.expectedCounts) {
+    throw new ProductionImportGuardError("EXPECTATION_MISSING", "기대 dataset hash / tenant / 건수를 모두 지정해야 합니다.")
+  }
+  if (input.datasetHash !== input.expectedHash) {
+    throw new ProductionImportGuardError("HASH_MISMATCH", "Approved Dataset hash 가 승인된 값과 다릅니다. Import 를 중단합니다.")
+  }
+  if (input.tenantId !== input.expectedTenantId) {
+    throw new ProductionImportGuardError("TENANT_MISMATCH", "대상 tenant 가 승인된 값과 다릅니다. Import 를 중단합니다.")
+  }
+  const keys = Object.keys(input.expectedCounts)
+  const bad = keys.filter((k) => input.counts[k] !== input.expectedCounts![k])
+  if (bad.length > 0) {
+    throw new ProductionImportGuardError("COUNT_MISMATCH", `데이터셋 건수가 승인된 값과 다릅니다: ${bad.join(", ")}`)
+  }
+  if (input.apply && env.MASTER_IMPORT_CONFIRM !== PRODUCTION_IMPORT_CONFIRM_VALUE) {
+    throw new ProductionImportGuardError("CONFIRM_REQUIRED", "MASTER_IMPORT_CONFIRM=PRODUCTION_APPROVED 가 필요합니다.")
+  }
+}

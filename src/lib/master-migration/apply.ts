@@ -14,7 +14,7 @@ import type { PrismaClient } from "@prisma/client"
 import { reconcileDataset, summarize, type ReconcileEntry, type ReconcileSummary } from "./reconcile"
 import type { ApprovedMasterDataset, ExistingMasterSnapshot } from "./types"
 
-export type MasterApplyDb = Pick<PrismaClient, "item" | "bOM" | "bOMItem" | "businessPartner" | "itemSupplier" | "$transaction">
+export type MasterApplyDb = Pick<PrismaClient, "item" | "bOM" | "bOMItem" | "businessPartner" | "itemSupplier" | "auditLog" | "$transaction">
 type ReadDb = Pick<PrismaClient, "item" | "bOM" | "bOMItem" | "businessPartner" | "itemSupplier">
 
 /** 현재 tenant 의 Master 현황(읽기 전용) */
@@ -59,11 +59,24 @@ export type ApplyOptions = {
   dryRun: boolean
   /** ABORT(기본): CONFLICT 가 하나라도 있으면 아무것도 쓰지 않는다 / SKIP: CONFLICT 만 건너뛰고 CREATE 를 진행 */
   onConflict?: "ABORT" | "SKIP"
+  /** true 면 모든 항목이 CREATE 여야 한다(MATCH/CONFLICT 가 하나라도 있으면 아무것도 쓰지 않는다) — 첫 운영 import 용 */
+  createOnly?: boolean
+  /** 기대 CREATE 건수(예: items/boms/partners/itemSuppliers). 다르면 아무것도 쓰지 않는다 */
+  expectedCreate?: { items: number; boms: number; partners: number; itemSuppliers: number }
+  /**
+   * 감사 기록(요약 1건). 같은 트랜잭션에서 기록되므로 import 가 롤백되면 감사도 남지 않는다.
+   * actorId 는 호출부가 검증한 현재 tenant 의 활성 사용자여야 한다.
+   */
+  audit?: { tenantId?: string; actorId: string; actorLabel: string | null; source: string; entityType?: string }
+  now?: () => Date
 }
 
 export type ApplyResult = {
   dryRun: boolean
   aborted: boolean
+  /** 중단 사유(CONFLICT / NOT_CREATE_ONLY / COUNT_MISMATCH) */
+  abortReason?: string
+  auditId?: string
   entries: ReconcileEntry[]
   summary: ReconcileSummary
   conflicts: ReconcileEntry[]
@@ -82,8 +95,21 @@ export async function applyMasterDataset(db: MasterApplyDb, opts: ApplyOptions):
     const conflicts = entries.filter((e) => e.class === "CONFLICT")
     const created = { items: 0, boms: 0, bomLines: 0, partners: 0, itemSuppliers: 0 }
     const base = { dryRun: opts.dryRun, entries, summary, conflicts, created }
-    if (opts.dryRun) return { ...base, aborted: false }
-    if (conflicts.length > 0 && onConflict === "ABORT") return { ...base, aborted: true }
+    const wouldCreate = {
+      items: summary.ITEM.CREATE,
+      boms: summary.BOM.CREATE,
+      partners: summary.PARTNER.CREATE,
+      itemSuppliers: summary.ITEM_SUPPLIER.CREATE,
+    }
+    if (opts.dryRun) {
+      const mismatch = opts.expectedCreate && JSON.stringify(wouldCreate) !== JSON.stringify(opts.expectedCreate)
+      return { ...base, aborted: false, ...(mismatch ? { abortReason: "COUNT_MISMATCH" } : {}) }
+    }
+    if (conflicts.length > 0 && onConflict === "ABORT") return { ...base, aborted: true, abortReason: "CONFLICT" }
+    if (opts.createOnly && entries.some((e) => e.class !== "CREATE")) return { ...base, aborted: true, abortReason: "NOT_CREATE_ONLY" }
+    if (opts.expectedCreate && JSON.stringify(wouldCreate) !== JSON.stringify(opts.expectedCreate)) {
+      return { ...base, aborted: true, abortReason: "COUNT_MISMATCH" }
+    }
 
     const cls = (kind: ReconcileEntry["kind"], key: string) => entries.find((e) => e.kind === kind && e.key === key)?.class
     const writeDb = tx as unknown as MasterApplyDb
@@ -143,7 +169,38 @@ export async function applyMasterDataset(db: MasterApplyDb, opts: ApplyOptions):
       })
       created.itemSuppliers = newPairs.length
     }
-    return { ...base, aborted: false }
+    let auditId: string | undefined
+    if (opts.audit) {
+      const byType = (t: string) => dataset.items.filter((i) => i.itemType === t).length
+      const row = await writeDb.auditLog.create({
+        data: {
+          tenantId,
+          actorId: opts.audit.actorId,
+          actorLabel: opts.audit.actorLabel,
+          entityType: opts.audit.entityType ?? "MasterImport",
+          entityId: `${opts.audit.source}:${dataset.datasetHash.slice(0, 16)}`,
+          action: "CREATE",
+          afterData: {
+            source: opts.audit.source,
+            datasetHash: dataset.datasetHash,
+            workbookSha256: dataset.source.workbookSha256,
+            created,
+            items: { total: dataset.items.length, FINISHED: byType("FINISHED"), RAW_MATERIAL: byType("RAW_MATERIAL"), SEMI_FINISHED: byType("SEMI_FINISHED") },
+            boms: dataset.boms.length,
+            bomItems: dataset.boms.reduce((s, b) => s + b.lines.length, 0),
+            customers: dataset.partners.filter((p) => p.partnerType === "CUSTOMER").length,
+            suppliers: dataset.partners.filter((p) => p.partnerType === "SUPPLIER").length,
+            itemSuppliers: dataset.itemSuppliers.length,
+            excluded: dataset.excluded,
+            placeholderFinishedItems: dataset.items.filter((i) => i.needsMasterEnrichment).length,
+            importedAt: (opts.now ?? (() => new Date()))().toISOString(),
+          },
+          menuName: "Master Import",
+        },
+      })
+      auditId = row.id
+    }
+    return { ...base, aborted: false, ...(auditId ? { auditId } : {}) }
   }
 
   if (opts.dryRun) return run(db)

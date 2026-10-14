@@ -267,3 +267,19 @@ export function validateDatasetShape(raw: unknown): { ok: true; dataset: Approve
   if (datasetHashOf(rest) !== datasetHash) return { ok: false, reason: "datasetHash 불일치(변조 또는 손상)" }
   return { ok: true, dataset: d as unknown as ApprovedMasterDataset }
 }
+
+/** 데이터셋 건수(승인 gate 비교용) */
+export function datasetCounts(d: ApprovedMasterDataset): Record<string, number> {
+  const byType = (t: string) => d.items.filter((i) => i.itemType === t).length
+  return {
+    items: d.items.length,
+    finished: byType("FINISHED"),
+    raw: byType("RAW_MATERIAL"),
+    semi: byType("SEMI_FINISHED"),
+    boms: d.boms.length,
+    bomItems: d.boms.reduce((s, b) => s + b.lines.length, 0),
+    customers: d.partners.filter((p) => p.partnerType === "CUSTOMER").length,
+    suppliers: d.partners.filter((p) => p.partnerType === "SUPPLIER").length,
+    itemSuppliers: d.itemSuppliers.length,
+  }
+}

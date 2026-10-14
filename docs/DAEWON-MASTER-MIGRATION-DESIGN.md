@@ -239,3 +239,21 @@ MASTER_SEED_CONFIRM=DEV_ONLY MASTER_SEED_DATABASE_URL=<개발DB>?pgbouncer=true&
 MASTER_SEED_CONFIRM=DEV_ONLY MASTER_SEED_DATABASE_URL=... npm run master:verify-mrp -- --tenant <tenantId> --qty 10
 npm run master:preview -- --dataset <dataset.json> --existing <existing.json>      # 운영 대조(오프라인)
 ```
+
+---
+
+## 14. Phase 7B-2 — 운영 Master import 도구 (가드 + CREATE-only)
+
+`npm run master:import-production -- --dataset <approved.json> --tenant <id> --expected-tenant <id> --expected-hash <전체 sha256> --expected-counts items=…,finished=…,raw=…,semi=…,boms=…,bomItems=…,customers=…,suppliers=…,itemSuppliers=… [--dry-run] [--actor-profile <활성 OWNER profileId>] [--out <폴더>]`
+
+| 가드 | 내용 |
+|---|---|
+| 환경 | Vercel/CI 에서는 거부. 대상 DB 는 `DIRECT_URL`(세션 풀러). 실행 전 host/tenant/hash 표시(접속 정보 미출력) |
+| 승인 값 | dataset 전체 sha256 / tenant / 건수가 기대값과 **정확히** 같아야 함(기대값 누락 시 거부, prefix 불가) |
+| apply | `MASTER_IMPORT_CONFIRM=PRODUCTION_APPROVED` 추가 필요. dry-run 은 읽기 전용 |
+| 사전 조건 | 운영 Master(Item/BOM/BOMItem/거래처/ItemSupplier)가 비어 있어야 함, dry-run 전부 CREATE·CONFLICT 0·기대 건수 일치 |
+| 적용 | 단일 트랜잭션(Item → 거래처 → BOM/BOMItem → ItemSupplier → 감사 요약 1건). 실패 시 전체 롤백 |
+| 감사 | `AuditLog(entityType=MasterImport)` 요약 1건(source, datasetHash, 건수, 제외 건수, placeholder 수, importedAt, actor) — 같은 트랜잭션 |
+| 사후 | `master:verify-production`(SELECT 전용): 건수/필드 일치/무결성/업무 테이블 증가 0/2차 dry-run/감사/읽기 전용 MRP |
+
+덮어쓰기/갱신/삭제/재생성 경로는 없다(CREATE-only). 스키마 변경 없음.
