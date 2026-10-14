@@ -74,6 +74,7 @@
     "test:f22-browser-smoke": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/f22-browser-smoke.ts",
     "test:kpi-report-scope-timezone-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-kpi-report-scope-timezone-integrity.ts",
     "test:f25-master-menu-cleanup-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-f25-master-menu-cleanup-integrity.ts",
+    "test:phase10-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-phase10-security.ts",
     "test:f27-inventory-adjustment-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-f27-inventory-adjustment-integrity.ts",
     "db:status": "prisma migrate status",
     "preflight:env": "node scripts/deploy-preflight.js env",
