@@ -128,6 +128,12 @@ export type OrderMrpOptions = {
   /** 다단계 전개 최대 깊이(기본 10, 기존 MES explodeBOM 과 동일) */
   maxBomDepth?: number
   /**
+   * (Phase 5E) 반제품(SEMI_FINISHED) 재고 Netting. true 이면 반제품의 가용재고(공용 pool)를 먼저 사용하고
+   * **순소요만** 하위 BOM 으로 전개한다. 기본: NORMAL + MULTI_LEVEL = true, EXCEL_COMPAT = false.
+   * EXCEL_COMPAT 에서 true 를 요청하면 RangeError(Excel 호환 결과 보호). SINGLE_LEVEL 은 하위 전개가 없어 항상 false.
+   */
+  netSemiFinished?: boolean
+  /**
    * Excel "전체기간 = 오늘까지" 재현용 상한. 현재 시각은 엔진이 읽지 않으므로
    * 호출자가 명시적으로 전달한다. EXCEL_COMPAT 에서만 허용.
    */
@@ -145,6 +151,8 @@ export type ResolvedOrderMrpOptions = {
   applyScrapRate: boolean
   maxBomDepth: number
   legacyUpperBound: DateOnly | null
+  /** (Phase 5E) 반제품 재고 Netting 적용 여부 */
+  netSemiFinished: boolean
   /** 수요 수량 기준: REMAINING = remainingQty(없으면 orderQty), ORDER_QTY = orderQty */
   demandQuantityBasis: "REMAINING" | "ORDER_QTY"
   /** 납기 미정(null) 수요 정렬 위치: NORMAL=LAST, EXCEL_COMPAT=FIRST(Excel 빈 날짜=0) */
@@ -217,6 +225,29 @@ export type DemandRequirementLine = {
   isShortage: boolean
 }
 
+/** (Phase 5E) 반제품 1건의 Netting 결과: 총 필요 → 재고 사용 → 순소요(하위 BOM 으로 전개되는 양) */
+export type SemiNettingEntry = {
+  componentItemId: string
+  componentCode: string
+  /** 총 필요량(Gross Requirement) */
+  grossQty: number
+  /** 공용 재고 pool 에서 사용한 수량 */
+  usedQty: number
+  /** 순소요(Net Requirement) = gross − used. 하위 BOM 은 이 수량만 전개한다 */
+  netQty: number
+}
+
+/** (Phase 5E) 하위 자재 소요가 어느 상위(반제품/제품)의 몇 개분에서 나왔는지 */
+export type NettingContribution = {
+  componentItemId: string
+  parentItemId: string
+  /** 상위 품목의 (순)소요 수량 */
+  parentQty: number
+  /** 상위 1단위당 소요(스크랩 반영) */
+  qtyPer: number
+  requirement: number
+}
+
 export type OrderMrpDemandResult = {
   /** 처리 순서(1부터). Excel 의 수주 열 순서에 해당 */
   sequence: number
@@ -237,6 +268,12 @@ export type OrderMrpDemandResult = {
   shortageItemCount: number
   /** Excel "누계": 이 수주 처리 후 balanceAfter<0 인 자재 수 */
   cumulativeNegativeItemCount: number
+  /**
+   * (Phase 5E) 반제품 재고를 실제로 사용한 수요에서만 채워진다(없으면 undefined = 정적 전개와 동일).
+   * semiNetting: 반제품별 총 필요/사용/순소요, nettingContributions: 하위 자재 소요의 출처(상위·수량).
+   */
+  semiNetting?: SemiNettingEntry[]
+  nettingContributions?: NettingContribution[]
 }
 
 export type MaterialMovement = {
@@ -317,6 +354,11 @@ export type OrderMrpMaterialResult = {
   shortageRecoveredAt: DateOnly | null
   /** 입고/수요 이벤트 시간축(예정입고 입력이 있을 때만) */
   timeline: MaterialTimelineEvent[]
+  // ── Phase 5E: 반제품 Netting 누계(반제품 자재만 값이 있다) ──
+  /** 반제품 재고(공용 pool)에서 사용한 수량 합계 */
+  nettedUsedQty: number
+  /** 반제품 순소요 합계(= 총 필요 중 재고로 충당하지 못해 하위 BOM 으로 전개된 양) */
+  nettedNetQty: number
 }
 
 export type OrderMrpSummary = {

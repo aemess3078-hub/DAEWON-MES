@@ -109,7 +109,20 @@ export function PeriodRequirementTable({ rows, expanded, onToggle, showScheduled
                         <p className="text-[13px] text-muted-foreground mb-3">
                           기간 총소요 {fmt(m.totalRequirement)} {m.uom} · 수주 라인 {fmt(m.demandLineCount)}건 · 제품{" "}
                           {fmt(m.productCount)}종
+                          {m.netting && (
+                            <>
+                              {" "}
+                              · 반제품 Netting: 총 필요 {fmt(m.netting.grossQty)} − 재고 사용 {fmt(m.netting.usedQty)} = 순소요{" "}
+                              {fmt(m.netting.netQty)}
+                            </>
+                          )}
                         </p>
+                        {m.steps.some((s) => s.netting) && (
+                          <p className="text-[13px] text-sky-800 mb-3">
+                            이 자재의 소요는 반제품 재고를 먼저 사용한 뒤 남은 <strong>순소요</strong>만 전개해 계산했습니다(수주별 근거는
+                            결품예측 보기의 자재 상세에서 확인).
+                          </p>
+                        )}
                         <div className="overflow-x-auto rounded-lg border bg-background">
                           <table className="w-full text-[14px] border-collapse">
                             <thead>

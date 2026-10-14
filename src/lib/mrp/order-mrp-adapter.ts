@@ -10,6 +10,8 @@
  *          shippedQty 는 출하 확정(confirmShipment)에서만 증가한다. PLANNED 출하는 차감하지 않는다.
  *  - BOM: tenant 일치 + status=ACTIVE + isDefault=true 인 BOM 정확히 1개.
  *          0개 → MISSING_DEFAULT_BOM, 2개 이상 → MULTIPLE_DEFAULT_BOM (임의 선택 금지, 계산 제외)
+ *  - (Phase 5E) 반제품 Netting: NORMAL 다단계에서 반제품 qtyAvailable(ACTIVE LOT, qtyHold 재차감 없음, 안전재고 비차감)을
+ *          수주 순서대로 공용 pool 로 사용하고 순소요만 하위 BOM 으로 전개한다. WIP(WipUnit)는 포함하지 않는다.
  *  - (Phase 5B) 예정입고: scheduledReceiptRows 와 baseDate 가 모두 주어질 때만 시간축에 반영한다.
  *          분류 규칙은 scheduled-receipt.ts. 주어지지 않으면 기존 계산과 동일하다.
  */
@@ -234,6 +236,18 @@ export function toStockEntries(stock: ReadonlyMap<string, StockAggregate>): MrpS
 
 // ─── View 모델 (화면/직렬화용 plain object) ──────────────────────────────────
 
+/** (Phase 5E) 반제품 Netting 근거 한 줄: 상위 반제품의 총 필요 → 재고 사용 → 순소요 → 하위 소요 */
+export type NettingTraceView = {
+  parentCode: string
+  parentGross: number
+  parentUsed: number
+  parentNet: number
+  /** 상위 1단위당 소요(스크랩 반영) */
+  qtyPer: number
+  /** 이 자재의 소요(= parentNet × qtyPer) */
+  requirement: number
+}
+
 export type OrderMrpStepView = {
   sequence: number
   orderId: string
@@ -253,6 +267,10 @@ export type OrderMrpStepView = {
   balanceAfter: number
   shortageAtThisDemand: number
   isShortage: boolean
+  /** (Phase 5E) 이 자재가 반제품이면 이 수주에서의 총 필요 / 재고 사용 / 순소요 */
+  semiNetting?: { grossQty: number; usedQty: number; netQty: number }
+  /** (Phase 5E) 이 자재의 소요가 반제품 순소요에서 나왔다면 그 근거 */
+  netting?: NettingTraceView[]
 }
 
 export type OrderMrpMaterialView = {
@@ -304,6 +322,11 @@ export type OrderMrpMaterialView = {
   timeline: OrderMrpTimelineEventView[]
   /** Phase 5D: 품목 안전재고(구매정책 목표 하한, 0 이상). 물리 재고 계산에는 영향이 없다. */
   safetyStock?: number
+  /**
+   * Phase 5E: 반제품 Netting 누계(재고를 실제로 사용한 반제품만). 총 필요 = 사용 + 순소요,
+   * 가용재고 중 사용한 양이 하위 자재 소요에서 빠진다.
+   */
+  netting?: { grossQty: number; usedQty: number; netQty: number }
 }
 
 export type OrderMrpTimelineEventView = {
@@ -460,6 +483,35 @@ export type BuildViewArgs = {
   scheduled?: { baseDate: DateOnly; classification: ScheduledReceiptClassification } | null
 }
 
+/**
+ * (Phase 5E) 한 수주에서 자재 1개의 반제품 Netting 근거를 만든다. 재고를 사용하지 않은 수주(정적 전개)는 빈 객체.
+ * 시뮬레이션 어댑터도 같은 함수를 쓴다.
+ */
+export function buildStepNetting(
+  demand: Pick<OrderMrpResult["demands"][number], "itemId" | "semiNetting" | "nettingContributions">,
+  componentItemId: string
+): { semiNetting?: { grossQty: number; usedQty: number; netQty: number }; netting?: NettingTraceView[] } {
+  if (!demand.nettingContributions || !demand.semiNetting) return {}
+  const out: { semiNetting?: { grossQty: number; usedQty: number; netQty: number }; netting?: NettingTraceView[] } = {}
+  const own = demand.semiNetting.find((x) => x.componentItemId === componentItemId)
+  if (own) out.semiNetting = { grossQty: own.grossQty, usedQty: own.usedQty, netQty: own.netQty }
+  const traces: NettingTraceView[] = []
+  for (const c of demand.nettingContributions) {
+    if (c.componentItemId !== componentItemId || c.parentItemId === demand.itemId) continue
+    const p = demand.semiNetting.find((x) => x.componentItemId === c.parentItemId)
+    traces.push({
+      parentCode: p?.componentCode ?? c.parentItemId,
+      parentGross: p?.grossQty ?? c.parentQty,
+      parentUsed: p?.usedQty ?? 0,
+      parentNet: p?.netQty ?? c.parentQty,
+      qtyPer: c.qtyPer,
+      requirement: c.requirement,
+    })
+  }
+  if (traces.length > 0) out.netting = traces
+  return out
+}
+
 function daysBetween(from: DateOnly, to: DateOnly): number {
   const f = from.split("-").map(Number)
   const t = to.split("-").map(Number)
@@ -543,6 +595,7 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
         balanceAfter: mv.balanceAfter,
         shortageAtThisDemand: mv.shortageAtThisDemand,
         isShortage: mv.isShortage,
+        ...buildStepNetting(demand, m.componentItemId),
       })
       if (mv.isShortage && !shortageOrderNos.includes(demand.orderNo)) shortageOrderNos.push(demand.orderNo)
     }
@@ -585,6 +638,9 @@ export function buildOrderMrpView(args: BuildViewArgs): OrderMrpView {
         const v = toNum(meta?.safetyStock)
         return Number.isFinite(v) && v > 0 ? v : 0
       })(),
+      ...(m.nettedUsedQty > 0
+        ? { netting: { grossQty: m.nettedUsedQty + m.nettedNetQty, usedQty: m.nettedUsedQty, netQty: m.nettedNetQty } }
+        : {}),
       timeline: m.timeline.map<OrderMrpTimelineEventView>((ev) => {
         if (ev.type === "SCHEDULED_RECEIPT") {
           return {

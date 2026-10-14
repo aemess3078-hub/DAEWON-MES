@@ -466,7 +466,8 @@ export function SimulationPanel() {
               </div>
               {hasSemi && (
                 <p className="text-[13px] text-muted-foreground">
-                  반제품(SEMI_FINISHED)의 재고는 하위 자재 소요에서 차감하지 않습니다. 반제품 행의 가용재고는 참고 정보입니다.
+                  반제품(SEMI_FINISHED)의 가용재고는 먼저 사용하고 남은 순소요만 하위 자재로 전개합니다(공용 재고를 입력 순서대로 소진).
+                  재공(WIP)과 격리/보류 LOT 는 포함하지 않으며 안전재고는 차감하지 않습니다.
                 </p>
               )}
             </>
@@ -549,6 +550,30 @@ function MaterialRow({ m, open, onToggle }: { m: SimulationMaterialView; open: b
                 </tfoot>
               </table>
             </div>
+            {m.netting && (
+              <p className="mt-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-[14px] text-sky-900">
+                <strong>반제품 Netting</strong> — 총 필요 {fmt(m.netting.grossQty)} · 가용재고 {fmt(m.qtyAvailable)} 중{" "}
+                {fmt(m.netting.usedQty)} 사용 · <strong>순소요 {fmt(m.netting.netQty)}</strong> (하위 자재는 순소요만 전개합니다)
+              </p>
+            )}
+            {m.sources.some((x) => x.netting && x.netting.length > 0) && (
+              <div className="mt-3 rounded-lg border bg-background px-3 py-2">
+                <p className="mb-1 text-[13px] font-medium text-muted-foreground">반제품 Netting 근거</p>
+                {m.sources
+                  .filter((x) => x.netting && x.netting.length > 0)
+                  .map((x) => (
+                    <div key={x.simId} className="py-1 text-[14px]">
+                      <span className="mr-2 font-mono text-[13px]">{x.itemCode}</span>
+                      {x.netting!.map((n, i) => (
+                        <span key={i} className="mr-3 text-[13px]">
+                          반제품 <span className="font-mono">{n.parentCode}</span>: 총 {fmt(n.parentGross)} − 재고 {fmt(n.parentUsed)} = 순소요{" "}
+                          {fmt(n.parentNet)} × {fmt(n.qtyPer)} = <strong>{fmt(n.requirement)}</strong>
+                        </span>
+                      ))}
+                    </div>
+                  ))}
+              </div>
+            )}
           </td>
         </tr>
       )}

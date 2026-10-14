@@ -2,9 +2,33 @@
 
 import { Fragment } from "react"
 import { ChevronDown, ChevronRight } from "lucide-react"
-import type { OrderMrpMaterialView } from "@/lib/mrp/order-mrp-adapter"
+import type { OrderMrpMaterialView, OrderMrpStepView } from "@/lib/mrp/order-mrp-adapter"
 
 const fmt = (n: number) => n.toLocaleString("ko-KR", { maximumFractionDigits: 3 })
+
+/**
+ * (Phase 5E) 반제품 Netting 근거 문구.
+ *  - 반제품 자신의 행: 총 필요 → 재고 사용 → 순소요
+ *  - 하위 자재의 행: 상위 반제품 순소요 × 1단위당 소요 = 이 자재 소요
+ */
+function NettingCell({ s }: { s: OrderMrpStepView }) {
+  if (!s.semiNetting && !s.netting) return <span className="text-muted-foreground">-</span>
+  return (
+    <div className="space-y-0.5 text-[13px]">
+      {s.semiNetting && (
+        <div>
+          총 필요 {fmt(s.semiNetting.grossQty)} − 재고 사용 {fmt(s.semiNetting.usedQty)} = <strong>순소요 {fmt(s.semiNetting.netQty)}</strong>
+        </div>
+      )}
+      {s.netting?.map((n, i) => (
+        <div key={i}>
+          반제품 <span className="font-mono">{n.parentCode}</span>: 총 {fmt(n.parentGross)} − 재고 {fmt(n.parentUsed)} = 순소요{" "}
+          {fmt(n.parentNet)} × {fmt(n.qtyPer)} = <strong>{fmt(n.requirement)}</strong>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 /**
  * 수주기준 MRP 결과의 자재 1행 + 펼침 상세(수주별 순차 차감 또는 입고·수요 시간축).
@@ -42,7 +66,14 @@ export function MaterialRows({
           {open ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </td>
         <td className="px-3 py-3 font-mono text-[13px] whitespace-nowrap">{m.code}</td>
-        <td className="px-3 py-3 font-medium">{m.name}</td>
+        <td className="px-3 py-3 font-medium">
+          {m.name}
+          {m.netting && (
+            <div className="mt-0.5 text-[13px] font-normal text-sky-700">
+              반제품 재고 {fmt(m.netting.usedQty)} 사용 → 순소요 {fmt(m.netting.netQty)}
+            </div>
+          )}
+        </td>
         <td className="px-3 py-3 text-muted-foreground">{m.spec ?? "-"}</td>
         <td className="px-3 py-3 text-muted-foreground">{m.uom}</td>
         <td className="px-3 py-3 text-right">{fmt(m.qtyOnHand)}</td>
@@ -91,6 +122,12 @@ export function MaterialRows({
         <tr className="border-b bg-muted/10">
           <td />
           <td colSpan={colCount} className="px-3 py-4">
+            {m.netting && (
+              <p className="mb-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-[14px] text-sky-900">
+                <strong>반제품 Netting</strong> — 총 필요 {fmt(m.netting.grossQty)} · 가용재고 {fmt(m.qtyAvailable)} 중{" "}
+                {fmt(m.netting.usedQty)} 사용 · <strong>순소요 {fmt(m.netting.netQty)}</strong> (하위 자재는 순소요만 전개합니다)
+              </p>
+            )}
             {receipts && m.timeline.length > 0 ? (
               <>
                 <p className="text-[14px] font-medium mb-1">
@@ -154,6 +191,19 @@ export function MaterialRows({
                     </tbody>
                   </table>
                 </div>
+                {m.steps.some((s) => s.semiNetting || s.netting) && (
+                  <div className="mt-3 rounded-lg border bg-background px-3 py-2">
+                    <p className="mb-1 text-[13px] font-medium text-muted-foreground">반제품 Netting 근거</p>
+                    {m.steps
+                      .filter((s) => s.semiNetting || s.netting)
+                      .map((s) => (
+                        <div key={s.orderLineId} className="py-1 text-[14px]">
+                          <span className="mr-2 font-mono text-[13px]">{s.orderNo}</span>
+                          <NettingCell s={s} />
+                        </div>
+                      ))}
+                  </div>
+                )}
               </>
             ) : (
               <>
@@ -180,6 +230,9 @@ export function MaterialRows({
                         <th className="px-3 py-2 text-right">차감 전</th>
                         <th className="px-3 py-2 text-right">차감 후</th>
                         <th className="px-3 py-2 text-left">결품</th>
+                        {m.steps.some((s) => s.semiNetting || s.netting) && (
+                          <th className="px-3 py-2 text-left">반제품 Netting</th>
+                        )}
                       </tr>
                     </thead>
                     <tbody>
@@ -206,6 +259,11 @@ export function MaterialRows({
                               <span className="text-muted-foreground">-</span>
                             )}
                           </td>
+                          {m.steps.some((x) => x.semiNetting || x.netting) && (
+                            <td className="px-3 py-2">
+                              <NettingCell s={s} />
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>

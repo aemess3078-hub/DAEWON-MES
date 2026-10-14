@@ -30,6 +30,8 @@ import type {
   MrpDemandLine,
   MrpScheduledReceipt,
   MrpWarning,
+  NettingContribution,
+  SemiNettingEntry,
   OrderMrpDemandResult,
   OrderMrpInput,
   OrderMrpMaterialResult,
@@ -70,6 +72,10 @@ export function resolveOrderMrpOptions(options: OrderMrpOptions): ResolvedOrderM
     throw new RangeError(`from(${from}) 이 to(${to}) 보다 늦습니다.`)
   }
 
+  if (compat && options.netSemiFinished === true) {
+    throw new RangeError("반제품 재고 Netting 은 EXCEL_COMPAT 에서 사용할 수 없습니다.")
+  }
+
   const ordering = options.ordering ?? "DUE_DATE"
   if (ordering === "INPUT_ORDER" && !compat) {
     throw new RangeError("INPUT_ORDER(Excel 행 순서) 정렬은 EXCEL_COMPAT 에서만 사용할 수 있습니다.")
@@ -97,6 +103,10 @@ export function resolveOrderMrpOptions(options: OrderMrpOptions): ResolvedOrderM
     stockProviderType: options.stockProviderType ?? (compat ? "EXCEL_THEORETICAL" : "ACTUAL"),
     ordering,
     bomExplosion: options.bomExplosion ?? (compat ? "SINGLE_LEVEL" : "MULTI_LEVEL"),
+    netSemiFinished:
+      !compat &&
+      (options.bomExplosion ?? "MULTI_LEVEL") === "MULTI_LEVEL" &&
+      (options.netSemiFinished ?? true),
     applyScrapRate: options.applyScrapRate ?? !compat,
     maxBomDepth,
     legacyUpperBound,
@@ -262,6 +272,29 @@ export function createBomExploder(
     }
     return { ...cached, hasBom }
   }
+}
+
+/** 상위 품목별 BOM 라인 색인(createBomExploder 와 같은 규칙: 모든 라인에 lineNo 가 있으면 그 순서, 아니면 입력 순서) */
+function indexBomByParent(boms: readonly MrpBomLine[]): Map<string, MrpBomLine[]> {
+  const byParent = new Map<string, MrpBomLine[]>()
+  for (const line of boms) {
+    const list = byParent.get(line.parentItemId)
+    if (list) list.push(line)
+    else byParent.set(line.parentItemId, [line])
+  }
+  Array.from(byParent.entries()).forEach(([parentId, lines]) => {
+    if (lines.every((l) => typeof l.lineNo === "number")) {
+      const indexed = lines.map((l, i) => ({ l, i }))
+      indexed.sort((a, b) => (a.l.lineNo as number) - (b.l.lineNo as number) || a.i - b.i)
+      byParent.set(parentId, indexed.map((x) => x.l))
+    }
+  })
+  return byParent
+}
+
+/** 반복 계산에서 생기는 부동소수 잔여(1e-15)를 정리한다 */
+function round9(n: number): number {
+  return Math.round(n * 1e9) / 1e9
 }
 
 // ─── 수주 라인 적격 판정 / 정렬 ──────────────────────────────────────────────
@@ -493,6 +526,10 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     negativeStepCount: number
     firstShortage: MaterialFirstShortage | null
     movements: MaterialMovement[]
+    // Phase 5E: 반제품 재고 공용 pool(시작 가용재고 + 처리 시점까지 도착한 확정 입고 − 사용분, 0 미만 없음)
+    pool: number
+    nettedUsed: number
+    nettedNet: number
     // Phase 5B
     receipts: ReceiptEntry[]
     receiptCursor: number
@@ -557,6 +594,9 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
       negativeStepCount: 0,
       firstShortage: null,
       movements: [],
+      pool: opening > 0 ? opening : 0,
+      nettedUsed: 0,
+      nettedNet: 0,
       receipts: receiptsByItem.get(entry.componentItemId) ?? [],
       receiptCursor: 0,
       receiptQty: 0,
@@ -604,6 +644,7 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
       const before = m.balance
       const after = before + entry.receipt.quantity
       m.balance = after
+      m.pool = round9(m.pool + entry.receipt.quantity)
       m.receiptQty += entry.receipt.quantity
       m.receiptCount += 1
       if (m.shortageOpen && before < 0 && after >= 0) {
@@ -623,6 +664,8 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     }
   }
   const useReceipts = receiptsByItem.size > 0
+  // (Phase 5E) 반제품 Netting 용 BOM 색인 — NORMAL + MULTI_LEVEL 에서만 만든다
+  const netByParent = opts.netSemiFinished ? indexBomByParent(input.boms) : null
   ordered.forEach((e, i) => {
     const sequence = i + 1
     const d = e.demand
@@ -630,11 +673,84 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
     let shortageItemCount = 0
     let cumulativeNegativeItemCount = 0
 
+    // 납기 미정(null) 수요는 날짜 근거가 없으므로 추가 입고를 앞당겨 반영하지 않는다(보수적).
+    // 같은 날은 입고 → 수요. 입고는 Netting pool 에도 더해진다(확정 구매입고만, 가상 생산입고 없음).
+    if (useReceipts && d.deliveryDate !== null) {
+      for (const m of materialList) applyReceipts(m, d.deliveryDate)
+    }
+
+    // (Phase 5E) 반제품 Netting: 수요 순서대로 공용 pool 을 차감하며 순소요만 하위로 전개한다.
+    //   총 필요(Gross) → pool 사용 → 순소요(Net) → 하위 BOM 에는 Net 만 전개. 같은 반제품 재고는 수주 간에 이중 사용되지 않는다.
+    let nettedReq: Map<string, number> | null = null
+    let semiNetting: SemiNettingEntry[] | undefined
+    let nettingContributions: NettingContribution[] | undefined
+    if (netByParent) {
+      const gross = new Map<string, number>()
+      const entries: SemiNettingEntry[] = []
+      const contribs: NettingContribution[] = []
+      const touched: Array<{ id: string; used: number; net: number }> = []
+      let anyUsed = false
+      const walk = (parentId: string, parentQty: number, depth: number, path: string[]) => {
+        for (const line of netByParent.get(parentId) ?? []) {
+          const scrap = opts.applyScrapRate ? line.scrapRate ?? 0 : 0
+          if (!Number.isFinite(line.qtyPer) || line.qtyPer < 0 || !Number.isFinite(scrap) || scrap < 0) continue
+          const effective = opts.applyScrapRate ? line.qtyPer * (1 + scrap) : line.qtyPer
+          const need = round9(parentQty * effective)
+          gross.set(line.componentItemId, (gross.get(line.componentItemId) ?? 0) + need)
+          contribs.push({
+            componentItemId: line.componentItemId,
+            parentItemId: parentId,
+            parentQty,
+            qtyPer: effective,
+            requirement: need,
+          })
+          const expands =
+            line.componentItemType === SEMI_FINISHED &&
+            netByParent.has(line.componentItemId) &&
+            !path.includes(line.componentItemId) &&
+            depth + 1 <= opts.maxBomDepth
+          if (!expands) continue
+          const pool = materials.get(line.componentItemId)
+          const use = pool ? Math.min(need, pool.pool) : 0
+          const net = round9(need - use)
+          if (pool && use > 0) {
+            pool.pool = round9(pool.pool - use)
+            anyUsed = true
+          }
+          touched.push({ id: line.componentItemId, used: use, net })
+          entries.push({
+            componentItemId: line.componentItemId,
+            componentCode: line.componentCode,
+            grossQty: need,
+            usedQty: round9(use),
+            netQty: net,
+          })
+          if (net > 0) walk(line.componentItemId, net, depth + 1, [...path, line.componentItemId])
+        }
+      }
+      walk(d.itemId, e.demandQty, 0, [d.itemId])
+      for (const t of touched) {
+        const m = materials.get(t.id)
+        if (m) {
+          m.nettedUsed = round9(m.nettedUsed + t.used)
+          m.nettedNet = round9(m.nettedNet + t.net)
+        }
+      }
+      // 재고를 한 번도 쓰지 않았으면 netting 이 결과를 바꾸지 않으므로 기존(정적 전개) 계산값을 그대로 쓴다
+      if (anyUsed) {
+        nettedReq = gross
+        semiNetting = entries
+        nettingContributions = contribs
+      }
+    }
+
     for (const m of materialList) {
-      // 납기 미정(null) 수요는 날짜 근거가 없으므로 추가 입고를 앞당겨 반영하지 않는다(보수적)
-      if (useReceipts && d.deliveryDate !== null) applyReceipts(m, d.deliveryDate)
       const unit = e.units.get(m.entry.componentItemId)
-      const requirement = unit ? unit.qty * e.demandQty : 0
+      const requirement = nettedReq
+        ? nettedReq.get(m.entry.componentItemId) ?? 0
+        : unit
+          ? unit.qty * e.demandQty
+          : 0
       const balanceBefore = m.balance
       const balanceAfter = balanceBefore - requirement
       const isShortage = requirement > 0 && balanceAfter < 0
@@ -715,6 +831,7 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
       requirements,
       shortageItemCount,
       cumulativeNegativeItemCount,
+      ...(semiNetting ? { semiNetting, nettingContributions } : {}),
     })
   })
 
@@ -748,6 +865,8 @@ export function runOrderMrp(input: OrderMrpInput, options: OrderMrpOptions): Ord
       peakShortageQty: m.minBalance < 0 ? -m.minBalance : 0,
       shortageRecoveredAt: m.balance >= 0 ? m.recoveredAt : null,
       timeline: m.timeline,
+      nettedUsedQty: m.nettedUsed,
+      nettedNetQty: m.nettedNet,
     }
   })
 

@@ -10,11 +10,14 @@
  *    납기 없는 수요를 그대로 계산하고 정렬은 SIM 번호 순으로 결정한다.
  *  - 재고/BOM 정책은 Phase 2 와 동일: qtyAvailable = openingStock, ACTIVE + Default BOM 1개.
  *  - 자재별 최종 예상재고/부족은 엔진 결과를 그대로 사용한다(UI 에서 별도 계산식 없음).
- *  - 반제품(SEMI_FINISHED) 재고는 하위 자재 소요에서 차감하지 않는다(기존 explodeBOM/엔진과 동일).
+ *  - (Phase 5E) 반제품(SEMI_FINISHED) 가용재고는 Netting 한다: 총 필요 → 재고 사용 → 순소요만 하위 BOM 전개.
+ *    가상 수요도 실제 수주와 같은 공용 재고 pool 을 순서대로 소진한다(제품 입력 순서 = SIM 번호 순).
  */
 
 import { runOrderMrp } from "./order-mrp-engine"
 import {
+  buildStepNetting,
+  type NettingTraceView,
   aggregateStock,
   selectDefaultBoms,
   toBomLines,
@@ -74,6 +77,10 @@ export type SimulationSourceView = {
   bomQtyPerUnit: number
   /** 이 제품 때문에 필요한 자재 소요량 */
   requirement: number
+  /** (Phase 5E) 이 자재가 반제품이면 이 제품 기준 총 필요 / 재고 사용 / 순소요 */
+  semiNetting?: { grossQty: number; usedQty: number; netQty: number }
+  /** (Phase 5E) 이 자재 소요가 반제품 순소요에서 나왔다면 그 근거 */
+  netting?: NettingTraceView[]
 }
 
 export type SimulationMaterialView = {
@@ -93,6 +100,8 @@ export type SimulationMaterialView = {
   /** max(0, −expectedBalance) */
   shortageQty: number
   sources: SimulationSourceView[]
+  /** (Phase 5E) 반제품 재고를 사용한 경우 총 필요 / 재고 사용 / 순소요 합계 */
+  netting?: { grossQty: number; usedQty: number; netQty: number }
 }
 
 export type SimulationExcludedView = {
@@ -300,6 +309,7 @@ export function runSimulationFromRows(args: RunSimulationArgs): SimulationView {
   }
 
   // 5) 자재 결과 + 제품별 근거
+  const resultDemandByLine = new Map(result.demands.map((d) => [d.orderLineId, d]))
   const materials: SimulationMaterialView[] = []
   for (const m of result.materials) {
     if (!(m.totalRequirement > 0)) continue
@@ -318,6 +328,7 @@ export function runSimulationFromRows(args: RunSimulationArgs): SimulationView {
         productQty: product.qty,
         bomQtyPerUnit: product.qty > 0 ? Math.round((mv.requirement / product.qty) * 1e6) / 1e6 : 0,
         requirement: mv.requirement,
+        ...buildStepNetting(resultDemandByLine.get(mv.orderLineId) ?? { itemId: "" }, m.componentItemId),
       })
     }
     materials.push({
@@ -335,6 +346,9 @@ export function runSimulationFromRows(args: RunSimulationArgs): SimulationView {
       expectedBalance: m.finalBalance,
       shortageQty: m.finalShortageQty,
       sources,
+      ...(m.nettedUsedQty > 0
+        ? { netting: { grossQty: m.nettedUsedQty + m.nettedNetQty, usedQty: m.nettedUsedQty, netQty: m.nettedNetQty } }
+        : {}),
     })
   }
   // 부족 자재 먼저(부족수량 큰 순), 그다음 코드순
