@@ -30,6 +30,7 @@ import {
   auditItemSuppliers,
   auditPartners,
   buildReviewPack,
+  compareExcelBomToMaster,
   compareToDataset,
   coverageAndDependencies,
   masterBaseline,
@@ -804,6 +805,93 @@ async function auditProduction() {
   }
 }
 
+// ─── Phase 8: Excel ↔ 운영 Master / MRP 최종 정합성 검증(SELECT 전용) ───────────────
+
+async function phase8Verify() {
+  const { dataset, tenant, prisma, host } = await productionContext(false)
+  const xlsx = arg("xlsx")
+  if (!xlsx) throw new Error("--xlsx 가 필요합니다(Excel BOM 비교용 — 읽기만 함)")
+  try {
+    const { sheets, sha256 } = readWorkbookGrids(readFileSync(xlsx))
+    const analysis = analyzeMaster(extractDaewonWorkbook(sheets))
+    const master = await readProductionMaster(prisma, tenant)
+    const baseline = masterBaseline(master)
+    const expectedBaseline = arg("expected-baseline")
+    const bom = compareExcelBomToMaster(analysis, master)
+    const cmp = compareToDataset(master, dataset)
+
+    // 읽기 전용 MRP: 운영 Master + 메모리상 가상 수요(각 10EA / 1EA / 100EA)
+    const mrp10 = await syntheticMrp(prisma, tenant, 10)
+    const mrp1 = await syntheticMrp(prisma, tenant, 1)
+    const mrp100 = await syntheticMrp(prisma, tenant, 100)
+
+    // 빈 업무 상태에서 각 계산 경로가 오류 없이 빈 결과
+    const { loadAndRunOrderMrp } = await import("../src/lib/services/mrp-order.service")
+    const { computePurchaseSuggestions } = await import("../src/lib/services/mrp-purchase-suggestion.service")
+    const { loadAndRunSimulation } = await import("../src/lib/services/mrp-simulation.service")
+    const { normalizeSimulationRequest } = await import("../src/lib/mrp/simulation-adapter")
+    const { listMrpRuns } = await import("../src/lib/services/mrp-run.service")
+    const all = await loadAndRunOrderMrp(prisma, tenant, { from: null, to: null, includeDraft: false, includeScheduledReceipts: true })
+    const period = await loadAndRunOrderMrp(prisma, tenant, { from: "2026-06-01", to: "2026-06-30", includeDraft: true, includeScheduledReceipts: true })
+    const suggest = await computePurchaseSuggestions(prisma, tenant, { from: null, to: null, includeDraft: false }, { includePrices: true })
+    const history = await listMrpRuns({ authorize: async () => ({ tenantId: tenant }), db: prisma as never }, {})
+    const finished = await prisma.item.findMany({ where: { tenantId: tenant, itemType: "FINISHED" }, select: { id: true, code: true }, orderBy: { code: "asc" } })
+    const withBom = new Set(master.boms.map((b) => String(b.itemCode)))
+    const hasBomItem = finished.find((f) => withBom.has(f.code))
+    const noBomItem = finished.find((f) => !withBom.has(f.code))
+    const simOk = hasBomItem
+      ? await loadAndRunSimulation(prisma, tenant, normalizeSimulationRequest({ items: [{ itemId: hasBomItem.id, qty: 10 }] }))
+      : null
+    const simMissing = noBomItem
+      ? await loadAndRunSimulation(prisma, tenant, normalizeSimulationRequest({ items: [{ itemId: noBomItem.id, qty: 10 }] }))
+      : null
+    const tx = await transactionCounts(prisma)
+    const txTotal = Object.values(tx).reduce((s, v) => s + v, 0)
+
+    console.log(
+      JSON.stringify(
+        {
+          mode: "PRODUCTION_READ_ONLY_PHASE8",
+          write: 0,
+          host,
+          tenant,
+          workbookSha256: sha256,
+          masterBaseline: { hash: baseline.hash, expectedMatch: expectedBaseline ? baseline.hash === expectedBaseline : null, counts: baseline.counts },
+          datasetCompare: {
+            items: cmp.items.MATCH + "/" + cmp.items.MISMATCH + "/" + cmp.items.MISSING + "/" + cmp.items.EXTRA,
+            boms: cmp.boms.MATCH + "/" + cmp.boms.MISMATCH + "/" + cmp.boms.MISSING + "/" + cmp.boms.EXTRA,
+            bomItems: cmp.bomItems.MATCH + "/" + cmp.bomItems.MISMATCH + "/" + cmp.bomItems.MISSING + "/" + cmp.bomItems.EXTRA,
+          },
+          excelBomVsProduction: bom,
+          syntheticMrp: [mrp1, mrp10, mrp100].map((m) => ({
+            qtyEach: m.demandQtyEach,
+            demandLines: m.kpi.demandLineCount,
+            requirementLines: m.kpi.requirementLineCount,
+            materials: m.materials,
+            expectedMaterials: m.expectedMaterials,
+            mismatches: m.requirementMismatches,
+            excludedLines: m.excludedLines,
+            write: m.write,
+          })),
+          emptyState: {
+            mrpAll: { materials: all.view.materials.length, demandLines: all.view.kpi.demandLineCount, warnings: all.view.warnings.length, queryCount: all.diagnostics.queryCount },
+            mrpPeriod: { materials: period.view.materials.length, demandLines: period.view.kpi.demandLineCount, queryCount: period.diagnostics.queryCount },
+            purchaseSuggestion: { rows: suggest.payload.rows.length, queryCount: suggest.payload.diagnostics.queryCount },
+            runHistory: { items: history.items.length, total: history.total },
+            whatIfWithBom: simOk ? { materials: simOk.view.materials.length, queryCount: simOk.diagnostics.queryCount } : null,
+            whatIfMissingBom: simMissing ? { materials: simMissing.view.materials.length, excluded: simMissing.view.kpi.excludedCount, bomIssueProducts: simMissing.view.kpi.bomIssueProductCount } : null,
+          },
+          transaction: { total: txTotal, tables: tx },
+        },
+        null,
+        2
+      )
+    )
+  } finally {
+    await prisma.$disconnect()
+  }
+}
+
 async function main() {
   const cmd = process.argv[2]
   if (cmd === "analyze") return analyze()
@@ -814,7 +902,8 @@ async function main() {
   if (cmd === "import-production") return importProduction()
   if (cmd === "verify-production") return verifyProduction()
   if (cmd === "audit-production") return auditProduction()
-  throw new Error("사용법: analyze | export-existing | preview | seed | verify-mrp | import-production | verify-production | audit-production")
+  if (cmd === "phase8-verify") return phase8Verify()
+  throw new Error("사용법: analyze | export-existing | preview | seed | verify-mrp | import-production | verify-production | audit-production | phase8-verify")
 }
 
 main().catch((e) => {

@@ -53,6 +53,8 @@
     "master:import-production": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/master-migration.ts import-production",
     "master:verify-production": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/master-migration.ts verify-production",
     "master:audit-production": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/master-migration.ts audit-production",
+    "test:mrp-phase8": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-phase8.ts",
+    "master:phase8-verify": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/master-migration.ts phase8-verify",
     "seed:daewon-master": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/master-migration.ts seed",
     "test:mrp-semi-netting-ui": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-mrp-semi-netting-ui.tsx",
     "test:purchase-order-close": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-purchase-order-close.ts",

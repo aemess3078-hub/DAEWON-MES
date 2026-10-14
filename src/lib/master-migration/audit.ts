@@ -512,3 +512,76 @@ export function buildReviewPack(args: {
   )
   return files
 }
+
+// ─── Phase 8: Excel 승인 BOM ↔ 운영 Master ────────────────────────────────────
+/**
+ * Excel(분석 결과)의 BOM 과 운영 BOM 을 줄 단위로 대조한다.
+ *  - 수량 오류 REJECT BOM → KNOWN_EXCLUSION(INVALID_QTY_SOURCE)
+ *  - 운영에 없고 구성품이 운영 Item 에 없는 BOM → KNOWN_EXCLUSION(BLOCKED_BY_REVIEW_RAW)
+ *  - 그 외 운영에 없는 BOM → MISSING / Excel 에 없는 운영 BOM → EXTRA
+ */
+export function compareExcelBomToMaster(analysis: MasterAnalysis, master: ProdMaster) {
+  const prodBy = new Map(master.boms.map((b) => [String(b.itemCode), b]))
+  const itemCodes = new Set(master.items.map((i) => i.code))
+  const out = {
+    parents: { excel: analysis.boms.length, MATCH: 0, QTY_MISMATCH: 0, COMPONENT_MISMATCH: 0, MISSING: 0, EXTRA: 0, KNOWN_EXCLUSION_INVALID_QTY_SOURCE: 0, KNOWN_EXCLUSION_BLOCKED_BY_REVIEW_RAW: 0 },
+    lines: { compared: 0, MATCH: 0, QTY_MISMATCH: 0, COMPONENT_MISMATCH: 0, MISSING: 0, EXTRA: 0, excludedByKnownExclusion: 0 },
+    problems: [] as string[],
+  }
+  const seen = new Set<string>()
+  analysis.boms.forEach((b) => {
+    seen.add(b.parentCode)
+    const prod = prodBy.get(b.parentCode)
+    if (b.grade === "REJECT") {
+      out.parents.KNOWN_EXCLUSION_INVALID_QTY_SOURCE += 1
+      out.lines.excludedByKnownExclusion += b.lines.length
+      if (prod) out.problems.push("KNOWN_EXCLUSION 이 운영에 존재: " + b.parentCode)
+      return
+    }
+    if (!prod) {
+      const blocked = b.lines.some((l) => !itemCodes.has(l.componentCode))
+      if (blocked) {
+        out.parents.KNOWN_EXCLUSION_BLOCKED_BY_REVIEW_RAW += 1
+        out.lines.excludedByKnownExclusion += b.lines.length
+      } else {
+        out.parents.MISSING += 1
+        out.problems.push("MISSING: " + b.parentCode)
+      }
+      return
+    }
+    const lineBy = new Map(prod.lines.map((l) => [l.seq, l]))
+    let parentOk = true
+    b.lines.forEach((l) => {
+      out.lines.compared += 1
+      const pl = lineBy.get(l.seq)
+      if (!pl) {
+        out.lines.MISSING += 1
+        parentOk = false
+      } else if (pl.componentCode !== l.componentCode) {
+        out.lines.COMPONENT_MISMATCH += 1
+        parentOk = false
+        out.problems.push(`COMPONENT_MISMATCH ${b.parentCode}#${l.seq}`)
+      } else if (l.qtyPer === null || num(pl.qtyPer) !== num(l.qtyPer)) {
+        out.lines.QTY_MISMATCH += 1
+        parentOk = false
+        out.problems.push(`QTY_MISMATCH ${b.parentCode}#${l.seq}`)
+      } else out.lines.MATCH += 1
+    })
+    prod.lines.forEach((pl) => {
+      if (!b.lines.some((l) => l.seq === pl.seq)) {
+        out.lines.EXTRA += 1
+        parentOk = false
+      }
+    })
+    if (parentOk) out.parents.MATCH += 1
+    else if (out.problems.some((p) => p.startsWith("QTY_MISMATCH " + b.parentCode))) out.parents.QTY_MISMATCH += 1
+    else out.parents.COMPONENT_MISMATCH += 1
+  })
+  master.boms.forEach((b) => {
+    if (!seen.has(String(b.itemCode))) {
+      out.parents.EXTRA += 1
+      out.problems.push("EXTRA: " + b.itemCode)
+    }
+  })
+  return out
+}

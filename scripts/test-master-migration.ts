@@ -23,6 +23,7 @@ import {
   auditItemSuppliers,
   auditPartners,
   buildReviewPack,
+  compareExcelBomToMaster,
   compareToDataset,
   coverageAndDependencies,
   csvCell,
@@ -907,6 +908,59 @@ async function main() {
     const body = cliSrc.slice(cliSrc.indexOf("async function readProductionMaster"), cliSrc.indexOf("async function main()"))
     ok(!/\.(create|update|delete|upsert|createMany|updateMany|deleteMany)\(/.test(body) && !/\$executeRaw/.test(body), "MC12 audit-production: 쓰기 호출/executeRaw 없음")
     ok(!/prisma\.\$queryRawUnsafe\(`\s*(insert|update|delete|drop|alter|truncate)/i.test(cliSrc), "raw SQL 은 SELECT 만")
+  }
+
+  // ═══ P8-18 Excel 승인 BOM ↔ 운영 Master ═══════════════════════════════════════
+  section("P8-18 Excel BOM ↔ 운영 Master 대조(KNOWN_EXCLUSION 분류)")
+  {
+    const policy = JSON.parse(readFileSync(join(__dirname, "master-migration", "daewon-7b1.policy.json"), "utf8")) as MasterDecisions
+    const { a } = analyze(
+      workbook({
+        materials: [
+          { code: "M-001", name: "자재A", spec: "SPEC-A", supplier: "공급가", uom: "EA" },
+          { code: "M-002", name: "자재B", spec: "SPEC-B", supplier: "공급가", uom: "EA" },
+          { code: "M-MIS", name: "불일치", spec: "SPEC-M", supplier: "공급가", uom: "EA" },
+        ],
+        boms: [
+          { no: 1, product: "P-1", lines: [{ code: "M-001", name: "자재A", spec: "SPEC-A", qty: 2, uom: "EA" }, { code: "M-002", name: "자재B", spec: "SPEC-B", qty: 1, uom: "EA" }] },
+          { no: 2, product: "P-2", lines: [{ code: "M-002", name: "자재B", spec: "SPEC-B", qty: 1, uom: "EA" }, { code: "M-MIS", name: "불일치", spec: "다른 규격", qty: 3, uom: "EA" }] },
+          { no: 3, product: "P-3", lines: [{ code: "M-001", name: "자재A", spec: "SPEC-A", qty: ".", uom: "EA" }] },
+        ],
+      })
+    )
+    const d = buildApprovedDataset(a, { workbookSha256: "h", decisions: policy })
+    const prod = (): ProdMaster => ({
+      tenantId: "t1",
+      items: d.items.map((i) => ({ code: i.code, name: i.name, spec: i.spec, uom: i.uom, itemType: i.itemType, status: "ACTIVE", tenantId: "t1" })),
+      boms: d.boms.map((b) => ({
+        itemCode: b.parentCode,
+        version: b.version,
+        status: "ACTIVE",
+        isDefault: true,
+        tenantId: "t1",
+        lines: b.lines.map((l) => ({ seq: l.seq, componentCode: l.componentCode, qtyPer: l.qtyPer, scrapRate: 0, componentTenantId: "t1" })),
+      })),
+      partners: [],
+      itemSuppliers: [],
+    })
+    const c = compareExcelBomToMaster(a, prod())
+    eq(
+      [c.parents.MATCH, c.parents.KNOWN_EXCLUSION_INVALID_QTY_SOURCE, c.parents.KNOWN_EXCLUSION_BLOCKED_BY_REVIEW_RAW, c.parents.MISSING, c.parents.EXTRA, c.parents.QTY_MISMATCH, c.lines.MATCH, c.problems.length],
+      [1, 1, 1, 0, 0, 0, 2, 0],
+      "P8-18 정상 BOM MATCH / 수량 오류·차단 BOM 은 KNOWN_EXCLUSION / 누락·초과·수량 불일치 0"
+    )
+    const qty = prod()
+    qty.boms[0].lines[0].qtyPer = 9
+    eq(compareExcelBomToMaster(a, qty).parents.QTY_MISMATCH, 1, "P8-18 수량이 다르면 QTY_MISMATCH")
+    const missing = prod()
+    missing.boms = []
+    eq(compareExcelBomToMaster(a, missing).parents.MISSING, 1, "P8-18 승인 BOM 이 운영에 없으면 MISSING(알려진 제외가 아닌 경우)")
+    const extra = prod()
+    extra.boms.push({ itemCode: "P-9", version: "1", status: "ACTIVE", isDefault: true, tenantId: "t1", lines: [] })
+    eq(compareExcelBomToMaster(a, extra).parents.EXTRA, 1, "P8-18 Excel 에 없는 운영 BOM 은 EXTRA")
+    const leaked = prod()
+    leaked.boms.push({ itemCode: "P-3", version: "1", status: "ACTIVE", isDefault: true, tenantId: "t1", lines: [{ seq: 1, componentCode: "M-001", qtyPer: 1, scrapRate: 0, componentTenantId: "t1" }] })
+    ok(compareExcelBomToMaster(a, leaked).problems.some((p) => p.startsWith("KNOWN_EXCLUSION")), "P8-18 수량 오류 BOM 이 운영에 들어가 있으면 문제로 보고")
   }
 
   // ═══ 요약 / provenance ══════════════════════════════════════════════════════
