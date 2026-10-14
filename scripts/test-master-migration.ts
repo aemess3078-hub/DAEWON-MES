@@ -10,12 +10,26 @@
  *  MD19~23   운영 정보(재고/수주/발주/WIP/생산) 제외
  *  MD24~25   seed 멱등 / seed 에 운영 정보 행 0
  *  PI1~PI13  Phase 7B-2 운영 import 가드 / CREATE-only / 감사 / 롤백
+ *  MC1~MC12  Phase 7C 운영 Master 최종 감사(순수 함수, 읽기 전용)
  *  + 승인 결정/일괄 정책, 데이터셋 변조 검출, seed 가드, 정적 점검(운영 seed/배포 자동 실행 금지, 개인정보 산출물 gitignore)
  */
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { analyzeMaster, partnerFoldKey } from "../src/lib/master-migration/analyze"
+import {
+  auditBoms,
+  auditItems,
+  auditItemSuppliers,
+  auditPartners,
+  buildReviewPack,
+  compareToDataset,
+  coverageAndDependencies,
+  csvCell,
+  masterBaseline,
+  rawUsage,
+  type ProdMaster,
+} from "../src/lib/master-migration/audit"
 import { applyMasterDataset, loadExistingSnapshot, type MasterApplyDb } from "../src/lib/master-migration/apply"
 import { buildApprovedDataset, datasetCounts, validateDatasetShape } from "../src/lib/master-migration/dataset"
 import { extractDaewonWorkbook } from "../src/lib/master-migration/extract"
@@ -743,6 +757,156 @@ async function main() {
     rb.failNext.auditLogAfter = -1
     const retry = await applyMasterDataset(rb.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, createOnly: true, expectedCreate, audit })
     ok(!retry.aborted && rb.tables.item.length === counts.items, "롤백 후 재시도 성공")
+  }
+
+  // ═══ MC1~MC12 Phase 7C 운영 Master 최종 감사(순수 함수) ═══════════════════════════
+  section("MC1~MC12 Phase 7C 최종 감사")
+  {
+    const policy = JSON.parse(readFileSync(join(__dirname, "master-migration", "daewon-7b1.policy.json"), "utf8")) as MasterDecisions
+    const sheets = workbook({
+      materials: [
+        { code: "M-001", name: "자재A", spec: "SPEC-A", supplier: "공급가", uom: "EA" },
+        { code: "M-002", name: "자재B", spec: "SPEC-B", supplier: "공급나", uom: "EA" },
+        { code: "M-MIS", name: "불일치", spec: "SPEC-M", supplier: "공급나", uom: "EA" },
+        { code: "M-UNUSED", name: "미참조", spec: "SPEC-U", supplier: "공급가", uom: "EA" },
+      ],
+      boms: [
+        { no: 1, product: "P-1", lines: [{ code: "M-001", name: "자재A", spec: "SPEC-A", qty: 2, uom: "EA" }, { code: "M-002", name: "자재B", spec: "SPEC-B", qty: 1, uom: "EA" }] },
+        { no: 2, product: "P-2", lines: [{ code: "M-002", name: "자재B", spec: "SPEC-B", qty: 1, uom: "EA" }, { code: "M-MIS", name: "불일치", spec: "다른 규격", qty: 3, uom: "EA" }] },
+        { no: 3, product: "P-3", lines: [{ code: "M-001", name: "자재A", spec: "SPEC-A", qty: ".", uom: "EA" }] },
+      ],
+      orders: [{ product: "P-ORDER-ONLY", customer: "고객가" }],
+    })
+    const { a } = analyze(sheets)
+    const ds = buildApprovedDataset(a, { workbookSha256: "h", decisions: policy })
+    // Dataset → "운영 DB 에서 읽은" Master (id/시각 없음)
+    const fromDataset = (): ProdMaster => ({
+      tenantId: "t1",
+      items: ds.items.map((i) => ({ code: i.code, name: i.name, spec: i.spec, uom: i.uom, itemType: i.itemType, status: "ACTIVE", tenantId: "t1" })),
+      boms: ds.boms.map((b) => ({
+        itemCode: b.parentCode,
+        version: b.version,
+        status: "ACTIVE",
+        isDefault: true,
+        tenantId: "t1",
+        lines: b.lines.map((l) => ({ seq: l.seq, componentCode: l.componentCode, qtyPer: l.qtyPer, scrapRate: 0, componentTenantId: "t1" })),
+      })),
+      partners: ds.partners.map((p) => ({ code: p.code, name: p.name, partnerType: p.partnerType, status: "ACTIVE", tenantId: "t1", businessNumber: null, ceoName: null, phone: null, email: null, address: null, contactName: null, contactPhone: null })),
+      itemSuppliers: ds.itemSuppliers.map((s) => ({
+        itemCode: s.itemCode,
+        supplierCode: s.supplierCode,
+        isDefault: false,
+        leadTimeDays: null,
+        moq: null,
+        orderMultiple: null,
+        isActive: true,
+        tenantId: "t1",
+        itemTenantId: "t1",
+        supplierTenantId: "t1",
+        supplierPartnerType: "SUPPLIER",
+      })),
+    })
+    const m = fromDataset()
+
+    // MC1 Dataset ↔ DB
+    const c = compareToDataset(m, ds)
+    eq(
+      [c.items.MATCH, c.items.MISMATCH + c.items.MISSING + c.items.EXTRA, c.boms.MATCH, c.bomItems.MATCH, c.partners.MATCH, c.itemSuppliers.MATCH, c.boms.MISMATCH + c.bomItems.MISMATCH + c.partners.MISMATCH + c.itemSuppliers.MISMATCH],
+      [ds.items.length, 0, ds.boms.length, ds.boms.reduce((s, b) => s + b.lines.length, 0), ds.partners.length, ds.itemSuppliers.length, 0],
+      "MC1 Dataset ↔ DB: 전부 MATCH, MISMATCH/MISSING/EXTRA 0"
+    )
+    const broken = fromDataset()
+    broken.items[0].name = "변경됨"
+    broken.items.pop()
+    broken.items.push({ code: "X-EXTRA", name: "x", spec: null, uom: "EA", itemType: "RAW_MATERIAL", status: "ACTIVE", tenantId: "t1" })
+    broken.boms[0].lines[0].qtyPer = 77
+    const cb = compareToDataset(broken, ds)
+    eq([cb.items.MISMATCH, cb.items.MISSING, cb.items.EXTRA, cb.bomItems.MISMATCH], [1, 1, 1, 1], "MC1 변조 탐지: MISMATCH/MISSING/EXTRA/BOMItem 불일치")
+
+    // MC2 item count / MC7 정합
+    const ia = auditItems(m)
+    eq([ia.total, ia.byType.FINISHED, ia.duplicateCode, ia.codeBlank, ia.nameBlank, ia.invalidType, ia.invalidUom, ia.tenantMismatch, ia.inactive], [ds.items.length, ds.items.filter((i) => i.itemType === "FINISHED").length, 0, 0, 0, 0, 0, 0, 0], "MC2 Item 감사: 건수/중복/공백/유형/단위/tenant/비활성 0")
+    eq(ia.finishedPlaceholder, ia.byType.FINISHED, "MC2 FINISHED 전부 placeholder(name=code/EA/spec null) → MASTER_ENRICHMENT_REQUIRED")
+    const badItems = fromDataset()
+    badItems.items.push({ ...badItems.items[0] }, { code: " ", name: "", spec: null, uom: "XX", itemType: "BAD", status: "INACTIVE", tenantId: "other" })
+    const iab = auditItems(badItems)
+    ok(iab.duplicateCode === 1 && iab.codeBlank === 1 && iab.nameBlank === 1 && iab.invalidType === 1 && iab.invalidUom === 1 && iab.tenantMismatch === 1 && iab.inactive === 1, "MC2 결함 탐지")
+
+    // MC3 BOM 무결성
+    const ba = auditBoms(m)
+    eq([ba.boms, ba.orphanParent, ba.orphanComponent, ba.tenantMismatch, ba.qtyInvalid, ba.duplicateComponent, ba.selfReference, ba.cycles, ba.duplicateDefaultBom, ba.defaultStatusInconsistent, ba.versionInvalid, ba.allActiveDefaultV1], [ds.boms.length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, true], "MC3 BOM 무결성 전부 0 / 전부 ACTIVE·default·v1")
+    eq(ba.maxDepth, 1, "BOM 최대 깊이 = 1(FINISHED → RAW)")
+    const badBom = fromDataset()
+    badBom.boms[0].lines.push({ seq: 99, componentCode: badBom.boms[0].itemCode, qtyPer: 0, scrapRate: 0, componentTenantId: "t1" })
+    badBom.boms[0].lines.push({ seq: 100, componentCode: "NOPE", qtyPer: 1, scrapRate: 0, componentTenantId: null })
+    badBom.boms.push({ ...badBom.boms[0], version: "2", lines: [] })
+    const bab = auditBoms(badBom)
+    ok(bab.selfReference === 1 && bab.qtyInvalid === 1 && bab.orphanComponent === 1 && bab.duplicateDefaultBom === 1 && bab.cycles >= 1, "MC3 결함 탐지(자기참조/수량/구성품 누락/default 중복/순환)")
+
+    // MC4 coverage + MC5 dependency
+    const cov = coverageAndDependencies(m, a)
+    eq([cov.finished, cov.withBom, cov.withoutBom, cov.coveragePct], [3, 1, 2, 33.3], "MC4 BOM Coverage(FINISHED 3 중 BOM 1)")
+    eq([cov.withoutBomExplained.invalidQtyBom, cov.withoutBomExplained.blockedByReviewRaw, cov.withoutBomExplained.unexplained.length], [1, 1, 0], "MC4 BOM 없는 제품 전부 설명됨(수량 오류 1 + 차단 1)")
+    eq(cov.orderOnlyInProduction, 0, "수주 전용 제품은 운영 Item 에 없음(Coverage 제외)")
+    eq(cov.dependency, [{ rawCode: "M-MIS", blockedBoms: 1, affectedFinished: 1, unlockedIfOnlyThisApproved: 1 }], "MC5 RAW 의존성: M-MIS 가 BOM 1개/제품 1개 차단")
+
+    // MC6 partner / MC7 ItemSupplier
+    const pa = auditPartners(m)
+    eq([pa.total, pa.customer, pa.supplier, pa.duplicateCode, pa.nameBlank, pa.invalidType, pa.tenantMismatch, pa.notActive, pa.masterEnrichmentRequired], [ds.partners.length, 1, ds.partners.length - 1, 0, 0, 0, 0, 0, ds.partners.length], "MC6 거래처 감사 + 전부 MASTER_ENRICHMENT_REQUIRED")
+    eq(pa.enrichmentMissing.businessNumber, ds.partners.length, "사업자번호 없음 = 오류가 아니라 보완 대상")
+    const isa = auditItemSuppliers(m)
+    eq([isa.total, isa.duplicateRelation, isa.missingItem, isa.missingSupplier, isa.supplierTypeInvalid, isa.tenantMismatch, isa.isDefaultTrue, isa.leadTimeSet, isa.moqSet, isa.orderMultipleSet], [ds.itemSuppliers.length, 0, 0, 0, 0, 0, 0, 0, 0, 0], "MC7 ItemSupplier 감사: 중복/누락/타입/tenant 0, Default·LT·MOQ·배수 미설정")
+    const ru = rawUsage(m)
+    eq([ru.raw, ru.unusedImportedRaw, ru.distribution["1"] + ru.distribution["2-4"] + ru.distribution.unused], [ds.items.filter((i) => i.itemType === "RAW_MATERIAL").length, 0, ds.items.filter((i) => i.itemType === "RAW_MATERIAL").length], "RAW 사용 분포(미사용 0)")
+
+    // MC8 transaction zero: 감사 모듈은 업무 테이블을 읽는 유일한 경로(CLI)에서 0 과 비교 — 여기서는 CLI 가 count 만 사용함을 정적 점검(MC12)
+
+    // MC9 audit ↔ dataset ↔ DB 건수 정합(순수 비교)
+    const counts = datasetCounts(ds)
+    eq(
+      [ia.total, ia.byType.FINISHED, ia.byType.RAW_MATERIAL, ba.boms, ba.bomItems, pa.customer, pa.supplier, isa.total],
+      [counts.items, counts.finished, counts.raw, counts.boms, counts.bomItems, counts.customers, counts.suppliers, counts.itemSuppliers],
+      "MC9 감사 건수 = Dataset 건수"
+    )
+
+    // MC10 review 템플릿
+    const rawBomLines = extractDaewonWorkbook(sheets).bomLines.map((l) => ({ parentCode: l.parentCode, componentCode: l.component.raw ?? "", qty: l.qty, name: l.name, spec: l.spec, uom: l.uom, row: l.src.row }))
+    const pack = buildReviewPack({ master: m, analysis: a, coverage: cov, rawBomLines })
+    eq(Object.keys(pack).sort(), ["bom-review-template.csv", "finished-enrichment-template.csv", "item-supplier-enrichment-template.csv", "partner-enrichment-template.csv", "raw-review-template.csv"], "MC10 보완 템플릿 5종 생성")
+    const fin = pack["finished-enrichment-template.csv"].split("\r\n").filter(Boolean)
+    ok(fin[0].includes("itemCode,currentName,newName,currentSpec,newSpec,currentUom,newUom,confirmed,note"), "FINISHED 템플릿 헤더")
+    eq(fin.length - 1, 3, "FINISHED 템플릿 행 = FINISHED 수")
+    ok(fin[1].split(",")[2] === "" && fin[1].split(",")[4] === "" && fin[1].split(",")[6] === "" && fin[1].split(",")[7] === "", "newName/newSpec/newUom/confirmed 는 비어 있음(추정 안 함)")
+    ok(pack["bom-review-template.csv"].includes("INVALID_QTY") && /INVALID_QTY,[^,]*,\.,/.test(pack["bom-review-template.csv"]) && pack["bom-review-template.csv"].includes("BLOCKED_BY_RAW_REVIEW"), "BOM 템플릿: 수량 오류 줄 + 차단 줄(confirmedQty 비움)")
+    ok(pack["raw-review-template.csv"].includes("M-MIS") && pack["raw-review-template.csv"].includes("M-UNUSED") && pack["raw-review-template.csv"].includes("다른 규격"), "RAW 템플릿: 불일치 + 미참조 + BOM 줄 규격 표시")
+    ok(pack["partner-enrichment-template.csv"].split("\r\n").filter(Boolean).length === ds.partners.length + 1, "거래처 템플릿 행 수")
+    ok(pack["item-supplier-enrichment-template.csv"].split("\r\n").filter(Boolean).length === ds.itemSuppliers.length + 1, "ItemSupplier 템플릿 행 수")
+    ok(pack["item-supplier-enrichment-template.csv"].split("\r\n")[1].split(",").slice(3, 6).every((v) => v === ""), "ItemSupplier 템플릿: LT/MOQ/배수 비움")
+    eq(csvCell('a,"b"'), '"a,""b"""', "CSV 이스케이프")
+
+    // MC11 master hash 결정성
+    const h1 = masterBaseline(m)
+    const shuffled = fromDataset()
+    shuffled.items.reverse()
+    shuffled.boms.reverse()
+    shuffled.boms.forEach((b) => b.lines.reverse())
+    shuffled.partners.reverse()
+    shuffled.itemSuppliers.reverse()
+    eq(masterBaseline(shuffled).hash, h1.hash, "MC11 입력 순서가 달라도 같은 Master hash")
+    const changed = fromDataset()
+    changed.items[0].spec = "다른 규격"
+    ok(masterBaseline(changed).hash !== h1.hash, "값이 바뀌면 hash 변경")
+    ok(/^[0-9a-f]{64}$/.test(h1.hash), "hash = sha256")
+
+    // MC12 Production write 경로 없음(정적)
+    const root = join(__dirname, "..")
+    const noComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")
+    const auditSrc = noComments(readFileSync(join(root, "src", "lib", "master-migration", "audit.ts"), "utf8"))
+    ok(!/prisma|\.(create|delete|upsert|createMany|updateMany|deleteMany)\(|\.update\((?!payload)/.test(auditSrc), "MC12 audit.ts: DB/쓰기 호출 없음(순수, hash update 제외)")
+    const cliSrc = noComments(readFileSync(join(root, "scripts", "master-migration.ts"), "utf8"))
+    const body = cliSrc.slice(cliSrc.indexOf("async function readProductionMaster"), cliSrc.indexOf("async function main()"))
+    ok(!/\.(create|update|delete|upsert|createMany|updateMany|deleteMany)\(/.test(body) && !/\$executeRaw/.test(body), "MC12 audit-production: 쓰기 호출/executeRaw 없음")
+    ok(!/prisma\.\$queryRawUnsafe\(`\s*(insert|update|delete|drop|alter|truncate)/i.test(cliSrc), "raw SQL 은 SELECT 만")
   }
 
   // ═══ 요약 / provenance ══════════════════════════════════════════════════════

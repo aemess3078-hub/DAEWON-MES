@@ -8,6 +8,7 @@
  *   verify-mrp       개발 DB 의 실제 Master(BOM)로 가상 수요를 사용한 MRP 전개 검증(읽기 전용, 가상 수요는 메모리에만 존재).
  *   import-production  승인된 Dataset 을 운영 DB 에 CREATE-only 로 적용(승인 가드 + dry-run + 단일 트랜잭션 + 감사). --dry-run 은 쓰기 0.
  *   verify-production  운영 Master 사후 검증(SELECT 전용): 건수/필드/무결성/업무 테이블 증가 0/2차 dry-run/감사/MRP.
+ *   audit-production   운영 Master 최종 감사(SELECT 전용, Phase 7C): Dataset 대조, baseline hash, 커버리지/의존성, 로컬 보완 템플릿(CSV).
  *
  * 사용(예):
  *   analyze --xlsx "<경로>" --out <폴더> [--existing existing.json] [--decisions policy.json] [--partner-codes map.json]
@@ -23,6 +24,19 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { analyzeMaster } from "../src/lib/master-migration/analyze"
 import { applyMasterDataset, loadExistingSnapshot } from "../src/lib/master-migration/apply"
+import {
+  auditBoms,
+  auditItems,
+  auditItemSuppliers,
+  auditPartners,
+  buildReviewPack,
+  compareToDataset,
+  coverageAndDependencies,
+  masterBaseline,
+  rawUsage,
+  type ProdMaster,
+  type RawBomLineInfo,
+} from "../src/lib/master-migration/audit"
 import { buildApprovedDataset, datasetCounts, validateDatasetShape } from "../src/lib/master-migration/dataset"
 import { extractDaewonWorkbook } from "../src/lib/master-migration/extract"
 import { reconcileCandidates, reconcileDataset, summarize } from "../src/lib/master-migration/reconcile"
@@ -585,6 +599,211 @@ async function verifyProduction() {
   }
 }
 
+// ─── Phase 7C: 운영 Master 최종 감사(SELECT 전용) ───────────────────────────────
+
+/** 운영 Master 를 읽기 전용으로 읽는다(findMany 만 사용). */
+async function readProductionMaster(prisma: import("@prisma/client").PrismaClient, tenant: string): Promise<ProdMaster> {
+  const items = await prisma.item.findMany({ where: { tenantId: tenant }, select: { code: true, name: true, spec: true, uom: true, itemType: true, status: true, tenantId: true } })
+  const boms = await prisma.bOM.findMany({
+    where: { tenantId: tenant },
+    select: {
+      version: true,
+      status: true,
+      isDefault: true,
+      tenantId: true,
+      item: { select: { code: true } },
+      bomItems: { select: { seq: true, qtyPer: true, scrapRate: true, componentItem: { select: { code: true, tenantId: true } } } },
+    },
+  })
+  const partners = await prisma.businessPartner.findMany({ where: { tenantId: tenant } })
+  const itemSuppliers = await prisma.itemSupplier.findMany({
+    where: { tenantId: tenant },
+    select: {
+      isDefault: true,
+      leadTimeDays: true,
+      moq: true,
+      orderMultiple: true,
+      isActive: true,
+      tenantId: true,
+      item: { select: { code: true, tenantId: true } },
+      supplier: { select: { code: true, tenantId: true, partnerType: true } },
+    },
+  })
+  return {
+    tenantId: tenant,
+    items: items.map((i) => ({ code: i.code, name: i.name, spec: i.spec ?? null, uom: String(i.uom), itemType: String(i.itemType), status: String(i.status), tenantId: i.tenantId })),
+    boms: boms.map((b) => ({
+      itemCode: b.item?.code ?? null,
+      version: b.version,
+      status: String(b.status),
+      isDefault: b.isDefault,
+      tenantId: b.tenantId,
+      lines: b.bomItems.map((l) => ({ seq: l.seq, componentCode: l.componentItem?.code ?? null, qtyPer: Number(l.qtyPer), scrapRate: Number(l.scrapRate), componentTenantId: l.componentItem?.tenantId ?? null })),
+    })),
+    partners: partners.map((p) => ({
+      code: p.code,
+      name: p.name,
+      partnerType: String(p.partnerType),
+      status: String(p.status),
+      tenantId: p.tenantId,
+      businessNumber: p.businessNumber,
+      ceoName: p.ceoName,
+      phone: p.phone,
+      email: p.email,
+      address: p.address,
+      contactName: p.contactName,
+      contactPhone: p.contactPhone,
+    })),
+    itemSuppliers: itemSuppliers.map((s) => ({
+      itemCode: s.item?.code ?? null,
+      supplierCode: s.supplier?.code ?? null,
+      isDefault: s.isDefault,
+      leadTimeDays: s.leadTimeDays,
+      moq: s.moq === null ? null : Number(s.moq),
+      orderMultiple: s.orderMultiple === null ? null : Number(s.orderMultiple),
+      isActive: s.isActive,
+      tenantId: s.tenantId,
+      itemTenantId: s.item?.tenantId ?? null,
+      supplierTenantId: s.supplier?.tenantId ?? null,
+      supplierPartnerType: s.supplier ? String(s.supplier.partnerType) : null,
+    })),
+  }
+}
+
+async function auditProduction() {
+  const { dataset, counts, tenant, prisma, host } = await productionContext(false)
+  const xlsx = arg("xlsx")
+  if (!xlsx) throw new Error("--xlsx 가 필요합니다(보완 템플릿의 원본 근거 — 검토용으로만 읽음)")
+  const out = resolve(arg("out") ?? join(".master-migration-out", "final-review"))
+  try {
+    const { sheets, sha256 } = readWorkbookGrids(readFileSync(xlsx))
+    const extraction = extractDaewonWorkbook(sheets)
+    const analysis = analyzeMaster(extraction)
+    const master = await readProductionMaster(prisma, tenant)
+
+    const baseline = masterBaseline(master)
+    const baselineAgain = masterBaseline({ ...master, items: master.items.slice().reverse(), boms: master.boms.slice().reverse() })
+    const cmp = compareToDataset(master, dataset)
+    const items = auditItems(master)
+    const boms = auditBoms(master)
+    const raws = rawUsage(master)
+    const partners = auditPartners(master)
+    const itemSuppliers = auditItemSuppliers(master)
+    const coverage = coverageAndDependencies(master, analysis)
+
+    const tx = await transactionCounts(prisma)
+    const auditRows = await prisma.auditLog.findMany({ where: { tenantId: tenant, entityType: "MasterImport" }, select: { id: true, actorLabel: true, afterData: true } })
+    const a = (auditRows[0]?.afterData ?? {}) as Record<string, unknown>
+    const ai = (a.items ?? {}) as Record<string, number>
+    const auditMatches =
+      auditRows.length === 1 &&
+      a.datasetHash === dataset.datasetHash &&
+      ai.total === master.items.length &&
+      ai.FINISHED === items.byType.FINISHED &&
+      ai.RAW_MATERIAL === items.byType.RAW_MATERIAL &&
+      a.boms === boms.boms &&
+      a.bomItems === boms.bomItems &&
+      a.customers === partners.customer &&
+      a.suppliers === partners.supplier &&
+      a.itemSuppliers === itemSuppliers.total
+
+    const mrp = await syntheticMrp(prisma, tenant, 10)
+    // 실제 MRP/발주제안 계산 경로(SELECT 전용)가 빈 업무 데이터에서 오류 없이 빈 결과를 내는지
+    const { loadAndRunOrderMrp } = await import("../src/lib/services/mrp-order.service")
+    const { computePurchaseSuggestions } = await import("../src/lib/services/mrp-purchase-suggestion.service")
+    const emptyView = await loadAndRunOrderMrp(prisma, tenant, { from: null, to: null, includeDraft: false, includeScheduledReceipts: true })
+    const emptySuggest = await computePurchaseSuggestions(prisma, tenant, { from: null, to: null, includeDraft: false }, { includePrices: false })
+    const emptyState = {
+      materials: emptyView.view.materials.length,
+      demandLines: emptyView.view.kpi.demandLineCount,
+      warnings: emptyView.view.warnings.length,
+      suggestionRows: emptySuggest.payload.rows.length,
+    }
+
+    const rawBomLines: RawBomLineInfo[] = extraction.bomLines.map((l) => ({
+      parentCode: l.parentCode,
+      componentCode: l.component.raw ?? "",
+      qty: l.qty,
+      name: l.name,
+      spec: l.spec,
+      uom: l.uom,
+      row: l.src.row,
+    }))
+    const pack = buildReviewPack({ master, analysis, coverage, rawBomLines })
+    mkdirSync(out, { recursive: true })
+    Object.keys(pack).forEach((f) => writeFileSync(join(out, f), pack[f], "utf8"))
+
+    const mismatchTotal = cmp.items.MISMATCH + cmp.boms.MISMATCH + cmp.bomItems.MISMATCH + cmp.partners.MISMATCH + cmp.itemSuppliers.MISMATCH
+    const missingTotal = cmp.items.MISSING + cmp.boms.MISSING + cmp.bomItems.MISSING + cmp.partners.MISSING + cmp.itemSuppliers.MISSING
+    const extraTotal = cmp.items.EXTRA + cmp.boms.EXTRA + cmp.bomItems.EXTRA + cmp.partners.EXTRA + cmp.itemSuppliers.EXTRA
+    const summary = {
+      masterBaselineHash: baseline.hash,
+      masterBaselineHashDeterministic: baseline.hash === baselineAgain.hash,
+      baselineAt: new Date().toISOString(),
+      approvedDatasetHash: dataset.datasetHash,
+      workbookSha256: sha256,
+      items: master.items.length,
+      finished: items.byType.FINISHED,
+      raw: items.byType.RAW_MATERIAL,
+      semi: items.byType.SEMI_FINISHED,
+      bom: boms.boms,
+      bomItems: boms.bomItems,
+      customer: partners.customer,
+      supplier: partners.supplier,
+      itemSupplier: itemSuppliers.total,
+      expectedCounts: counts,
+      bomCoverage: `${coverage.withBom}/${coverage.finished}`,
+      bomCoveragePct: coverage.coveragePct,
+      review: {
+        finishedEnrichment: items.finishedEnrichmentRequired,
+        rawMismatch: analysis.items.filter((i) => i.flags.inSettings && i.flags.isBomComponent && !master.items.some((m) => m.code === i.code)).length,
+        unusedRaw: analysis.items.filter((i) => i.flags.inSettings && !i.flags.isBomComponent && !i.flags.isBomParent && !master.items.some((m) => m.code === i.code)).length,
+        invalidBom: coverage.invalidParents.length,
+        blockedBom: coverage.blocked.length,
+        orderOnlyProducts: analysis.items.filter((i) => i.flags.orderOnly).length,
+        partnerReview: partners.masterEnrichmentRequired,
+      },
+      transactionRows: tx,
+      transactionRowsTotal: Object.values(tx).reduce((s, v) => s + v, 0),
+    }
+    writeFileSync(join(out, "summary.json"), JSON.stringify({ summary, dependency: coverage.dependency, blocked: coverage.blocked, compare: { items: cmp.items, boms: cmp.boms, bomItems: cmp.bomItems, partners: cmp.partners, itemSuppliers: cmp.itemSuppliers } }, null, 2), "utf8")
+
+    console.log(
+      JSON.stringify(
+        {
+          mode: "PRODUCTION_READ_ONLY_AUDIT",
+          write: 0,
+          host,
+          tenant,
+          summary,
+          datasetCompare: {
+            items: { MATCH: cmp.items.MATCH, MISMATCH: cmp.items.MISMATCH, MISSING: cmp.items.MISSING, EXTRA: cmp.items.EXTRA },
+            boms: { MATCH: cmp.boms.MATCH, MISMATCH: cmp.boms.MISMATCH, MISSING: cmp.boms.MISSING, EXTRA: cmp.boms.EXTRA },
+            bomItems: { MATCH: cmp.bomItems.MATCH, MISMATCH: cmp.bomItems.MISMATCH, MISSING: cmp.bomItems.MISSING, EXTRA: cmp.bomItems.EXTRA },
+            partners: { MATCH: cmp.partners.MATCH, MISMATCH: cmp.partners.MISMATCH, MISSING: cmp.partners.MISSING, EXTRA: cmp.partners.EXTRA },
+            itemSuppliers: { MATCH: cmp.itemSuppliers.MATCH, MISMATCH: cmp.itemSuppliers.MISMATCH, MISSING: cmp.itemSuppliers.MISSING, EXTRA: cmp.itemSuppliers.EXTRA },
+            totals: { mismatchTotal, missingTotal, extraTotal },
+          },
+          itemIntegrity: items,
+          bomIntegrity: boms,
+          rawUsage: { ...raws, unusedCodes: raws.unusedCodes.length },
+          coverage: { ...coverage, blocked: coverage.blocked.length, invalidParents: coverage.invalidParents.length, dependency: coverage.dependency.map((d) => ({ blockedBoms: d.blockedBoms, affectedFinished: d.affectedFinished, unlockedIfOnlyThisApproved: d.unlockedIfOnlyThisApproved })) },
+          partnerIntegrity: partners,
+          itemSupplierIntegrity: itemSuppliers,
+          audit: { rows: auditRows.length, actor: auditRows[0]?.actorLabel ?? null, matchesDatasetAndDb: auditMatches },
+          emptyState,
+          mrp: { materials: mrp.materials, expectedMaterials: mrp.expectedMaterials, mismatches: mrp.requirementMismatches, demandLines: mrp.kpi.demandLineCount, requirementLines: mrp.kpi.requirementLineCount, productsWithBom: mrp.productsWithDefaultBom, excludedLines: mrp.excludedLines, write: mrp.write },
+          reviewPack: { dir: out, files: Object.keys(pack).concat(["summary.json"]) },
+        },
+        null,
+        2
+      )
+    )
+  } finally {
+    await prisma.$disconnect()
+  }
+}
+
 async function main() {
   const cmd = process.argv[2]
   if (cmd === "analyze") return analyze()
@@ -594,7 +813,8 @@ async function main() {
   if (cmd === "verify-mrp") return verifyMrp()
   if (cmd === "import-production") return importProduction()
   if (cmd === "verify-production") return verifyProduction()
-  throw new Error("사용법: analyze | export-existing | preview | seed | verify-mrp | import-production | verify-production")
+  if (cmd === "audit-production") return auditProduction()
+  throw new Error("사용법: analyze | export-existing | preview | seed | verify-mrp | import-production | verify-production | audit-production")
 }
 
 main().catch((e) => {

@@ -257,3 +257,28 @@ npm run master:preview -- --dataset <dataset.json> --existing <existing.json>   
 | 사후 | `master:verify-production`(SELECT 전용): 건수/필드 일치/무결성/업무 테이블 증가 0/2차 dry-run/감사/읽기 전용 MRP |
 
 덮어쓰기/갱신/삭제/재생성 경로는 없다(CREATE-only). 스키마 변경 없음.
+
+---
+
+## 15. Phase 7C — 운영 Master 최종 감사 (읽기 전용, 2026-10-14)
+
+`npm run master:audit-production -- --dataset … --tenant … --expected-tenant … --expected-hash … --expected-counts … --xlsx <원본>`(SELECT 전용, 쓰기 0).
+보완 템플릿은 `.master-migration-out/final-review/`(gitignore)에 생성된다. 이 문서에는 건수만 기록한다.
+
+| 항목 | 결과 |
+|---|---|
+| Dataset ↔ 운영 (Item/BOM/BOMItem/Partner/ItemSupplier) | MATCH 427 / 134 / 909 / 20 / 264, MISMATCH·MISSING·EXTRA 0 |
+| Master baseline hash(업무 값만, 결정적 정렬 sha256) | `f435535b…10b2` (2026-10-14 baseline) |
+| Item | 중복/공백/유형/단위/tenant/비활성 0. FINISHED 163 = placeholder(name=code/EA/spec null) → `MASTER_ENRICHMENT_REQUIRED` |
+| BOM | orphan/tenant/수량/중복/자기참조/순환/default 중복/버전 오류 0, 전부 ACTIVE·default·v1, 최대 깊이 1 |
+| BOM Coverage | **134 / 163 (82.2%)**, 없는 29 = 수량 오류 1 + RAW REVIEW 차단 28 (설명 불가 0) |
+| RAW 사용 분포(BOM 수) | 1:98 · 2~4:73 · 5~9:53 · 10~19:17 · 20+:2 (최대 41) · 가져온 BOM 에서 미사용 21(전부 제외된 BOM 에서만 사용) |
+| RAW REVIEW 5 의존성 | 14 · 11 · 1 · 1 · 1 개 BOM 차단(단독 승인 시 각각 해소) |
+| 거래처 | code 중복/공백/유형/tenant 0, 20곳 전부 사업자번호·연락처·주소 없음 → `MASTER_ENRICHMENT_REQUIRED` |
+| ItemSupplier | 중복/누락/타입/tenant 0, Default·LT·MOQ·배수 전부 미설정 |
+| 업무 테이블 | 재고/수주/발주/생산/WIP/수령검사/MRP 실행 전부 0 |
+| MasterImport 감사 | 1건, dataset hash·건수가 운영 DB 와 일치 |
+| 읽기 전용 MRP(가상 수요 10EA) | 수요 134 · 소요 줄 909 · 자재 243종 · 불일치 0 · 빈 업무 데이터에서 MRP/발주제안 계산은 빈 결과(오류 없음) |
+
+보완 템플릿(로컬): finished-enrichment(163) / raw-review(9) / bom-review(수량 오류 1 + 차단 28줄) / partner-enrichment(20) / item-supplier-enrichment(264).
+모든 `new*`/`confirmed*` 열은 비어 있다(추정 금지). 우선순위: P1 RAW 불일치 5 + 수량 오류 BOM 1 → P2 FINISHED 163 품명/규격/단위 → P3 거래처 20·구매정책 → P4 미참조 RAW 4·수주 전용 제품 3.
