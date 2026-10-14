@@ -45,3 +45,7 @@ prisma/*.db
 prisma/*.db-journal
 
 .vercel
+
+# Phase 7 master-migration 산출물(실제 거래처/품목 값 포함 가능 — 커밋 금지)
+.master-migration-out/
+master-data-out/

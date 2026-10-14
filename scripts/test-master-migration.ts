@@ -1,0 +1,562 @@
+/**
+ * Phase 7A — 기준정보(Master) 이관 파이프라인 테스트 (익명 합성 workbook · DB/실제 Excel 비의존)
+ *
+ * 실행: npm run test:master-migration
+ *
+ *  MD1~MD4   Item 파싱 / 중복 / 선행 0 / 유형 추론
+ *  MD5~MD12  BOM 정상 / 중복 / "." / 0·음수 / 누락 구성품 / 순환 / 자기참조 / 다단계
+ *  MD13~15   고객/공급업체 중복 / BOTH 후보
+ *  MD16~18   CREATE / MATCH / CONFLICT
+ *  MD19~23   운영 정보(재고/수주/발주/WIP/생산) 제외
+ *  MD24~25   seed 멱등 / seed 에 운영 정보 행 0
+ *  + 승인 결정/일괄 정책, 데이터셋 변조 검출, seed 가드, 정적 점검(운영 seed/배포 자동 실행 금지, 개인정보 산출물 gitignore)
+ */
+import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+import { analyzeMaster, partnerFoldKey } from "../src/lib/master-migration/analyze"
+import { applyMasterDataset, loadExistingSnapshot, type MasterApplyDb } from "../src/lib/master-migration/apply"
+import { buildApprovedDataset, validateDatasetShape } from "../src/lib/master-migration/dataset"
+import { extractDaewonWorkbook } from "../src/lib/master-migration/extract"
+import { reconcileCandidates, reconcileDataset, summarize } from "../src/lib/master-migration/reconcile"
+import { summarizeAnalysis, summarizeSeedDataset } from "../src/lib/master-migration/report"
+import { assertDevSeedTarget, isSeedGuardError } from "../src/lib/master-migration/seed-guard"
+import { buildSheetReport } from "../src/lib/master-migration/sheet-report"
+import { inspectCode, parseQty } from "../src/lib/master-migration/text"
+import type { ApprovedMasterDataset, ExistingMasterSnapshot, GridCell, GridLike } from "../src/lib/master-migration/types"
+import { makeFakeDb } from "./helpers/fake-db"
+
+let passed = 0
+function eq<T>(actual: T, expected: T, label: string) {
+  assert.deepStrictEqual(actual, expected, label)
+  passed += 1
+  console.log("PASS " + label)
+}
+function ok(value: unknown, label: string) {
+  assert.ok(value, label)
+  passed += 1
+  console.log("PASS " + label)
+}
+function section(t: string) {
+  console.log("\n── " + t)
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 익명 합성 workbook
+// ═════════════════════════════════════════════════════════════════════════════
+
+class MemGrid implements GridLike {
+  private cells = new Map<number, GridCell>()
+  private fmt = new Map<number, string>()
+  constructor(readonly name: string) {}
+  set(r: number, c: number, v: GridCell, format?: string) {
+    this.cells.set(r * 100000 + c, v)
+    if (format) this.fmt.set(r * 100000 + c, format)
+    return this
+  }
+  get(r: number, c: number): GridCell {
+    return this.cells.get(r * 100000 + c)
+  }
+  format(r: number, c: number) {
+    return this.fmt.get(r * 100000 + c)
+  }
+  get maxRow() {
+    let m = 0
+    this.cells.forEach((_v, k) => (m = Math.max(m, Math.floor(k / 100000))))
+    return m
+  }
+  get maxCol() {
+    let m = 0
+    this.cells.forEach((_v, k) => (m = Math.max(m, k % 100000)))
+    return m
+  }
+  get nonEmptyCount() {
+    return this.cells.size
+  }
+}
+
+type Mat = { code: GridCell; name?: GridCell; spec?: GridCell; supplier?: GridCell; uom?: GridCell }
+type BomSpec = { no: number; product: GridCell; lines: Array<{ code: GridCell; name?: GridCell; spec?: GridCell; qty: GridCell; uom?: GridCell }> }
+
+function workbook(opts: {
+  materials: Mat[]
+  boms: BomSpec[]
+  orders?: Array<{ product: string; customer: string; qty?: number; due?: number }>
+  stock?: Array<{ code: string; name?: string; spec?: string; supplier?: string; qty?: number }>
+  extraSheets?: GridLike[]
+}): GridLike[] {
+  const s = new MemGrid("설정")
+  opts.materials.forEach((m, i) => {
+    const r = 11 + i
+    s.set(r, 2, m.code)
+    if (m.name !== undefined) s.set(r, 3, m.name)
+    if (m.spec !== undefined) s.set(r, 4, m.spec)
+    if (m.supplier !== undefined) s.set(r, 5, m.supplier)
+    if (m.uom !== undefined) s.set(r, 6, m.uom)
+  })
+  const db = new MemGrid("DB")
+  opts.boms.forEach((b, i) => {
+    db.set(i + 1, 1, b.no)
+    db.set(i + 1, 2, b.product)
+    const col = 5 * b.no
+    b.lines.forEach((l, j) => {
+      const r = 11 + j
+      db.set(r, col, l.code)
+      if (l.name !== undefined) db.set(r, col + 1, l.name)
+      if (l.spec !== undefined) db.set(r, col + 2, l.spec)
+      db.set(r, col + 3, l.qty)
+      if (l.uom !== undefined) db.set(r, col + 4, l.uom)
+    })
+  })
+  const o = new MemGrid("수주관리대장")
+  ;(opts.orders ?? []).forEach((x, i) => {
+    const r = 11 + i
+    o.set(r, 2, "ORD-" + i).set(r, 3, x.product).set(r, 4, x.qty ?? 5).set(r, 5, x.due ?? 46174).set(r, 7, x.customer)
+  })
+  const st = new MemGrid("재고관리대장")
+  st.set(2, 8, 45296)
+  ;(opts.stock ?? []).forEach((x, i) => {
+    const r = 11 + i
+    st.set(r, 2, x.code)
+    if (x.name !== undefined) st.set(r, 3, x.name)
+    if (x.spec !== undefined) st.set(r, 4, x.spec)
+    if (x.supplier !== undefined) st.set(r, 5, x.supplier)
+    st.set(r, 7, x.qty ?? 999).set(r, 9, 12345) // 재고 수량(이관 대상 아님)
+  })
+  return [s, db, o, st, ...(opts.extraSheets ?? [])]
+}
+
+const MATS: Mat[] = [
+  { code: "M-001", name: "자재A", spec: "SPEC-A", supplier: "공급가", uom: "EA" },
+  { code: "M-002", name: "자재B", spec: "SPEC-B", supplier: "공급나", uom: "EA" },
+  { code: "M-003", name: "자재C", spec: "SPEC-C", supplier: "공급가", uom: "SET" },
+]
+const BASE_BOMS: BomSpec[] = [
+  { no: 1, product: "P-1", lines: [{ code: "M-001", name: "자재A", spec: "SPEC-A", qty: 2, uom: "EA" }, { code: "M-002", name: "자재B", spec: "SPEC-B", qty: 1, uom: "EA" }] },
+  { no: 2, product: "P-2", lines: [{ code: "M-003", name: "자재C", spec: "SPEC-C", qty: 3, uom: "SET" }, { code: "M-001", name: "자재A", spec: "SPEC-A", qty: 1, uom: "EA" }] },
+]
+const analyze = (sheets: GridLike[]) => {
+  const ex = extractDaewonWorkbook(sheets)
+  return { ex, a: analyzeMaster(ex) }
+}
+const item = (a: ReturnType<typeof analyzeMaster>, code: string) => a.items.find((i) => i.code === code)
+const bom = (a: ReturnType<typeof analyzeMaster>, code: string) => a.boms.find((b) => b.parentCode === code)
+
+async function main() {
+  // ═══ MD1~MD4 Item ═════════════════════════════════════════════════════════
+  section("MD1~MD4 Item")
+  {
+    const { a } = analyze(workbook({ materials: MATS, boms: BASE_BOMS }))
+    eq(a.items.length, 5, "MD1 Item 후보 = 자재 3 + 제품 2")
+    const m = item(a, "M-001")!
+    eq([m.proposed.name, m.proposed.spec, m.proposed.uom, m.proposed.itemType, m.grade], ["자재A", "SPEC-A", "EA", "RAW_MATERIAL", "SAFE"], "MD1 자재 파싱(코드/품명/규격/단위) = SAFE")
+    eq(item(a, "M-003")!.proposed.uom, "SET", "MD1 SET 단위 매핑")
+    const p = item(a, "P-1")!
+    eq([p.proposed.itemType, p.grade, p.issues.map((i) => i.code).sort()], ["FINISHED", "REVIEW", ["NAME_MISSING", "SPEC_MISSING", "UOM_MISSING"]], "MD1 제품은 품명/규격/단위가 Excel 에 없어 REVIEW(자동 추정 안 함)")
+    eq(p.suggestions.name, "P-1", "제품 품명은 '제안'으로만 코드값 제시")
+    ok(p.proposed.name === null && p.proposed.uom === null, "제안은 proposed 에 반영되지 않음")
+
+    // MD2 중복 코드
+    const dup = analyze(workbook({ materials: [...MATS, { code: "M-001", name: "자재A", spec: "SPEC-A", uom: "EA" }], boms: BASE_BOMS }))
+    const d = item(dup.a, "M-001")!
+    ok(d.grade === "REVIEW" && d.issues.some((i) => i.code === "DUPLICATE_CODE"), "MD2 같은 코드 중복 → REVIEW(DUPLICATE_CODE)")
+    eq(dup.a.items.filter((i) => i.code === "M-001").length, 1, "중복 코드를 하나의 후보로 모으되 삭제하지 않고 REVIEW")
+    const dupConflict = analyze(workbook({ materials: [...MATS, { code: "M-002", name: "다른이름", spec: "SPEC-B", uom: "EA" }], boms: BASE_BOMS }))
+    ok(item(dupConflict.a, "M-002")!.issues.some((i) => i.code === "NAME_CONFLICT"), "MD2 같은 코드 다른 품명 → NAME_CONFLICT")
+    // 같은 품명 다른 코드는 서로 다른 Item (코드가 정체성)
+    const sameName = analyze(workbook({ materials: [...MATS, { code: "M-009", name: "자재A", spec: "SPEC-A", uom: "EA" }], boms: BASE_BOMS }))
+    ok(item(sameName.a, "M-009") !== undefined && item(sameName.a, "M-001") !== undefined, "같은 품명 다른 코드는 별개 품목(품명으로 병합 안 함)")
+  }
+  {
+    // MD3 선행 0 / 숫자 셀 / 공백 / 숨은 문자 / 전각 / 대소문자
+    const hidden = "M-​004"
+    const full = "Ｍ-005" // 전각 M
+    const sheets = workbook({
+      materials: [
+        { code: "00123", name: "선행0", spec: "S", uom: "EA" },
+        { code: 456, name: "숫자셀", spec: "S", uom: "EA" },
+        { code: " M-100 ", name: "공백", spec: "S", uom: "EA" },
+        { code: hidden, name: "숨은문자", spec: "S", uom: "EA" },
+        { code: full, name: "전각", spec: "S", uom: "EA" },
+        { code: "ab-1", name: "소문자", spec: "S", uom: "EA" },
+        { code: "AB-1", name: "대문자", spec: "S", uom: "EA" },
+      ],
+      boms: [],
+    })
+    const { a } = analyze(sheets)
+    eq(item(a, "00123")!.code, "00123", "MD3 문자열 선행 0 코드는 원본 그대로")
+    eq(item(a, "00123")!.issues.map((i) => i.code), ["TYPE_UNDETERMINED"], "MD3 선행 0 문자열 코드 자체에는 코드 문제가 없음(미참조 유형 REVIEW 만)")
+    const numeric = item(a, "456")!
+    ok(numeric.issues.some((i) => i.code === "CODE_NUMERIC_CELL") && numeric.grade === "REVIEW", "MD3 숫자 셀 코드 → REVIEW(선행 0/지수 손실 가능)")
+    ok(item(a, " M-100 ")!.issues.some((i) => i.code === "CODE_OUTER_WHITESPACE"), "MD3 앞뒤 공백 → REVIEW (코드는 trim 하지 않고 원본 유지)")
+    ok(item(a, hidden)!.issues.some((i) => i.code === "CODE_HIDDEN_CHAR"), "MD3 숨은 문자 → REVIEW")
+    ok(item(a, full)!.issues.some((i) => i.code === "CODE_FULLWIDTH"), "MD3 전각 문자 → REVIEW")
+    ok(item(a, "ab-1")!.issues.some((i) => i.code === "CODE_NEAR_DUPLICATE") && item(a, "AB-1")!.issues.some((i) => i.code === "CODE_NEAR_DUPLICATE"), "MD3 대소문자만 다른 코드 → 근접 중복(둘 다 보존)")
+    eq(inspectCode(123, "00000").diagnostics, ["NUMERIC_CELL", "LEADING_ZERO_FORMAT"], "숫자 서식(0 채움) 진단")
+    // 품명을 코드로 대체하지 않는다
+    const noCode = analyze(workbook({ materials: [{ code: undefined as unknown as GridCell, name: "코드없음", spec: "S", uom: "EA" }], boms: [] }))
+    ok(noCode.a.items.length === 1 && noCode.a.items[0].grade === "REJECT" && noCode.a.items[0].code === "", "코드 없는 행 → REJECT (품명을 코드로 쓰지 않음)")
+  }
+  {
+    // MD4 유형 추론: FINISHED / SEMI / RAW / 미참조 REVIEW
+    const sheets = workbook({
+      materials: [...MATS, { code: "M-UNUSED", name: "미사용", spec: "S", uom: "EA" }],
+      boms: [
+        { no: 1, product: "P-1", lines: [{ code: "P-2", qty: 1 }, { code: "M-001", qty: 2 }] },
+        { no: 2, product: "P-2", lines: [{ code: "M-002", qty: 1 }] },
+      ],
+    })
+    const { a } = analyze(sheets)
+    eq(item(a, "P-1")!.proposed.itemType, "FINISHED", "MD4 최상위 제품 → FINISHED")
+    eq(item(a, "P-2")!.proposed.itemType, "SEMI_FINISHED", "MD4 상위이면서 다른 BOM 의 구성품 → SEMI_FINISHED")
+    eq(item(a, "M-001")!.proposed.itemType, "RAW_MATERIAL", "MD4 구성품으로만 → RAW_MATERIAL")
+    const un = item(a, "M-UNUSED")!
+    ok(un.proposed.itemType === null && un.grade === "REVIEW" && un.issues.some((i) => i.code === "TYPE_UNDETERMINED"), "MD4 어떤 BOM 에도 안 쓰이는 자재 → 유형 확정 불가 REVIEW")
+    eq(un.suggestions.itemType, "RAW_MATERIAL", "제안만 제시(자동 확정 안 함)")
+  }
+
+  // ═══ MD5~MD12 BOM ═════════════════════════════════════════════════════════
+  section("MD5~MD12 BOM")
+  {
+    const { a } = analyze(workbook({ materials: MATS, boms: BASE_BOMS }))
+    const b = bom(a, "P-1")!
+    eq([b.grade, b.lines.length, b.lines.map((l) => l.qtyPer), b.depth], ["SAFE", 2, [2, 1], 2], "MD5 정상 BOM: 줄/수량/깊이, SAFE")
+    eq(b.lines.map((l) => l.seq), [1, 2], "줄 순서(seq) 보존")
+    eq(a.maxBomDepth, 2, "최대 깊이 보고")
+  }
+  {
+    // MD6 중복 구성품 — 원본 삭제 금지, 합계 후보만
+    const { a } = analyze(
+      workbook({ materials: MATS, boms: [{ no: 1, product: "P-1", lines: [{ code: "M-001", qty: 2 }, { code: "M-002", qty: 1 }, { code: "M-001", qty: 3 }] }] })
+    )
+    const b = bom(a, "P-1")!
+    eq(b.lines.length, 3, "MD6 중복 구성품 줄을 삭제/병합하지 않음")
+    eq(a.duplicateComponents, [{ parentCode: "P-1", componentCode: "M-001", lineCount: 2, qtys: [2, 3], sumQty: 5, rows: [11, 13] }], "MD6 중복 보고(줄별 수량 + 합계 후보 5)")
+    ok(b.grade === "REVIEW" && b.lines[0].issues.some((i) => i.code === "DUPLICATE_COMPONENT"), "MD6 중복 → REVIEW(합산은 승인 필요)")
+    const ds = buildApprovedDataset(a, { workbookSha256: "x", decisions: { items: { "P-1": { accept: true, name: "제품1", uom: "EA" } } } })
+    eq(ds.boms.length, 0, "REVIEW BOM 은 승인 전 데이터셋에 없음")
+    const ds2 = buildApprovedDataset(a, { workbookSha256: "x", decisions: { items: { "P-1": { accept: true, name: "제품1", uom: "EA" } }, boms: { "P-1": { accept: true } } } })
+    eq(ds2.boms[0].lines.map((l) => l.qtyPer), [2, 1, 3], "승인 후에도 줄은 원본 그대로(자동 합산 없음)")
+  }
+  {
+    // MD7 "." / MD8 0·음수·빈칸·문자
+    const mk = (qty: GridCell) => analyze(workbook({ materials: MATS, boms: [{ no: 1, product: "P-1", lines: [{ code: "M-001", qty }, { code: "M-002", qty: 1 }] }] })).a
+    const dot = mk(".")
+    const l = bom(dot, "P-1")!.lines[0]
+    ok(l.grade === "REJECT" && l.qtyPer === null && l.issues[0].code === "INVALID_QTY", 'MD7 "." → REJECT, 수량 null(1 로 바꾸지 않음)')
+    eq(bom(dot, "P-1")!.grade, "REJECT", "MD7 REJECT 줄이 있으면 BOM 전체 REJECT(부분 BOM 방지)")
+    for (const [label, v] of [["0", 0], ["음수", -1], ["빈칸", undefined], ["문자", "abc"], ["숫자 문자열", "5"]] as Array<[string, GridCell]>) {
+      const r = mk(v)
+      ok(bom(r, "P-1")!.lines[0].grade === "REJECT", `MD8 수량 ${label} → REJECT`)
+    }
+    eq(parseQty(1.5), 1.5, "소수 수량 허용")
+    eq([parseQty(Number.NaN), parseQty(Number.POSITIVE_INFINITY)], [null, null], "NaN/Infinity → null")
+  }
+  {
+    // MD9 구성품 Item 없음 / MD10 순환 / MD11 자기참조 / MD12 다단계
+    const missing = analyze(workbook({ materials: MATS, boms: [{ no: 1, product: "P-1", lines: [{ code: "M-001", qty: 1 }, { code: "GHOST", qty: 1 }] }] })).a
+    ok(bom(missing, "P-1")!.lines[1].issues.some((i) => i.code === "COMPONENT_NOT_FOUND") && bom(missing, "P-1")!.grade === "REJECT", "MD9 구성품 Item 없음 → REJECT")
+    ok(item(missing, "GHOST") === undefined, "MD9 누락 구성품 Item 을 임의 생성하지 않음")
+
+    const cyc = analyze(
+      workbook({
+        materials: MATS,
+        boms: [
+          { no: 1, product: "A", lines: [{ code: "B", qty: 1 }, { code: "M-001", qty: 1 }] },
+          { no: 2, product: "B", lines: [{ code: "C", qty: 1 }] },
+          { no: 3, product: "C", lines: [{ code: "A", qty: 1 }] },
+          { no: 4, product: "OK", lines: [{ code: "M-002", qty: 1 }] },
+        ],
+      })
+    ).a
+    eq(cyc.cycles.map((c) => c.slice().sort()), [["A", "B", "C"]], "MD10 A→B→C→A 순환 검출")
+    ok(["A", "B", "C"].every((p) => bom(cyc, p)!.grade === "REJECT") && bom(cyc, "OK")!.grade === "SAFE", "MD10 순환 BOM 은 REJECT, 무관한 BOM 은 영향 없음")
+    eq(bom(cyc, "A")!.depth, null, "순환 BOM 깊이 = null")
+
+    const self = analyze(workbook({ materials: MATS, boms: [{ no: 1, product: "P-1", lines: [{ code: "P-1", qty: 1 }, { code: "M-001", qty: 1 }] }] })).a
+    ok(bom(self, "P-1")!.lines[0].issues.some((i) => i.code === "SELF_REFERENCE") && bom(self, "P-1")!.grade === "REJECT", "MD11 자기 자신 BOM → REJECT")
+
+    const multi = analyze(
+      workbook({
+        materials: MATS,
+        boms: [
+          { no: 1, product: "TOP", lines: [{ code: "SEMI1", qty: 2 }] },
+          { no: 2, product: "SEMI1", lines: [{ code: "SEMI2", qty: 3 }, { code: "M-001", qty: 1 }] },
+          { no: 3, product: "SEMI2", lines: [{ code: "M-002", qty: 4 }] },
+        ],
+      })
+    ).a
+    eq([bom(multi, "TOP")!.depth, bom(multi, "SEMI1")!.depth, bom(multi, "SEMI2")!.depth, multi.maxBomDepth], [4, 3, 2, 4], "MD12 다단계 깊이(TOP→SEMI1→SEMI2→RAW)")
+    eq([item(multi, "TOP")!.proposed.itemType, item(multi, "SEMI1")!.proposed.itemType, item(multi, "SEMI2")!.proposed.itemType], ["FINISHED", "SEMI_FINISHED", "SEMI_FINISHED"], "MD12 다단계 유형")
+  }
+  {
+    // BOM 없는 제품 / 수주에만 있는 제품
+    const { a } = analyze(
+      workbook({ materials: MATS, boms: [{ no: 1, product: "P-1", lines: [] }, { no: 2, product: "P-2", lines: [{ code: "M-001", qty: 1 }] }], orders: [{ product: "P-ORDER-ONLY", customer: "고객가" }] })
+    )
+    ok(a.finishedWithoutBom.includes("P-1") && a.finishedWithoutBom.includes("P-ORDER-ONLY"), "BOM 없는 제품 목록(자동 BOM 생성 없음)")
+    ok(item(a, "P-ORDER-ONLY")!.grade === "REVIEW" && item(a, "P-ORDER-ONLY")!.issues.some((i) => i.code === "ORDER_ONLY_PRODUCT"), "수주에만 나타나는 제품 → REVIEW(운영 정보에서 유래)")
+    eq(bom(a, "P-1"), undefined, "BOM 줄이 없는 제품은 BOM 후보를 만들지 않음")
+  }
+
+  // ═══ MD13~15 거래처 ═══════════════════════════════════════════════════════
+  section("MD13~MD15 Customer / Supplier / BOTH")
+  {
+    const { a, ex } = analyze(
+      workbook({
+        materials: [
+          { code: "M-001", name: "자재A", spec: "S", supplier: "(주)가나", uom: "EA" },
+          { code: "M-002", name: "자재B", spec: "S", supplier: "가나", uom: "EA" },
+          { code: "M-003", name: "자재C", spec: "S", supplier: "다라", uom: "EA" },
+        ],
+        boms: BASE_BOMS,
+        orders: [
+          { product: "P-1", customer: "고객가" },
+          { product: "P-1", customer: "고객가" },
+          { product: "P-2", customer: "고객나" },
+          { product: "P-2", customer: "다라" }, // 공급업체와 같은 이름
+        ],
+      })
+    )
+    const cust = a.partners.find((p) => p.name === "고객가")!
+    eq([cust.partnerType, cust.occurrences, cust.code, cust.grade], ["CUSTOMER", 2, null, "REVIEW"], "MD13 같은 고객명은 하나로 집계(2회), 코드는 만들지 않음")
+    ok(cust.issues.some((i) => i.code === "PARTNER_CODE_MISSING") && cust.issues.some((i) => i.code === "PARTNER_STATUS_UNKNOWN"), "코드 없음 + 현재 거래 여부 불명 → REVIEW")
+    eq(a.partnerNearDuplicates.map((g) => g.names), [["(주)가나", "가나"]], "MD14 법인 표기만 다른 공급업체 근접 중복 보고(자동 병합 안 함)")
+    ok(a.partners.find((p) => p.name === "(주)가나") !== undefined && a.partners.find((p) => p.name === "가나") !== undefined, "근접 중복도 별개 후보로 보존")
+    const both = a.partners.find((p) => p.name === "다라")!
+    eq([both.partnerType, both.roles], ["BOTH", { customer: 1, supplier: 1 }], "MD15 같은 이름이 고객/공급업체 → BOTH 후보")
+    ok(both.issues.some((i) => i.code === "PARTNER_BOTH_BY_NAME"), "MD15 BOTH 는 이름만 같음 → REVIEW")
+    eq(partnerFoldKey("(주) 가나"), partnerFoldKey("가나"), "법인 표기/공백 정규화 키")
+    // ItemSupplier: Default 지정/LT/MOQ 추정 없음
+    ok(a.itemSuppliers.every((s) => s.isDefault === false && s.grade === "REVIEW"), "ItemSupplier 는 isDefault=false, 거래처 확인 전 REVIEW")
+    eq(ex.materials.length, 3, "추출 자재 3")
+  }
+
+  // ═══ MD16~18 CREATE / MATCH / CONFLICT ═════════════════════════════════════
+  section("MD16~MD18 CREATE / MATCH / CONFLICT")
+  {
+    const { a } = analyze(workbook({ materials: MATS, boms: BASE_BOMS }))
+    const decisions = { bulk: { finishedUseCodeAsName: true, finishedDefaultUom: "EA" as const, allowMissingSpec: true } }
+    const ds = buildApprovedDataset(a, { workbookSha256: "h", decisions })
+    eq([ds.items.length, ds.boms.length], [5, 2], "일괄 정책 승인 후 Item 5 / BOM 2")
+    const emptyEx: ExistingMasterSnapshot = { items: [], boms: [], partners: [], itemSuppliers: [] }
+    eq(summarize(reconcileDataset(ds, emptyEx)).ITEM, { CREATE: 5, MATCH: 0, CONFLICT: 0, REJECT: 0 }, "MD16 빈 MES → 모두 CREATE")
+    const full: ExistingMasterSnapshot = {
+      items: ds.items.map((i) => ({ code: i.code, name: i.name, spec: i.spec, uom: i.uom, itemType: i.itemType })),
+      boms: ds.boms.map((b) => ({ itemCode: b.parentCode, version: "9", lines: b.lines.map((l) => ({ componentCode: l.componentCode, qtyPer: l.qtyPer })) })),
+      partners: [],
+      itemSuppliers: [],
+    }
+    eq(summarize(reconcileDataset(ds, full)), { ITEM: { CREATE: 0, MATCH: 5, CONFLICT: 0, REJECT: 0 }, BOM: { CREATE: 0, MATCH: 2, CONFLICT: 0, REJECT: 0 }, PARTNER: { CREATE: 0, MATCH: 0, CONFLICT: 0, REJECT: 0 }, ITEM_SUPPLIER: { CREATE: 0, MATCH: 0, CONFLICT: 0, REJECT: 0 } }, "MD17 동일 내용 → MATCH(BOM 버전이 달라도 줄이 같으면 MATCH)")
+    const changed: ExistingMasterSnapshot = JSON.parse(JSON.stringify(full))
+    changed.items[0].name = "다른 이름"
+    changed.boms[0].lines[0].qtyPer = 99
+    const r = reconcileDataset(ds, changed)
+    const s = summarize(r)
+    eq([s.ITEM.CONFLICT, s.BOM.CONFLICT], [1, 1], "MD18 같은 코드/다른 내용 → CONFLICT")
+    eq(r.find((e) => e.class === "CONFLICT" && e.kind === "ITEM")!.diff, ["name"], "충돌 필드 보고")
+    // 후보 대조: REJECT 는 REJECT
+    const bad = analyze(workbook({ materials: MATS, boms: [{ no: 1, product: "P-1", lines: [{ code: "M-001", qty: "." }] }] })).a
+    const cands = summarize(reconcileCandidates(bad, emptyEx))
+    eq(cands.BOM, { CREATE: 0, MATCH: 0, CONFLICT: 0, REJECT: 1 }, "후보 대조: 검증 REJECT 는 REJECT")
+  }
+
+  // ═══ MD19~23 운영 정보 제외 ═════════════════════════════════════════════════
+  section("MD19~MD23 운영 정보(재고/수주/발주/입출고/생산/WIP) 제외")
+  {
+    const extra = new MemGrid("입고관리대장")
+    extra.set(11, 2, "M-001").set(11, 7, 46000).set(11, 8, 777) // 입고 이력
+    const ship = new MemGrid("출고관리대장")
+    ship.set(11, 2, "M-001").set(11, 8, 555)
+    const sheets = workbook({
+      materials: MATS,
+      boms: BASE_BOMS,
+      orders: [{ product: "P-1", customer: "고객가", qty: 31337, due: 46100 }],
+      stock: [{ code: "M-001", name: "자재A", spec: "SPEC-A", supplier: "공급가", qty: 424242 }],
+      extraSheets: [extra, ship],
+    })
+    const { ex, a } = analyze(sheets)
+    const ds = buildApprovedDataset(a, { workbookSha256: "h", decisions: { bulk: { finishedUseCodeAsName: true, finishedDefaultUom: "EA", allowMissingSpec: true, partnerCodeRule: { customerPrefix: "C", supplierPrefix: "S", width: 3 }, acceptItemSuppliersOfAcceptedPartners: true } } })
+    const text = JSON.stringify({ ds, a, ex: { orderRefs: ex.orderRefs, stock: ex.stockSheetMaterials } })
+    ok(!text.includes("424242") && !text.includes("12345"), "MD19 재고 수량(재고관리대장)은 추출/분석/데이터셋 어디에도 없음")
+    ok(!text.includes("31337") && !text.includes("46100"), "MD20 수주 수량/납기는 추출/분석/데이터셋 어디에도 없음")
+    ok(!text.includes("777") && !text.includes("555"), "MD21 입고/출고 이력 값은 어디에도 없음")
+    const dsKeys = Object.keys(ds).sort()
+    eq(dsKeys, ["bomVersion", "boms", "datasetHash", "excluded", "itemSuppliers", "items", "kind", "partners", "schemaVersion", "source"], "MD22 데이터셋에는 운영 정보를 담을 키가 없음(inventory/salesOrder/purchaseOrder/wip/production 없음)")
+    const tampered = { ...ds, inventory: [{ itemCode: "M-001", qty: 5 }] }
+    const t = validateDatasetShape(tampered)
+    ok(!t.ok, "MD23 운영 정보 키가 들어간 데이터셋은 거부")
+    const bad = validateDatasetShape({ ...ds, items: ds.items.map((i, k) => (k === 0 ? { ...i, name: "변조" } : i)) })
+    ok(!bad.ok && /datasetHash/.test((bad as { reason: string }).reason), "데이터셋 내용 변조 → 해시 불일치로 거부")
+    ok(validateDatasetShape(ds).ok, "정상 데이터셋 통과")
+    // 식별자만 읽음
+    eq(Object.keys(ex.orderRefs.products[0]).sort(), ["code", "count", "firstRow"], "수주 시트에서는 식별자(제품코드/고객명)와 건수만 읽음")
+    // 시트 분류: 운영 시트는 Import 후보 아님
+    const report = buildSheetReport(sheets)
+    const cls = (n: string) => report.find((r) => r.sheet === n)!
+    eq([cls("수주관리대장").class, cls("입고관리대장").class, cls("출고관리대장").class, cls("재고관리대장").class], ["TRANSACTION", "TRANSACTION", "CALCULATION", "CURRENT_STATE"], "시트 분류: 수주/입고=TRANSACTION, 출고=CALCULATION, 재고=CURRENT_STATE")
+    ok(report.filter((r) => r.prodImportCandidate).map((r) => r.sheet).sort().join() === "DB,설정", "Production Import 후보 시트는 설정/DB(Master)뿐")
+    ok(cls("재고관리대장").dateRange?.max === "2024-01-05", "날짜 범위는 자료 최신성 보고용(재고관리대장 작성일자)")
+  }
+
+  // ═══ MD24~25 seed 멱등 / 운영 정보 0 ═════════════════════════════════════════
+  section("MD24~MD25 seed 멱등성 / 운영 정보 행 0")
+  {
+    const { a } = analyze(
+      workbook({
+        materials: MATS,
+        boms: BASE_BOMS,
+        orders: [{ product: "P-1", customer: "고객가" }],
+      })
+    )
+    const ds = buildApprovedDataset(a, {
+      workbookSha256: "h",
+      decisions: {
+        bulk: { finishedUseCodeAsName: true, finishedDefaultUom: "EA", allowMissingSpec: true, partnerCodeRule: { customerPrefix: "C", supplierPrefix: "S", width: 3 }, acceptItemSuppliersOfAcceptedPartners: true },
+      },
+    })
+    const seedDb = () =>
+      makeFakeDb(
+        { item: [], bOM: [], bOMItem: [], businessPartner: [], itemSupplier: [] },
+        { uniques: { item: [["tenantId", "code"]], businessPartner: [["tenantId", "code"]], bOM: [["tenantId", "itemId", "version"]], itemSupplier: [["tenantId", "itemId", "supplierId"]] } }
+      )
+    const f = seedDb()
+    const dry = await applyMasterDataset(f.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: true })
+    eq([f.countWrites(), dry.summary.ITEM.CREATE, dry.created.items], [0, 5, 0], "dry-run: 쓰기 0건, CREATE 5 보고")
+    const first = await applyMasterDataset(f.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false })
+    eq(first.created, { items: 5, boms: 2, bomLines: 4, partners: 3, itemSuppliers: 3 }, "seed 1회: Item 5 / BOM 2(줄 4) / 거래처 3 / ItemSupplier 3")
+    const rowsAfter = f.tables.item.length + f.tables.bOM.length + f.tables.bOMItem.length + f.tables.businessPartner.length + f.tables.itemSupplier.length
+    const second = await applyMasterDataset(f.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false })
+    eq(second.created, { items: 0, boms: 0, bomLines: 0, partners: 0, itemSuppliers: 0 }, "MD24 두 번째 실행: 아무것도 만들지 않음(멱등)")
+    eq(f.tables.item.length + f.tables.bOM.length + f.tables.bOMItem.length + f.tables.businessPartner.length + f.tables.itemSupplier.length, rowsAfter, "MD24 행 수 불변")
+    eq(second.summary.ITEM, { CREATE: 0, MATCH: 5, CONFLICT: 0, REJECT: 0 }, "MD24 두 번째는 전부 MATCH")
+
+    // 기본값 확인: isDefault=false, LT/MOQ/배수 미설정, BOM ACTIVE/default
+    const is0 = f.tables.itemSupplier[0]
+    eq([is0.isDefault, is0.leadTimeDays, is0.moq, is0.orderMultiple], [false, undefined, undefined, undefined], "ItemSupplier: Default/LT/MOQ/배수를 추정해 넣지 않음")
+    eq(f.tables.bOM.every((b) => b.status === "ACTIVE" && b.isDefault === true && b.version === "1"), true, "BOM: version 1 / ACTIVE / default")
+
+    // MD25 운영 정보 모델 접근 0 / 행 0
+    const touched = new Set(f.writes.map((w) => w.model))
+    eq(Array.from(touched).sort(), ["bOM", "bOMItem", "businessPartner", "item", "itemSupplier"], "MD25 쓰기 대상은 Master 5개 모델뿐")
+    for (const m of ["inventoryBalance", "inventoryTransaction", "salesOrder", "purchaseOrder", "workOrder", "wipUnit", "lot", "shipment"]) {
+      let rows = 0
+      try {
+        rows = ((f.db as Record<string, { __n?: never }>)[m], (f.tables[m] ?? []).length)
+      } catch {
+        rows = 0
+      }
+      assert.equal(rows, 0, m + " 행 0")
+      passed += 1
+    }
+    console.log("PASS MD25 재고/수주/발주/작업지시/WIP/LOT/출하 테이블 행 0 (쓰기 대상 아님)")
+    eq(summarizeSeedDataset(ds).transaction, { inventory: 0, salesOrder: 0, purchaseOrder: 0, receipt: 0, shipment: 0, productionResult: 0, wip: 0 }, "seed 요약: 운영 정보 0")
+
+    // 충돌: 같은 코드/다른 내용 → ABORT(쓰기 0), SKIP 은 충돌만 제외
+    const g = seedDb()
+    g.tables.item.push({ id: "x1", tenantId: "t1", code: "M-001", name: "기존과 다른 이름", spec: "SPEC-A", uom: "EA", itemType: "RAW_MATERIAL", status: "ACTIVE" })
+    const abort = await applyMasterDataset(g.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false })
+    ok(abort.aborted && abort.conflicts.length === 1 && g.countWrites() === 0, "충돌 시 기본 ABORT: 쓰기 0건, 충돌 보고")
+    eq(g.tables.item[0].name, "기존과 다른 이름", "기존 데이터를 overwrite 하지 않음")
+    const skip = await applyMasterDataset(g.db as unknown as MasterApplyDb, { tenantId: "t1", dataset: ds, dryRun: false, onConflict: "SKIP" })
+    ok(!skip.aborted && skip.created.items === 4 && g.tables.item.find((i) => i.code === "M-001")!.name === "기존과 다른 이름", "SKIP: 충돌 항목만 건너뛰고 나머지 생성, 충돌 항목은 그대로")
+
+    // 다른 tenant 의 데이터는 보이지 않는다
+    const h = seedDb()
+    h.tables.item.push({ id: "o1", tenantId: "other", code: "M-001", name: "다른 tenant", spec: null, uom: "EA", itemType: "RAW_MATERIAL", status: "ACTIVE" })
+    const snap = await loadExistingSnapshot(h.db as never, "t1")
+    eq(snap.items.length, 0, "다른 tenant 의 Master 는 대조 대상이 아님")
+  }
+
+  // ═══ 승인 결정 / 일괄 정책 ════════════════════════════════════════════════════
+  section("승인 결정 / 일괄 정책")
+  {
+    const { a } = analyze(workbook({ materials: [...MATS, { code: "M-X", name: "임시", spec: "S", uom: "ea" }], boms: BASE_BOMS }))
+    const strict = buildApprovedDataset(a, { workbookSha256: "h" })
+    eq(strict.items.map((i) => i.code).sort(), ["M-001", "M-002", "M-003"], "승인 없음: SAFE 자재만(제품/REVIEW 제외)")
+    eq(strict.boms.length, 0, "상위 제품이 승인되지 않으면 BOM 제외(종속)")
+    ok(item(a, "M-X")!.issues.some((i) => i.code === "UOM_NOT_EXACT") && item(a, "M-X")!.suggestions.uom === "EA", "'ea' 단위는 자동 보정하지 않고 제안만")
+    // 개별 승인(accept=false 는 제외)
+    const off = buildApprovedDataset(a, { workbookSha256: "h", decisions: { items: { "M-X": { accept: false, uom: "EA" } } } })
+    ok(!off.items.some((i) => i.code === "M-X"), "accept=false 는 포함하지 않음")
+    const on = buildApprovedDataset(a, { workbookSha256: "h", decisions: { items: { "M-X": { accept: true, uom: "EA", itemType: "RAW_MATERIAL" } } } })
+    ok(on.items.some((i) => i.code === "M-X" && i.uom === "EA" && i.itemType === "RAW_MATERIAL"), "명시 승인 + 단위/유형 지정 시 포함")
+    const incomplete = buildApprovedDataset(a, { workbookSha256: "h", decisions: { items: { "M-X": { accept: true, uom: "EA" } } } })
+    ok(!incomplete.items.some((i) => i.code === "M-X"), "승인했어도 유형이 확정되지 않으면 포함하지 않음")
+    const invalid = buildApprovedDataset(a, { workbookSha256: "h", decisions: { items: { "M-X": { accept: true, uom: "BAD" as never } } } })
+    ok(!invalid.items.some((i) => i.code === "M-X"), "승인 값이 enum 에 없으면 포함하지 않음(재검증)")
+    // 거래처 코드는 사람이 정한다
+    const p = analyze(workbook({ materials: MATS, boms: BASE_BOMS })).a
+    const noCode = buildApprovedDataset(p, { workbookSha256: "h", decisions: { bulk: { acceptItemSuppliersOfAcceptedPartners: true } } })
+    eq([noCode.partners.length, noCode.itemSuppliers.length], [0, 0], "거래처 코드 승인이 없으면 거래처/ItemSupplier 없음(코드 임의 생성 금지)")
+    const dupCode = buildApprovedDataset(p, {
+      workbookSha256: "h",
+      decisions: { partners: { "SUPPLIER|공급가": { accept: true, code: "V1" }, "SUPPLIER|공급나": { accept: true, code: "V1" } } },
+    })
+    eq(dupCode.partners.length, 1, "거래처 코드 중복 승인은 두 번째를 제외")
+    // 해시 결정성
+    const d1 = buildApprovedDataset(p, { workbookSha256: "h" })
+    const d2 = buildApprovedDataset(p, { workbookSha256: "h" })
+    eq(d1.datasetHash, d2.datasetHash, "같은 입력 → 같은 datasetHash")
+    ok(/^[0-9a-f]{64}$/.test(d1.datasetHash), "datasetHash = sha256")
+  }
+
+  // ═══ 요약 / provenance ══════════════════════════════════════════════════════
+  section("요약 / provenance")
+  {
+    const { a, ex } = analyze(workbook({ materials: MATS, boms: BASE_BOMS, orders: [{ product: "P-1", customer: "고객가" }, { product: "P-X", customer: "고객가" }] }))
+    const s = summarizeAnalysis(a, ex)
+    eq([s.items.candidates, s.bom.parents, s.bom.lines, s.partners.customers, s.partners.suppliers], [6, 2, 4, 1, 2], "요약: Item 6(자재3+제품2+수주전용1) / BOM 2·4줄 / 고객 1 / 공급업체 2")
+    eq(s.items.orderOnly, 1, "수주 전용 제품 1")
+    const json = JSON.stringify(s)
+    ok(!/고객가|공급가|자재A|SPEC-A/.test(json), "요약에는 실제 값(거래처명/품명/규격)이 들어가지 않음")
+    eq(item(a, "M-001")!.sources[0], { sheet: "설정", row: 11, col: 2 }, "provenance: 원본 시트/행 보존")
+    eq(bom(a, "P-1")!.lines[0].src, { sheet: "DB", row: 11, col: 5 }, "provenance: BOM 줄의 시트/행/열")
+    eq(item(a, "P-X")!.sources, [{ sheet: "수주관리대장", row: 12 }], "수주 전용 후보도 위치 보존")
+  }
+
+  // ═══ seed 가드 ═══════════════════════════════════════════════════════════════
+  section("seed 가드 / 정적 점검")
+  {
+    const prodLike = { DATABASE_URL: "postgresql://u:p@aws-0-x.pooler.example.com:6543/postgres", DIRECT_URL: "postgresql://u:p@aws-0-x.pooler.example.com:5432/postgres" }
+    const guard = (env: Record<string, string>) => {
+      try {
+        assertDevSeedTarget(env)
+        return "OK"
+      } catch (e) {
+        return isSeedGuardError(e) ? e.message : "OTHER"
+      }
+    }
+    ok(/MASTER_SEED_CONFIRM/.test(guard({ ...prodLike })), "확인 플래그 없으면 거부")
+    ok(/MASTER_SEED_DATABASE_URL/.test(guard({ ...prodLike, MASTER_SEED_CONFIRM: "DEV_ONLY" })), "대상 DB URL 이 별도 변수로 오지 않으면 거부")
+    ok(/호스트가 DATABASE_URL 와 같습니다/.test(guard({ ...prodLike, MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://x:y@aws-0-x.pooler.example.com:6543/postgres" })), "운영(기본) DB 와 같은 호스트면 거부")
+    eq(guard({ ...prodLike, MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://postgres:pw@localhost:5432/dev" }), "OK", "별도 개발 DB 는 허용")
+    ok(/Vercel/.test(guard({ VERCEL: "1", MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://postgres:pw@localhost:5432/dev" })), "Vercel 에서는 거부")
+    ok(/NODE_ENV=production/.test(guard({ NODE_ENV: "production", MASTER_SEED_CONFIRM: "DEV_ONLY", MASTER_SEED_DATABASE_URL: "postgresql://postgres:pw@localhost:5432/dev" })), "NODE_ENV=production 에서는 거부")
+
+    const root = join(__dirname, "..")
+    const read = (...p: string[]) => readFileSync(join(root, ...p), "utf8")
+    const pkg = JSON.parse(read("package.json")) as { scripts: Record<string, string>; prisma?: { seed?: string } }
+    ok(!/master-migration/.test(pkg.scripts.build ?? "") && !/master-migration/.test(pkg.scripts.postinstall ?? ""), "build/postinstall 에서 Master 도구를 실행하지 않음")
+    ok(!/seed|migrate|db push/.test(read("vercel.json")), "vercel.json 에 seed/migrate/db push 없음")
+    ok(!/seed-daewon-master|master-migration/.test(pkg.prisma?.seed ?? ""), "prisma db seed 에 Master 도구가 연결되어 있지 않음")
+    const gi = read(".gitignore")
+    ok(/\.master-migration-out\//.test(gi), "개인정보가 담길 수 있는 산출물 폴더는 gitignore")
+    // 라이브러리: Prisma 런타임/@ 별칭/MRP 엔진 비의존
+    const files = ["analyze", "apply", "dataset", "extract", "reconcile", "report", "seed-guard", "sheet-report", "text", "types"]
+    for (const f of files) {
+      const src = read("src", "lib", "master-migration", f + ".ts").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")
+      ok(!/from "@\//.test(src) && !/lib\/mrp\/order-mrp-engine/.test(src), `${f}.ts: @ 별칭/MRP 엔진 비의존`)
+      ok(!/from "@prisma\/client"/.test(src.replace(/import type[^\n]*\n/g, "")), `${f}.ts: Prisma 런타임 import 없음(타입만)`)
+    }
+    const cli = read("scripts", "master-migration.ts")
+    ok(!/\.(create|update|delete|upsert|createMany|updateMany|deleteMany)\(/.test(cli.replace(/applyMasterDataset\([^)]*\)/g, "")), "CLI 에 직접 쓰기 호출 없음(apply 경유만)")
+  }
+
+  console.log(`\n✅ master-migration: ${passed} checks passed`)
+}
+
+main().catch((e) => {
+  console.error(e)
+  process.exit(1)
+})
