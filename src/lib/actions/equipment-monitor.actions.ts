@@ -5,6 +5,7 @@ import { getTenantId } from "@/lib/auth"
 import { isMissingDbObjectError, isSchemaCompatibilityError } from "@/lib/db/prisma-error"
 import { Prisma } from "@prisma/client"
 import { monitoringEligibleEquipmentWhere } from "@/lib/actions/equipment-monitoring.utils"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // reportDate는 Agent가 한국 날짜 문자열("YYYY-MM-DD")을 UTC midnight으로 저장한다.
 // Vercel 서버는 UTC이므로 setHours(0,0,0,0)은 UTC 기준이 돼 KST 날짜와 어긋난다.
@@ -235,7 +236,8 @@ async function getNcwatchTodayPartCounts(
   }
 }
 
-export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> {
+// 인증 가드가 없는 내부 로더 — 인증된 getEquipmentMonitorData 와 공개 현황판 폴백(getEquipmentMonitorLive)이 공유한다.
+async function loadEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> {
   const tenantId = await getTenantId()
   const today = getKSTReportDate()
   const todayEnd = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1)
@@ -368,11 +370,20 @@ export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> 
   }
 }
 
+// 인증된 화면(분석/현황 모니터링)용 — EQUIPMENT_MONITOR READ 필요.
+export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> {
+  await requireReadActor("EQUIPMENT_MONITOR")
+  return loadEquipmentMonitorData()
+}
+
 // ─── 경량 조회 (모니터링/키오스크 폴링 전용) ──────────────────────────────────
 // getEquipmentMonitorData와 동일한 EquipmentMonitorRow 형태를 반환하되,
 // include(전체 컬럼) 대신 select로 화면 표시에 필요한 컬럼만 가져와 Supabase egress를
 // 줄인다. 30초 폴링으로 반복 호출되므로 반환 페이로드를 최소화하는 것이 목적이다.
 // (표시 항목은 동일 — recentTags 전체/좌표/파일명/알람/최종 수신시간 모두 유지)
+// PUBLIC BY DESIGN (Phase 10 분류 C): 현황판(/kiosk)·/api/mes/equipment-monitor/light 가 비로그인으로 사용한다.
+// 노출 범위(설비 상태/표시 태그/당일 생산·불량 수량)는 docs/DEPLOYMENT-VERCEL.md §6 에서 결정된 사항이다.
+// 인증을 추가하면 현황판이 동작하지 않으므로 접근 키 도입(DG-024)은 별도 Phase 로 이월한다.
 export async function getEquipmentMonitorLive(): Promise<EquipmentMonitorRow[]> {
   const tenantId = await getTenantId()
   const today = getKSTReportDate()
@@ -458,12 +469,13 @@ export async function getEquipmentMonitorLive(): Promise<EquipmentMonitorRow[]> 
   } catch (error) {
     // 안전망: 스키마 호환성/누락 오류 시 검증된 기존 경로로 위임해 표시 데이터 누락을 방지한다.
     if (isSchemaCompatibilityError(error) || isMissingDbObjectError(error)) {
-      return getEquipmentMonitorData()
+      return loadEquipmentMonitorData()
     }
     throw error
   }
 }
 
+// PUBLIC BY DESIGN (Phase 10 분류 C) — getEquipmentMonitorLive 주석 참고.
 export async function getProductionKPIs() {
   const tenantId = await getTenantId()
   const today = getKSTReportDate()

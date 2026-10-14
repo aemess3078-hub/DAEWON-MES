@@ -15,7 +15,7 @@ import {
   type DefectCorrectiveActionRow,
 } from "./defect-corrective-action.helpers"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
-import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { requireReadActor } from "@/lib/auth/action-guards"
 
 export type { DefectCorrectiveActionRow }
 
@@ -145,7 +145,7 @@ async function getDefectCorrectiveActionRecords(tenantId: string, filter: Defect
 export async function getDefectCorrectiveActionList(
   filter: DefectCorrectiveActionFilter = {}
 ): Promise<DefectCorrectiveActionRow[]> {
-  await assertDaewonFeatureScope()
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
   await requireRole("VIEWER")
   const tenantId = await getTenantId()
   const records = await getDefectCorrectiveActionRecords(tenantId, filter)
@@ -166,7 +166,7 @@ export type DefectCorrectiveActionFilterOptions = {
 }
 
 export async function getDefectCorrectiveActionFilterOptions(): Promise<DefectCorrectiveActionFilterOptions> {
-  await assertDaewonFeatureScope()
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
   await requireRole("VIEWER")
   const tenantId = await getTenantId()
 
@@ -232,7 +232,7 @@ export type CorrectiveActionDefectOption = {
 export async function getCorrectiveActionDefectOptions(
   filter: { from?: string; to?: string } = {}
 ): Promise<CorrectiveActionDefectOption[]> {
-  await assertDaewonFeatureScope()
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
   await requireRole("VIEWER")
   const tenantId = await getTenantId()
   const { fromDate, toDate } = resolveKstDateRangeFilter(30, filter.from, filter.to)
@@ -301,7 +301,6 @@ export type CreateDefectCorrectiveActionInput = {
 export async function createDefectCorrectiveAction(
   data: CreateDefectCorrectiveActionInput
 ): Promise<{ id: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("DEFECT_MANAGEMENT", "CREATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
@@ -362,7 +361,6 @@ export type UpdateDefectCorrectiveActionInput = {
 }
 
 export async function updateDefectCorrectiveAction(id: string, data: UpdateDefectCorrectiveActionInput) {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("DEFECT_MANAGEMENT", "UPDATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
@@ -405,7 +403,6 @@ export async function updateDefectCorrectiveAction(id: string, data: UpdateDefec
 // ─── 상태전이: 조치 진행 (OPEN → IN_PROGRESS) ────────────────────────────────
 
 export async function startDefectCorrectiveAction(id: string): Promise<{ ok: boolean; error?: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("DEFECT_MANAGEMENT", "UPDATE")
   try {
     const actor = await requireRole("OPERATOR")
@@ -451,7 +448,6 @@ export async function completeDefectCorrectiveAction(
   id: string,
   completionNote?: string | null
 ): Promise<{ ok: boolean; error?: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("DEFECT_MANAGEMENT", "UPDATE")
   try {
     const actor = await requireRole("OPERATOR")

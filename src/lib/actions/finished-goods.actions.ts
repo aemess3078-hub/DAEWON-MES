@@ -23,6 +23,7 @@ import {
   withQuantityTransactionRetry,
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog } from "@/lib/audit-log"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -140,6 +141,8 @@ function calculateReceiptQuantity(source: ReceiptQuantitySource) {
 export async function getWorkOrdersForReceipt(
   tenantId: string
 ): Promise<WorkOrderForReceipt[]> {
+  const sessionActor = await requireReadActor(["WORK_RESULT", "QUALITY_INSPECTION"])
+  assertSessionTenant(sessionActor, tenantId)
   const workOrders = await prisma.workOrder.findMany({
     where: { tenantId, status: "COMPLETED" },
     include: {
@@ -234,6 +237,8 @@ export async function getWorkOrdersForReceipt(
 export async function getFinishedGoodsWarehouses(
   tenantId: string
 ): Promise<WarehouseWithLocations[]> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   const warehouses = await prisma.warehouse.findMany({
     where: { tenantId },
     select: { id: true, siteId: true, code: true, name: true },

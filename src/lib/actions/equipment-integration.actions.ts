@@ -11,6 +11,7 @@ import {
 import { revalidatePath } from "next/cache"
 import { requireDeveloper } from "@/lib/auth"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { generateAgentKey, hashAgentKey } from "@/lib/ncwatch/agent-key"
 import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -198,7 +199,8 @@ export async function getGateways(tenantId: string): Promise<EdgeGatewayRow[]> {
     },
     orderBy: { createdAt: "desc" },
   })
-  return rows as any
+  // 저장된 값은 해시(또는 과거 평문)이므로 목록 응답에는 포함하지 않는다.
+  return rows.map((row) => ({ ...row, apiKey: "********" })) as any
 }
 
 export async function createGateway(
@@ -215,6 +217,8 @@ export async function createGateway(
   })
   if (!site) throw new Error("사이트를 찾을 수 없습니다.")
 
+  // 키는 cuid 기본값이 아니라 암호학적 난수로 발급하고, DB 에는 해시만 저장한다(평문은 이 응답에서만 1회 노출).
+  const plainApiKey = generateAgentKey()
   const gateway = await prisma.edgeGateway.create({
     data: {
       tenantId: scopedTenantId,
@@ -222,11 +226,12 @@ export async function createGateway(
       name: data.name,
       description: data.description ?? null,
       status: "OFFLINE",
+      apiKey: hashAgentKey(plainApiKey),
     },
-    select: { id: true, apiKey: true },
+    select: { id: true },
   })
   revalidatePath("/app/mes/gateways")
-  return gateway
+  return { id: gateway.id, apiKey: plainApiKey }
 }
 
 export async function updateGateway(id: string, data: UpdateGatewayInput) {

@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { getRoutingOperationReferences, type RoutingOperationReferenceSummary } from "@/lib/routing-references.server"
 import { validateRoutingForItemContext } from "@/lib/routing-validation.server"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type RoutingWithDetails = {
   id: string
@@ -43,6 +44,7 @@ export type RoutingWithDetails = {
 }
 
 export async function getRoutings(): Promise<RoutingWithDetails[]> {
+  await requireReadActor("ROUTING")
   const tenantId = await getTenantId()
   return prisma.routing.findMany({
     where: { tenantId },
@@ -60,6 +62,7 @@ export async function getRoutings(): Promise<RoutingWithDetails[]> {
 }
 
 export async function getRoutingById(id: string): Promise<RoutingWithDetails | null> {
+  await requireReadActor("ROUTING")
   const tenantId = await getTenantId()
   return prisma.routing.findFirst({
     where: { id, tenantId },
@@ -76,6 +79,7 @@ export async function getRoutingById(id: string): Promise<RoutingWithDetails | n
 }
 
 export async function getItemsForRouting() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.item.findMany({
     where: { tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] } },
@@ -85,6 +89,7 @@ export async function getItemsForRouting() {
 }
 
 export async function getWorkCenters() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.workCenter.findMany({
     where: { site: { tenantId } },
@@ -106,6 +111,7 @@ export type RoutingCandidate = {
 }
 
 export async function getAvailableRoutingsForItem(itemId: string): Promise<RoutingCandidate[]> {
+  await requireReadActor(["ROUTING", "WORK_ORDER", "PRODUCTION_PLAN"])
   const tenantId = await getTenantId()
   const [itemSpecific, common] = await Promise.all([
     prisma.itemRouting.findMany({
@@ -139,6 +145,8 @@ export async function validateRoutingForItem(params: {
   itemId: string
   routingId: string
 }): Promise<void> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, params.tenantId)
   await validateRoutingForItemContext(prisma, params)
 }
 
@@ -439,6 +447,7 @@ export type RoutingUsageSummary = {
 }
 
 export async function getRoutingUsageSummary(id: string): Promise<RoutingUsageSummary> {
+  await requireReadActor("ROUTING")
   const tenantId = await getTenantId()
   const owned = await prisma.routing.findFirst({ where: { id, tenantId }, select: { id: true } })
   if (!owned) throw new Error("NOT_FOUND")

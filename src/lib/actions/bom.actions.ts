@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db/prisma"
 import { BOMStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type BOMWithDetails = {
   id: string
@@ -51,6 +52,7 @@ function serializeBom(bom: any): BOMWithDetails {
 }
 
 export async function getBoms(): Promise<BOMWithDetails[]> {
+  await requireReadActor("BOM")
   const tenantId = await getTenantId()
   const boms = await prisma.bOM.findMany({
     where: { tenantId },
@@ -67,6 +69,7 @@ export async function getBoms(): Promise<BOMWithDetails[]> {
 }
 
 export async function getBomById(id: string): Promise<BOMWithDetails | null> {
+  await requireReadActor("BOM")
   const tenantId = await getTenantId()
   const bom = await prisma.bOM.findFirst({
     where: { id, tenantId },
@@ -82,6 +85,7 @@ export async function getBomById(id: string): Promise<BOMWithDetails | null> {
 }
 
 export async function getItemsForBom() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.item.findMany({
     where: { tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] } },
@@ -91,6 +95,7 @@ export async function getItemsForBom() {
 }
 
 export async function getComponentItems() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.item.findMany({
     where: { tenantId, itemType: { in: ["RAW_MATERIAL", "SEMI_FINISHED", "CONSUMABLE"] } },

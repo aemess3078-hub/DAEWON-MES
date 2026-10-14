@@ -6,6 +6,7 @@ import { prisma } from "@/lib/db/prisma"
 import { Prisma } from "@prisma/client"
 import { checkItemGroupReferencesForBulk, requireBulkDeletePermission } from "./reference-check.server"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type ItemGroupWithDetails = Prisma.ItemGroupGetPayload<{
   include: {
@@ -15,6 +16,7 @@ export type ItemGroupWithDetails = Prisma.ItemGroupGetPayload<{
 }>
 
 export async function getItemGroupsForManagement(): Promise<ItemGroupWithDetails[]> {
+  await requireReadActor("ITEM")
   const tenantId = await getTenantId()
   return prisma.itemGroup.findMany({
     where: { tenantId },

@@ -7,6 +7,7 @@ import { getTenantId, requireRole } from "@/lib/auth"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { BUSINESS_NUMBER_MAX_ATTEMPTS, isUniqueConstraintError, kstDateParts } from "@/lib/business-numbering"
 import { lockInventoryBalancesForUpdate, withQuantityTransactionRetry } from "@/lib/quantity-concurrency"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +57,7 @@ export type InventoryTransactionWithDetails = {
 // ─── 재고현황 조회 ─────────────────────────────────────────────────────────────
 
 export async function getInventoryBalances(): Promise<InventoryBalanceWithDetails[]> {
+  await requireReadActor("INVENTORY")
   const tenantId = await getTenantId()
   const rows = await prisma.inventoryBalance.findMany({
     where: {
@@ -86,6 +88,7 @@ export async function getInventoryBalances(): Promise<InventoryBalanceWithDetail
 }
 
 export async function getMaterialInventoryBalances(): Promise<InventoryBalanceWithDetails[]> {
+  await requireReadActor("INVENTORY")
   const tenantId = await getTenantId()
   const rows = await prisma.inventoryBalance.findMany({
     where: {
@@ -195,6 +198,7 @@ export type GroupedMaterialStock = {
 }
 
 export async function getGroupedMaterialInventoryBalances(): Promise<GroupedMaterialStock[]> {
+  await requireReadActor("INVENTORY")
   const balances = await getMaterialInventoryBalances()
 
   type Accumulator = {
@@ -313,6 +317,7 @@ export type GroupedInventoryStock = {
 }
 
 export async function getGroupedInventoryBalances(): Promise<GroupedInventoryStock[]> {
+  await requireReadActor("INVENTORY")
   const tenantId = await getTenantId()
   const rows = await prisma.inventoryBalance.findMany({
     where: {
@@ -404,6 +409,7 @@ export async function getGroupedInventoryBalances(): Promise<GroupedInventorySto
 // ─── 트랜잭션 이력 조회 (최신 200건) ──────────────────────────────────────────
 
 export async function getInventoryTransactions(): Promise<InventoryTransactionWithDetails[]> {
+  await requireReadActor(["INVENTORY_TXN", "INVENTORY"])
   const tenantId = await getTenantId()
   const rows = await prisma.inventoryTransaction.findMany({
     where: {
@@ -441,6 +447,7 @@ export async function getInventoryTransactions(): Promise<InventoryTransactionWi
 // ─── 사이트 목록 ──────────────────────────────────────────────────────────────
 
 export async function getSitesForInventory() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.site.findMany({
     where: { tenantId },
@@ -713,6 +720,7 @@ export type StockAdjustmentHistoryRow = {
 }
 
 export async function getStockAdjustmentHistory(): Promise<StockAdjustmentHistoryRow[]> {
+  await requireReadActor(["INVENTORY", "INVENTORY_TXN"])
   const tenantId = await getTenantId()
   const rows = await prisma.inventoryTransaction.findMany({
     where: {

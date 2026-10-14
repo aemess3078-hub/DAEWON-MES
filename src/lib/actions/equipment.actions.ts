@@ -5,6 +5,7 @@ import { getTenantId, requireRole } from "@/lib/auth"
 import { EquipmentType, EquipmentStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +28,7 @@ export type EquipmentWithDetails = {
 // ─── 조회 ─────────────────────────────────────────────────────────────────────
 
 export async function getEquipmentsWithDetails(): Promise<EquipmentWithDetails[]> {
+  await requireReadActor("EQUIPMENT")
   const tenantId = await getTenantId()
   return prisma.equipment.findMany({
     where: { tenantId },
@@ -42,6 +44,7 @@ export async function getEquipmentsWithDetails(): Promise<EquipmentWithDetails[]
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
 
 export async function getSitesForEquipment() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.site.findMany({
     where: { tenantId },
@@ -51,6 +54,7 @@ export async function getSitesForEquipment() {
 }
 
 export async function getWorkCentersForEquipment(siteId?: string) {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.workCenter.findMany({
     where: { site: { tenantId }, ...(siteId ? { siteId } : {}) },

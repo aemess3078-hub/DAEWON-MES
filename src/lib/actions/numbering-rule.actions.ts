@@ -6,11 +6,13 @@ import type { Token, ContextKey } from "@/lib/types/numbering-rule"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── 규칙 조회 ────────────────────────────────────────────────────────────────
 
 export async function getNumberingRules(tenantId: string) {
   await assertDeveloperOnly()
+  assertSessionTenant(await requireActor(), tenantId)
   let rules: any[]
   try {
     rules = await prisma.numberingRule.findMany({
@@ -34,7 +36,8 @@ export async function upsertNumberingRule(
   tokens: Token[]
 ) {
   await assertDeveloperOnly()
-  await requireResourcePermission("LOT", "UPDATE")
+  const actor = await requireResourcePermission("LOT", "UPDATE")
+  assertSessionTenant(actor, tenantId)
   await prisma.numberingRule.upsert({
     where: { tenantId_type: { tenantId, type } },
     update: { tokens: tokens as any },
@@ -47,6 +50,7 @@ export async function upsertNumberingRule(
 
 export async function getCodeGroupsForBuilder(tenantId: string) {
   await assertDeveloperOnly()
+  assertSessionTenant(await requireActor(), tenantId)
   return prisma.codeGroup.findMany({
     where: { tenantId, isActive: true },
     select: { groupCode: true, groupName: true },
@@ -60,6 +64,7 @@ export async function getRuleContextTokens(
   tenantId: string,
   type: "LOT" | "SERIAL"
 ): Promise<Array<{ key: ContextKey; fallback?: string; codeGroupCode?: string }>> {
+  assertSessionTenant(await requireReadActor("LOT"), tenantId)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
@@ -82,6 +87,7 @@ export async function getContextCodeOptions(
   tenantId: string,
   type: "LOT" | "SERIAL"
 ): Promise<Record<string, { code: string; name: string }[]>> {
+  assertSessionTenant(await requireReadActor("LOT"), tenantId)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
@@ -154,7 +160,7 @@ export async function generateNumber(
   context?: Partial<Record<ContextKey, string>>
 ): Promise<string> {
   // 시퀀스를 증가시키는 쓰기 동작 — LOT 등록 권한이 있는 사용자만
-  await requireResourcePermission("LOT", "CREATE")
+  assertSessionTenant(await requireResourcePermission("LOT", "CREATE"), tenantId)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({

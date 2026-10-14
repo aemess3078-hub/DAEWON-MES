@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db/prisma"
 import { getTenantId } from "@/lib/auth"
 import { calculateWorkDurationMinutes } from "@/lib/pop-worktime-operator"
 import { resolveActualProductionEquipment } from "@/lib/equipment-result-attribution"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,7 @@ export type ProductionResultFilters = {
 export async function getProductionResults(
   filters?: ProductionResultFilters
 ): Promise<ProductionResultWithDetails[]> {
+  await requireReadActor(["WORK_RESULT", "REPORT", "DASHBOARD"])
   const tenantId = await getTenantId()
 
   const results = await prisma.productionResult.findMany({

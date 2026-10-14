@@ -13,8 +13,11 @@ import {
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export async function getShipments(tenantId: string) {
+  const sessionActor = await requireReadActor("SHIPMENT")
+  assertSessionTenant(sessionActor, tenantId)
   const rows = await prisma.shipmentOrder.findMany({
     where: { tenantId },
     include: {
@@ -52,6 +55,8 @@ export async function getShipments(tenantId: string) {
 export type DeliveryStatusRow = Awaited<ReturnType<typeof getDeliveryStatusRows>>[number]
 
 export async function getDeliveryStatusRows(tenantId: string) {
+  const sessionActor = await requireReadActor("SHIPMENT")
+  assertSessionTenant(sessionActor, tenantId)
   const rows = await prisma.shipmentOrder.findMany({
     where: { tenantId },
     select: {
@@ -371,6 +376,8 @@ export async function getAvailableFinishedGoodsLots(
 }
 
 export async function generateShipmentNo(tenantId: string): Promise<string> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   const { year } = kstDateParts()
   const prefix = `SH-${year}-`
   const last = await prisma.shipmentOrder.findFirst({

@@ -7,6 +7,7 @@ import { InspectionStage, InspectionResult } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { assertInspectionHistoryMutable, validateInspectionMutationContext } from "./quality-inspection-integrity.helpers"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type InspectionStageRow = {
   id: string
@@ -34,6 +35,7 @@ export type InspectionStageRow = {
 }
 
 export async function getInspectionsByStage(stage?: InspectionStage): Promise<InspectionStageRow[]> {
+  await requireReadActor("QUALITY_INSPECTION")
   const tenantId = await getTenantId()
   const rows = await prisma.qualityInspection.findMany({
     where: {
@@ -178,6 +180,7 @@ export async function updateStagedInspection(
 }
 
 export async function getWorkOrdersForInspection() {
+  await requireReadActor("QUALITY_INSPECTION")
   const tenantId = await getTenantId()
   const ops = await prisma.workOrderOperation.findMany({
     where: {
@@ -224,6 +227,7 @@ export async function getWorkOrdersForInspection() {
 }
 
 export async function getInspectionStageSummary() {
+  await requireReadActor("QUALITY_INSPECTION")
   const tenantId = await getTenantId()
   const today = new Date()
   today.setHours(0, 0, 0, 0)

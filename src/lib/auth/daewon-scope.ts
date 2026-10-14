@@ -60,8 +60,14 @@ export const DAEWON_ALLOWED_ROUTES: readonly string[] = [
   "/app/mes/production/outsource-receiving",
   "/app/mes/outsourcing",
   "/app/mes/process-progress",
+  "/app/mes/rework", // 재작업 종결·보류관리 (Phase 10 / DG-015: 개발자 전용 → 권한 기반)
   // 품질관리
   "/app/mes/quality/defect-stats",
+  // Phase 10 / DG-016: 불량 원인분석·조치·재발방지·품질현황 (개발자 전용 해제, 권한 기반)
+  "/app/mes/quality/cause-analysis",
+  "/app/mes/quality/corrective-action",
+  "/app/mes/quality/recurrence-prevention",
+  "/app/mes/quality/dashboard",
   "/app/mes/inspection-stages",
   "/app/mes/final-inspection",
   "/app/mes/quality/work-standards",
@@ -97,6 +103,8 @@ export function isScopeEnforced(): boolean {
 }
 
 export function isDeveloperLogin(loginId: string | null | undefined): boolean {
+  // 운영 Go-Live 시 개발자 예외를 끄는 스위치(Phase 10 / DG-017). developer.ts 와 동일 기준.
+  if (process.env.DAEWON_DISABLE_DEVELOPER_ACCESS === "1") return false
   return loginId === DEVELOPER_LOGIN_ID
 }
 

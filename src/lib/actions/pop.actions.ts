@@ -25,6 +25,7 @@ import {
 } from "@/lib/actions/wip-traceability.helpers"
 import {
   recordSelfInspectionDefects,
+  annotateDefectMovementWithoutSpec,
   type SelfInspectionDefectDetail,
 } from "@/lib/actions/self-inspection.helpers"
 import { syncProductionPlanStatusForWorkOrder } from "@/lib/production-plan-sync"
@@ -258,6 +259,8 @@ async function recordPopToolUsage(
 // ─── 1. PIN 로그인 ───────────────────────────────────────────────────────────
 
 const QTY_DECIMAL_SCALE = 6
+const INSPECTION_SPEC_MISSING_WARNING =
+  "검사표준이 없어 자주검사 이력은 생성되지 않았습니다. 불량 수량·재공 분리는 정상 기록되었습니다."
 const ZERO_QTY = BigInt(0)
 const QTY_SCALE_MULTIPLIER = BigInt("1000000")
 
@@ -360,8 +363,11 @@ export async function popLogin(
   try { assertValidPopPin(pin) } catch { return null }
 
   // 서버 env 우선 사용 (클라이언트 쿠키 fallback 무효화)
-  const effectiveTenantId = process.env.DEFAULT_TENANT_ID ?? tenantId
+  // 운영에서는 클라이언트가 보낸 tenantId 를 절대 사용하지 않는다(서버 env 가 없으면 로그인 불가).
+  const effectiveTenantId =
+    process.env.DEFAULT_TENANT_ID ?? (process.env.NODE_ENV === "production" ? "" : tenantId)
   const hasDefaultTenantEnv = Boolean(process.env.DEFAULT_TENANT_ID)
+  if (!effectiveTenantId) return null
 
   let popPinFingerprint = ""
   let failureReason = "UNKNOWN"
@@ -923,7 +929,7 @@ export async function getOperationDetail(operationId: string, assignmentId?: str
 
 export async function submitProductionResult(
   data: SubmitResultInput
-): Promise<{ success: boolean; error?: string; isCompleted?: boolean }> {
+): Promise<{ success: boolean; error?: string; isCompleted?: boolean; warning?: string }> {
   const { workOrderOperationId, assignmentId, goodQty, defectQty, reworkQty } = data
   const selectedToolIds = normalizePopToolIds(data.toolIds)
 
@@ -987,6 +993,7 @@ export async function submitProductionResult(
       return { success: false, error: "작업자 로그인이 필요합니다." }
     }
     let isCompleted = false
+    let warningMessage: string | undefined
 
     await prisma.$transaction(async (tx) => {
       // 같은 공정의 동시 실적 등록을 직렬화한다. assignment 없는 공정도 F10 자재기준
@@ -1041,6 +1048,17 @@ export async function submitProductionResult(
         assertPopSessionSiteMatch(authCtx.session, op.workOrder.siteId)
       }
       await assertActivePopOperator(tx, authCtx)
+
+      // 재작업 종결(completeRework)은 최종 공정의 재작업 WIP 만 처리한다. 중간 공정에서 재작업을 등록하면
+      // 종결 경로가 없어 완제품입고가 영구 차단되므로 입력 단계에서 차단한다(Phase 10 / DG-015).
+      if (reworkQty > 0) {
+        const finalSeq = op.workOrder.operations.reduce((max, candidate) => Math.max(max, candidate.seq), 0)
+        if (op.seq < finalSeq) {
+          throw new Error(
+            "재작업 수량은 최종 공정에서만 등록할 수 있습니다. 중간 공정의 부적합 수량은 불량으로 등록해 주세요."
+          )
+        }
+      }
 
       const previousOperations = op.workOrder.operations.filter((candidate) => candidate.seq < op.seq)
 
@@ -1205,7 +1223,7 @@ export async function submitProductionResult(
         })
 
         // POP 불량을 자주검사(QualityInspection + DefectRecord)로 기록 → 불량통계 반영
-        await recordSelfInspectionDefects(tx, {
+        const selfInspection = await recordSelfInspectionDefects(tx, {
           tenantId: op.workOrder.tenantId,
           workOrderOperationId,
           itemId: op.workOrder.itemId,
@@ -1214,6 +1232,14 @@ export async function submitProductionResult(
           inspectedQty: goodQty + defectQty + reworkQty,
           defectDetails,
         })
+        if (!selfInspection.recorded && selfInspection.reason === "NO_INSPECTION_SPEC") {
+          await annotateDefectMovementWithoutSpec(tx, {
+            tenantId: op.workOrder.tenantId,
+            productionResultId: createdResult.id,
+            defectSummary: selfInspection.defectSummary ?? "",
+          })
+          warningMessage = INSPECTION_SPEC_MISSING_WARNING
+        }
 
         await tx.workOrderOperationAssignment.update({
           where: { id: assignment.id },
@@ -1361,7 +1387,7 @@ export async function submitProductionResult(
       })
 
       // POP 불량을 자주검사(QualityInspection + DefectRecord)로 기록 → 불량통계 반영
-      await recordSelfInspectionDefects(tx, {
+      const selfInspection = await recordSelfInspectionDefects(tx, {
         tenantId: op.workOrder.tenantId,
         workOrderOperationId,
         itemId: op.workOrder.itemId,
@@ -1370,6 +1396,14 @@ export async function submitProductionResult(
         inspectedQty: goodQty + defectQty + reworkQty,
         defectDetails,
       })
+      if (!selfInspection.recorded && selfInspection.reason === "NO_INSPECTION_SPEC") {
+        await annotateDefectMovementWithoutSpec(tx, {
+          tenantId: op.workOrder.tenantId,
+          productionResultId: createdResult.id,
+          defectSummary: selfInspection.defectSummary ?? "",
+        })
+        warningMessage = INSPECTION_SPEC_MISSING_WARNING
+      }
 
       await tx.workOrderOperation.update({
         where: { id: workOrderOperationId },
@@ -1428,7 +1462,7 @@ export async function submitProductionResult(
     revalidatePath("/pop/work-select")
     if (selectedToolIds.length > 0) revalidatePath("/app/mes/equipment-tools")
     revalidatePath("/app/mes/production-plan")
-    return { success: true, isCompleted }
+    return { success: true, isCompleted, ...(warningMessage ? { warning: warningMessage } : {}) }
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : "오류가 발생했습니다." }
   }

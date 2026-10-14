@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db/prisma"
 import { revalidatePath } from "next/cache"
 import { checkWarehouseReferencesForBulk, requireBulkDeletePermission } from "./reference-check.server"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type LocationWithSite = {
   id: string
@@ -17,6 +18,7 @@ export type LocationWithSite = {
 }
 
 export async function getLocations(): Promise<LocationWithSite[]> {
+  await requireReadActor("ITEM")
   const tenantId = await getTenantId()
   return prisma.warehouse.findMany({
     where: { tenantId },
@@ -26,6 +28,7 @@ export async function getLocations(): Promise<LocationWithSite[]> {
 }
 
 export async function getSitesForLocation() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.site.findMany({
     where: { tenantId },

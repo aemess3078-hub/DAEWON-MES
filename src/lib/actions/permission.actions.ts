@@ -198,6 +198,7 @@ export type PermissionMatrix = Record<
 >
 
 export async function getPermissionMatrix(tenantId: string): Promise<PermissionMatrix> {
+  await requireSameTenantPermissionAccess(tenantId)
   const permissions = await getPermissions(tenantId)
   const matrix: PermissionMatrix = {}
 

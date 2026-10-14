@@ -11,6 +11,7 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
 import { recordAuditLog } from "@/lib/audit-log"
 import { BUSINESS_NUMBER_MAX_ATTEMPTS, isUniqueConstraintError, kstDateParts } from "@/lib/business-numbering"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type CreateReceivingInspectionInput = {
   purchaseOrderItemId: string
@@ -31,6 +32,7 @@ export type CreateReceivingInspectionInput = {
 
 /** 특정 사이트에 속한 창고 목록 조회 (다이얼로그 창고 선택용) */
 export async function getWarehousesForSite(siteId: string) {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.warehouse.findMany({
     where: { siteId, tenantId },
@@ -48,6 +50,8 @@ export async function generateReceivingLotNo(
   itemContext: CnsItemRuleContext = {},
   sequenceOffset = 0,
 ): Promise<string> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   return generateCnsMaterialReceiptLotNo(prisma, tenantId, itemContext, new Date(), sequenceOffset)
 }
 

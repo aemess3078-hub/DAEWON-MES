@@ -59,6 +59,10 @@ async function resolveSelfInspectionSpecId(
  * POP 불량 입력을 자주검사(QualityInspection) + 불량내역(DefectRecord)으로 기록한다.
  * defectDetails 합계 = defectQty 검증은 호출부(submitProductionResult)에서 이미 수행된 전제.
  */
+export type SelfInspectionRecordResult =
+  | { recorded: true }
+  | { recorded: false; reason: "NO_DEFECTS" | "NO_INSPECTION_SPEC"; defectSummary?: string }
+
 export async function recordSelfInspectionDefects(
   tx: SelfInspectionTx,
   params: {
@@ -70,14 +74,14 @@ export async function recordSelfInspectionDefects(
     inspectedQty: number
     defectDetails: SelfInspectionDefectDetail[]
   }
-): Promise<void> {
-  if (params.defectDetails.length === 0) return
+): Promise<SelfInspectionRecordResult> {
+  if (params.defectDetails.length === 0) return { recorded: false, reason: "NO_DEFECTS" }
 
   // 불량코드 테넌트 소속 검증
   const codeIds = params.defectDetails.map((d) => d.defectCodeId)
   const validCodes = await tx.defectCode.findMany({
     where: { tenantId: params.tenantId, id: { in: codeIds } },
-    select: { id: true },
+    select: { id: true, code: true },
   })
   const validCodeIds = new Set(validCodes.map((c) => c.id))
   const invalid = codeIds.find((id) => !validCodeIds.has(id))
@@ -91,9 +95,15 @@ export async function recordSelfInspectionDefects(
     routingOperationId: params.routingOperationId,
   })
   if (!inspectionSpecId) {
-    throw new Error(
-      "POP 자주검사를 위한 검사표준이 없습니다. 검사표준관리에서 해당 품목의 검사표준을 먼저 등록해 주세요."
-    )
+    // 검사표준이 없다는 이유로 생산실적 전체(양품·불량·WIP 이동)를 롤백하지 않는다.
+    // 최종검사 게이트도 검사표준이 없으면 NOT_REQUIRED 로 취급하므로(evaluateQualityRelease) 검사표준은 선택 정책이다.
+    // 불량 수량·WIP 분리는 ProductionResult/WipMovement 에 이미 기록되며, 불량코드 내역은 호출부가
+    // 이동 이력(note)에 남겨 정보 손실을 막는다.
+    const codeById = new Map(validCodes.map((c) => [c.id, c.code]))
+    const defectSummary = params.defectDetails
+      .map((d) => `${codeById.get(d.defectCodeId) ?? d.defectCodeId}x${d.qty}`)
+      .join(", ")
+    return { recorded: false, reason: "NO_INSPECTION_SPEC", defectSummary }
   }
 
   const inspection = await tx.qualityInspection.create({
@@ -116,4 +126,30 @@ export async function recordSelfInspectionDefects(
       disposition: "SCRAP" as const,
     })),
   })
+  return { recorded: true }
+}
+
+/**
+ * 자주검사 연동이 생략된 경우(검사표준 없음) 불량코드 내역을 DEFECT 이동 이력 note 에 보존한다.
+ * 스키마 변경 없이 기존 WipMovement.note 를 사용한다.
+ */
+export async function annotateDefectMovementWithoutSpec(
+  tx: SelfInspectionTx,
+  params: { tenantId: string; productionResultId: string; defectSummary: string }
+): Promise<void> {
+  const movements = await tx.wipMovement.findMany({
+    where: {
+      tenantId: params.tenantId,
+      sourceType: "ProductionResult",
+      sourceId: params.productionResultId,
+      movementType: "DEFECT",
+    },
+    select: { id: true, note: true },
+  })
+  for (const movement of movements) {
+    await tx.wipMovement.update({
+      where: { id: movement.id },
+      data: { note: `${movement.note ?? ""} · 검사표준 미등록(자주검사 연동 생략) 불량코드: ${params.defectSummary}`.trim() },
+    })
+  }
 }

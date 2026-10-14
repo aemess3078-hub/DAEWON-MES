@@ -13,6 +13,7 @@ import {
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog } from "@/lib/audit-log"
 import { delay, kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Filter & Types ───────────────────────────────────────────────────────────
 
@@ -748,6 +749,7 @@ export async function inspectOutsourcedWipUnit(
 export async function getOutsourcingData(
   filter: OutsourcingFilter = {}
 ): Promise<OutsourcingData> {
+  await requireReadActor("PURCHASE_ORDER")
   const tenantId = await getTenantId()
   const now = new Date()
 

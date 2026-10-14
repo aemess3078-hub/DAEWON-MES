@@ -19,7 +19,7 @@ import {
   type RecentQualityIssueRow,
 } from "./quality-dashboard.helpers"
 import type { DefectStatsByType } from "./defect-stats.actions"
-import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { requireReadActor } from "@/lib/auth/action-guards"
 
 export type {
   QualityDashboardKpi,
@@ -72,7 +72,7 @@ export type QualityDashboardData = {
 export async function getQualityDashboardData(
   filter: QualityDashboardFilter = {}
 ): Promise<QualityDashboardData> {
-  await assertDaewonFeatureScope()
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
   await requireRole("VIEWER")
   const tenantId = await getTenantId()
 
@@ -137,6 +137,6 @@ export async function getQualityDashboardData(
 
 // 필터 옵션(품목/공정)은 불량분석 화면과 완전히 동일한 대상 범위를 재사용한다.
 export async function getQualityDashboardFilterOptions() {
-  await assertDaewonFeatureScope()
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
   return getDefectStatsFilterOptions()
 }

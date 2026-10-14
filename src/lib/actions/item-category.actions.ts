@@ -6,12 +6,14 @@ import { prisma } from "@/lib/db/prisma"
 import { Prisma, ItemType } from "@prisma/client"
 import { checkItemCategoryReferencesForBulk, requireBulkDeletePermission } from "./reference-check.server"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type ItemCategoryWithCounts = Prisma.ItemCategoryGetPayload<{
   include: { _count: { select: { items: true; itemGroups: true } } }
 }>
 
 export async function getItemCategoriesForManagement(): Promise<ItemCategoryWithCounts[]> {
+  await requireReadActor("ITEM")
   const tenantId = await getTenantId()
   return prisma.itemCategory.findMany({
     where: { tenantId },

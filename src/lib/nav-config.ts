@@ -101,6 +101,7 @@ export const MES_NAV: NavItem[] = [
           { id: 'nav-production-results', parentId: 'nav-production', label: '작업일지/실적', icon: 'FileText', href: '/app/mes/production-results', displayOrder: 3, children: [] },
           { id: 'nav-finished-goods-receipt', parentId: 'nav-production', label: '완제품입고', icon: 'PackagePlus', href: '/app/mes/finished-goods-receipt', displayOrder: 4, children: [] },
           { id: 'nav-outsourcing', parentId: 'nav-production', label: '외주관리', icon: 'Truck', href: '/app/mes/production/outsourcing', displayOrder: 5, children: [] },
+          { id: 'nav-rework', parentId: 'nav-production', label: '재작업/보류관리', icon: 'RefreshCw', href: '/app/mes/rework', displayOrder: 6, children: [] },
         ],
       },
       // 6. 품질관리
@@ -112,6 +113,11 @@ export const MES_NAV: NavItem[] = [
         displayOrder: 60,
         children: [
           { id: 'nav-defect-stats', parentId: 'nav-quality', label: '불량통계/자주검사', icon: 'BarChart2', href: '/app/mes/quality/defect-stats', displayOrder: 1, children: [] },
+          // Phase 10 / DG-016: 불량 원인·조치·재발방지 이력화(사업계획서 약속)를 범위에 포함한다(개발자 전용 해제, 권한 기반).
+          { id: 'nav-cause-analysis', parentId: 'nav-quality', label: '원인분석', icon: 'Search', href: '/app/mes/quality/cause-analysis', displayOrder: 6, children: [] },
+          { id: 'nav-corrective-action', parentId: 'nav-quality', label: '조치관리', icon: 'ClipboardCheck', href: '/app/mes/quality/corrective-action', displayOrder: 7, children: [] },
+          { id: 'nav-recurrence-prevention', parentId: 'nav-quality', label: '재발방지관리', icon: 'ShieldAlert', href: '/app/mes/quality/recurrence-prevention', displayOrder: 8, children: [] },
+          { id: 'nav-quality-dashboard', parentId: 'nav-quality', label: '품질현황', icon: 'LayoutDashboard', href: '/app/mes/quality/dashboard', displayOrder: 9, children: [] },
           // 초/중/종 검사(InspectionStage FIRST/MID/FINAL) 목록 화면
           { id: 'nav-inspection-stages', parentId: 'nav-quality', label: '초중종검사 LIST', icon: 'ClipboardCheck', href: '/app/mes/inspection-stages', displayOrder: 2, children: [] },
           { id: 'nav-work-standards', parentId: 'nav-quality', label: '작업표준서관리', icon: 'BookOpen', href: '/app/mes/quality/work-standards', displayOrder: 3, children: [] },
@@ -193,15 +199,10 @@ export const DAEWON_HIDDEN_NAV: ReadonlyArray<{ id: string; label: string; href:
   // 자재/생산 부가
   { id: 'nav-material-return', label: '반품관리', href: '/app/mes/material-return', reason: '목표 메뉴 외' },
   { id: 'nav-prod-equip-output', label: '설비별생산현황', href: '/app/mes/production/equipment-output', reason: '목표 메뉴 외' },
-  { id: 'nav-rework', label: '재작업/보류관리', href: '/app/mes/rework', reason: '목표 메뉴 외' },
   { id: 'nav-manufacturing-traceability', label: '제조번호 추적성', href: '/app/mes/manufacturing-traceability', reason: 'CNS 제조번호 체계 의존 — LOT 규칙 확정 후 재검토' },
   // 품질 부가
-  { id: 'nav-quality-dashboard', label: '품질현황', href: '/app/mes/quality/dashboard', reason: '목표 메뉴 외' },
   { id: 'nav-inspection', label: '공정검사', href: '/app/mes/inspection', reason: '목표 메뉴 외' },
   { id: 'nav-spc', label: 'SPC 통계분석', href: '/app/mes/spc', reason: '목표 메뉴 외' },
-  { id: 'nav-cause-analysis', label: '원인분석', href: '/app/mes/quality/cause-analysis', reason: '목표 메뉴 외' },
-  { id: 'nav-corrective-action', label: '조치관리', href: '/app/mes/quality/corrective-action', reason: '목표 메뉴 외' },
-  { id: 'nav-recurrence-prevention', label: '재발방지관리', href: '/app/mes/quality/recurrence-prevention', reason: '목표 메뉴 외' },
   // 기준정보 부가
   { id: 'nav-mold-management', label: '금형·치공구관리', href: '/app/mes/master/molds', reason: '목표 메뉴 외' },
   { id: 'nav-downtime-reasons', label: '비가동사유', href: '/app/mes/master/downtime-reasons', reason: '목표 메뉴 외' },

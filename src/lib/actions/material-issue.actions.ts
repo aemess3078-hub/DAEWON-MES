@@ -10,6 +10,7 @@ import {
   withQuantityTransactionRetry,
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,8 @@ function toScaledQuantity(value: number): bigint | null {
 export async function getWorkOrdersForIssue(
   tenantId: string
 ): Promise<WorkOrderForIssue[]> {
+  const sessionActor = await requireReadActor("PURCHASE_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   const workOrders = await prisma.workOrder.findMany({
     where: {
       tenantId,
@@ -179,6 +182,8 @@ export async function getWarehousesWithStock(
   tenantId: string,
   itemIds: string[]
 ): Promise<WarehouseStockOption[]> {
+  const sessionActor = await requireReadActor("PURCHASE_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   const warehouses = await prisma.warehouse.findMany({
     where: { tenantId },
     select: { id: true, code: true, name: true },
@@ -209,6 +214,8 @@ export async function getLotStockByItems(
   itemIds: string[],
   tenantId: string
 ): Promise<Record<string, LotStockOption[]>> {
+  const sessionActor = await requireReadActor("PURCHASE_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   if (itemIds.length === 0) return {}
 
   const balances = await prisma.inventoryBalance.findMany({
@@ -217,6 +224,8 @@ export async function getLotStockByItems(
       itemId: { in: itemIds },
       lotId: { not: null },
       qtyAvailable: { gt: 0 },
+      // 격리/보류/소진/만료 LOT 는 출고 후보에서 제외한다(DG-014).
+      lot: { status: "ACTIVE" },
     },
     include: {
       lot: { select: { id: true, lotNo: true } },
@@ -336,6 +345,8 @@ export async function issueMaterialsForWorkOrder(
       tenantId: true,
       siteId: true,
       itemId: true,
+      bomId: true,
+      status: true,
       plannedQty: true,
       manufacturingNo: true,
       operations: {
@@ -355,6 +366,40 @@ export async function issueMaterialsForWorkOrder(
   if (!workOrder || workOrder.tenantId !== tenantId) {
     return { ok: false, error: "작업지시를 찾을 수 없습니다." }
   }
+
+  // ── 서버측 출고 검증 (DG-014): 클라이언트 값(품목/수량/예약 ID)을 신뢰하지 않는다 ───────
+  if (!["RELEASED", "IN_PROGRESS"].includes(workOrder.status)) {
+    return { ok: false, error: "작업대기(RELEASED) 또는 진행중(IN_PROGRESS) 작업지시에만 자재를 출고할 수 있습니다." }
+  }
+  if (data.siteId && data.siteId !== workOrder.siteId) {
+    return { ok: false, error: "작업지시 사업장과 출고 사업장이 일치하지 않습니다." }
+  }
+  const bomLines = await prisma.bOMItem.findMany({
+    where: { bomId: workOrder.bomId, bom: { tenantId } },
+    select: { componentItemId: true, qtyPer: true, scrapRate: true },
+  })
+  const componentIds = bomLines.map((line) => line.componentItemId)
+  const substituteRows = componentIds.length
+    ? await prisma.itemSubstitute.findMany({
+        where: { itemId: { in: componentIds }, item: { tenantId } },
+        select: { substituteItemId: true },
+      })
+    : []
+  const allowedItemIds = new Set<string>([...componentIds, ...substituteRows.map((row) => row.substituteItemId)])
+  // 필요수량은 서버가 BOM 으로 계산한다(getWorkOrdersForIssue 와 동일 산식).
+  const requiredQtyByItem = new Map<string, number>()
+  for (const line of bomLines) {
+    const base = Number(line.qtyPer) * Number(workOrder.plannedQty)
+    const required = Math.round(base * (1 + Number(line.scrapRate)) * 1000) / 1000
+    requiredQtyByItem.set(line.componentItemId, (requiredQtyByItem.get(line.componentItemId) ?? 0) + required)
+  }
+  const notInBom = expandedItems.find((item) => !allowedItemIds.has(item.itemId))
+  if (notInBom) {
+    const code = itemMetaMap.get(notInBom.itemId)?.code ?? notInBom.itemId
+    return { ok: false, error: `이 작업지시의 BOM 에 없는 품목입니다: ${code}` }
+  }
+  // 초과 출고(누적 출고 > 필요수량)는 MANAGER 이상만 허용한다.
+  const canOverIssue = ["OWNER", "ADMIN", "MANAGER"].includes(actor.role)
 
   const firstOperation = workOrder?.operations[0] ?? null
   if (workOrder && !firstOperation) {
@@ -441,6 +486,17 @@ export async function issueMaterialsForWorkOrder(
             )
           }
           lotId = item.lotId
+          const lotCheck = await tx.lot.findFirst({
+            where: { id: lotId, tenantId },
+            select: { itemId: true, status: true, lotNo: true },
+          })
+          if (!lotCheck) throw new Error("선택한 LOT 를 찾을 수 없습니다.")
+          if (lotCheck.itemId !== item.itemId) {
+            throw new Error(`LOT(${lotCheck.lotNo}) 의 품목이 출고 품목과 일치하지 않습니다.`)
+          }
+          if (lotCheck.status !== "ACTIVE") {
+            throw new Error(`사용할 수 없는 LOT 입니다: ${lotCheck.lotNo} (${lotCheck.status})`)
+          }
           if (warehouseId) {
             balance = await tx.inventoryBalance.findFirst({
               where: {
@@ -498,6 +554,20 @@ export async function issueMaterialsForWorkOrder(
           throw new Error(
             `재고 부족: ${meta?.code ?? item.itemId}${lotInfo} — 현재 재고 ${Number(balance.qtyOnHand)}, 출고 요청 ${item.issueQty}`
           )
+        }
+
+        const requiredForItem = requiredQtyByItem.get(item.itemId)
+        if (requiredForItem !== undefined && !canOverIssue) {
+          const reservationRow = await tx.materialReservation.findFirst({
+            where: { workOrderId: data.workOrderId, itemId: item.itemId },
+            select: { issuedQty: true },
+          })
+          const alreadyIssued = Number(reservationRow?.issuedQty ?? 0)
+          if (alreadyIssued + item.issueQty > requiredForItem + 0.0005) {
+            throw new Error(
+              `필요수량 초과 출고는 관리자(MANAGER 이상) 승인이 필요합니다: ${meta?.code ?? item.itemId} — 필요 ${requiredForItem}, 기출고 ${alreadyIssued}, 요청 ${item.issueQty}`
+            )
+          }
         }
 
         // ── 2. InventoryTransaction 기록 (lotId 포함) ────────────────────────
@@ -615,9 +685,10 @@ export async function issueMaterialsForWorkOrder(
 
         // ── 4. MaterialReservation 갱신 ──────────────────────────────────────
         if (item.reservationId) {
-          const res = await tx.materialReservation.findUnique({
-            where: { id: item.reservationId },
+          const res = await tx.materialReservation.findFirst({
+            where: { id: item.reservationId, workOrderId: data.workOrderId, itemId: item.itemId },
           })
+          if (!res) throw new Error("출고 예약 정보가 작업지시/품목과 일치하지 않습니다.")
           if (res) {
             const newIssuedQty = Number(res.issuedQty) + item.issueQty
             await tx.materialReservation.update({
@@ -652,11 +723,11 @@ export async function issueMaterialsForWorkOrder(
               data: {
                 workOrderId: data.workOrderId,
                 itemId: item.itemId,
-                requiredQty: item.requiredQty,
+                requiredQty: requiredForItem ?? 0,
                 reservedQty: 0,
                 issuedQty: item.issueQty,
                 status:
-                  item.issueQty >= item.requiredQty ? "FULFILLED" : "PARTIAL",
+                  item.issueQty >= (requiredForItem ?? 0) ? "FULFILLED" : "PARTIAL",
               },
             })
           }

@@ -21,6 +21,7 @@ import {
   requireResourcePermission,
   type ResourcePermissionFlags,
 } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type { AttachmentRow, AttachmentEntityType }
 
@@ -75,6 +76,8 @@ export async function assertAttachmentEntityOwnership(
   entityId: string,
   tenantId: string
 ): Promise<void> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   if (entityType === "QUALITY_INSPECTION") {
     const row = await prisma.qualityInspection.findFirst({
       where: { id: entityId, workOrderOperation: { workOrder: { tenantId } } },
@@ -207,11 +210,15 @@ export async function assertNoAttachmentsForEntity(
   entityType: AttachmentEntityType,
   entityId: string
 ): Promise<void> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   const count = await db.attachment.count({ where: { tenantId, entityType, entityId } })
   if (count > 0) throw new Error(ATTACHMENT_PARENT_DELETE_MESSAGE)
 }
 
 export async function assertAttachmentDeleteAllowed(entityType: AttachmentEntityType, entityId: string, tenantId: string): Promise<void> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   if (entityType === "QUALITY_INSPECTION") {
     const count = await prisma.defectRecord.count({
       where: { qualityInspectionId: entityId, qualityInspection: { workOrderOperation: { workOrder: { tenantId } } } },

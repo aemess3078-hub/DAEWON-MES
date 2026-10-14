@@ -6,7 +6,7 @@ import { revalidatePath } from "next/cache"
 import { requireRole, getTenantId } from "@/lib/auth"
 import { getErrorMessage } from "@/lib/utils"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
-import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { requireReadActor } from "@/lib/auth/action-guards"
 
 // ─── 청운커팅 사업계획서 "재작업/보류관리" — 보류(ON_HOLD) 조회/등록/수정/해제/취소 ──────
 //
@@ -84,7 +84,7 @@ export type WipHoldRow = {
 // 클라이언트가 넘긴 tenantId를 신뢰하지 않기 위해(§13) 파라미터로 받지 않고 세션에서 직접 구한다.
 
 export async function getHoldableWipUnits(): Promise<HoldableWipRow[]> {
-  await assertDaewonFeatureScope()
+  await requireReadActor("WORK_RESULT")
   const tenantId = await getTenantId()
   const units = await prisma.wipUnit.findMany({
     where: {
@@ -128,7 +128,7 @@ export async function getHoldableWipUnits(): Promise<HoldableWipRow[]> {
 export type HoldStatusFilter = "ACTIVE" | "RELEASED" | "CANCELLED" | "ALL"
 
 export async function getHolds(statusFilter: HoldStatusFilter = "ACTIVE"): Promise<WipHoldRow[]> {
-  await assertDaewonFeatureScope()
+  await requireReadActor("WORK_RESULT")
   const tenantId = await getTenantId()
   const holds = await prisma.wipHold.findMany({
     where: {
@@ -198,7 +198,6 @@ export type CreateHoldInput = {
 export async function createHold(
   input: CreateHoldInput
 ): Promise<{ ok: boolean; error?: string; holdId?: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("WORK_RESULT", "CREATE")
   try {
     const actor = await requireRole("OPERATOR")
@@ -306,7 +305,6 @@ export type UpdateHoldInput = {
 }
 
 export async function updateHold(input: UpdateHoldInput): Promise<{ ok: boolean; error?: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("WORK_RESULT", "UPDATE")
   try {
     const actor = await requireRole("OPERATOR")
@@ -371,7 +369,6 @@ export type ReleaseHoldInput = {
 }
 
 export async function releaseHold(input: ReleaseHoldInput): Promise<{ ok: boolean; error?: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("WORK_RESULT", "UPDATE")
   try {
     const actor = await requireRole("OPERATOR")
@@ -475,7 +472,6 @@ export type CancelHoldInput = {
 }
 
 export async function cancelHold(input: CancelHoldInput): Promise<{ ok: boolean; error?: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("WORK_RESULT", "UPDATE")
   try {
     const actor = await requireRole("OPERATOR")
