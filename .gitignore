@@ -49,3 +49,9 @@ prisma/*.db-journal
 # Phase 7 master-migration 산출물(실제 거래처/품목 값 포함 가능 — 커밋 금지)
 .master-migration-out/
 master-data-out/
+
+# NCWatch Agent (tools/ncwatch-agent)
+tools/ncwatch-agent/node_modules/
+tools/ncwatch-agent/logs/
+tools/ncwatch-agent/state/
+tools/ncwatch-agent/dist/

@@ -1,0 +1,21 @@
+{
+  "name": "ncwatch-agent",
+  "version": "3.0.0",
+  "description": "대원정밀 NCWatch → MES 수신 API 브리지 에이전트 (X-Agent-Key push, 24시간 운영용)",
+  "main": "index.js",
+  "type": "commonjs",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "agent": "node index.js",
+    "machines": "node list-machines.js",
+    "check": "node check-connection.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "pg": "^8.13.3"
+  }
+}
