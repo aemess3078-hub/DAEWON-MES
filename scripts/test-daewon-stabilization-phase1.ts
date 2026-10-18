@@ -566,6 +566,33 @@ function testManufacturingPolicy() {
   ok(!/lotNumberingType:\s*["']/.test(read("src", "lib", "lot-numbering", "manufacturing-no-policy.ts")), "G9 품목 정책을 변경하는 코드 없음")
 }
 
+// ─── H. 자재입고 서버 입력 검증 · 화면 상태 초기화 (최종 검증 보완) ─────────────────
+
+function testReceivingHardening() {
+  const server = read("src", "lib", "actions", "receiving.actions.ts")
+  ok(/Number\.isFinite\(data\.receivedQty\)[\s\S]*Number\.isFinite\(data\.acceptedQty\)[\s\S]*Number\.isFinite\(data\.rejectedQty\)/.test(server), "H1 서버: 수량이 유한한 숫자인지 검증(NaN/Infinity 차단)")
+  ok(/purchaseOrderItem\.purchaseOrderId !== data\.purchaseOrderId/.test(server), "H2 서버: 클라이언트가 보낸 purchaseOrderId 가 발주 품목의 실제 발주와 같은지 검증")
+  const idxCheck = server.indexOf("purchaseOrderItem.purchaseOrderId !== data.purchaseOrderId")
+  const idxTx = server.indexOf("prisma.$transaction")
+  ok(idxCheck > 0 && idxTx > idxCheck, "H2 서버: 불일치 검증이 트랜잭션(발주 상태 갱신)보다 먼저 실행")
+  // 위 NaN 판정 근거: 비교 연산이 모두 false 가 되어 기존 검증을 통과했다
+  const nan = NaN
+  ok(!(nan <= 0) && !(nan > 10) && !(nan < 0) && !(Math.abs(nan + 0 - nan) > 0.001), "H1 근거: NaN 은 기존 대소 비교 검증을 모두 통과했다")
+  // 서버 멱등성 부재(문서화): ReceivingInspection 에 요청 식별자/unique 가 없다
+  const schema = read("prisma", "schema.prisma")
+  const model = schema.match(/model ReceivingInspection \{[\s\S]*?\n\}/)?.[0] ?? ""
+  ok(model.length > 0 && !/@@unique/.test(model) && !/requestId|idempotenc/i.test(model), "H3 현황 기록: 서버 입고는 멱등 키가 없다(중복 방지는 클라이언트 + 잔량 검증 수준)")
+  ok(/lockPurchaseOrderItemsForUpdate\(tx, tenantId, \[data\.purchaseOrderItemId\]\)/.test(server) && /lockedRemainingQty/.test(server), "H4 서버: 같은 발주 품목 동시 입고는 행 잠금 후 잔량을 재검증")
+  const table = read("src", "app", "app", "mes", "material-receipt", "material-receipt-data-table.tsx")
+  ok(/<ReceivingFormDialog\s+key=\{receivingOrder\.id\}/.test(table), "H5 입고 창: 발주가 바뀌면 상태가 남지 않도록 key 로 재마운트")
+  for (const p of [
+    ["src", "app", "app", "mes", "material-receipt", "receiving-form-dialog.tsx"],
+    ["src", "app", "app", "mes", "purchase-orders", "receiving-dialog.tsx"],
+  ]) {
+    ok(/outcome\.newlyDone\.length > 0 \|\| outcome\.stoppedAt\) router\.refresh\(\)/.test(read(...p)), `H6 ${p[p.length - 2]}: 실패/결과 불명으로 중단돼도 서버의 최신 수량을 다시 읽음`)
+  }
+}
+
 async function main() {
   await testPurchaseOrderLock()
   testUserErrors()
@@ -574,6 +601,7 @@ async function main() {
   testUserErrorAllowlist()
   await testReceivingBatch()
   testManufacturingPolicy()
+  testReceivingHardening()
   console.log(`\nAll ${passed} assertions passed`)
 }
 

@@ -196,8 +196,10 @@ export function ReceivingDialog({
               : ins
           )
         )
-        router.refresh()
       }
+      // 성공했거나, 실패/결과 불명으로 중단된 경우에도 서버의 최신 기입고 수량을 다시 읽는다
+      // (응답을 못 받았지만 서버에서는 처리됐을 수 있다 — 다시 열었을 때 낡은 잔여수량이 보이지 않도록)
+      if (outcome.newlyDone.length > 0 || outcome.stoppedAt) router.refresh()
       if (outcome.allDone) {
         onClose()
         return

@@ -91,6 +91,15 @@ async function createReceivingInspectionInternal(
   const user = await requireRole("OPERATOR")
   const tenantId = user.tenantId
 
+  // 수량은 유한한 숫자여야 한다 (NaN/Infinity 는 아래 대소 비교를 모두 통과해 버린다)
+  if (
+    !Number.isFinite(data.receivedQty) ||
+    !Number.isFinite(data.acceptedQty) ||
+    !Number.isFinite(data.rejectedQty)
+  ) {
+    throw new Error("입고수량이 올바르지 않습니다.")
+  }
+
   // ── 1. 창고 존재 및 테넌트 소속 확인 ──────────────────────────────────────
   const warehouse = await prisma.warehouse.findFirst({
     where: { id: data.warehouseId, tenantId },
@@ -119,6 +128,12 @@ async function createReceivingInspectionInternal(
       },
     },
   })
+
+  // 클라이언트가 보낸 purchaseOrderId 는 입고 후 발주 상태 갱신(purchaseOrder.update)에 쓰인다.
+  // 발주 품목이 실제로 속한 발주와 다르면 다른 발주(타 테넌트 포함)의 상태를 바꿀 수 있으므로 거절한다.
+  if (purchaseOrderItem.purchaseOrderId !== data.purchaseOrderId) {
+    throw new Error("발주 정보가 일치하지 않습니다. 화면을 새로고침한 후 다시 시도해 주세요.")
+  }
 
   const poStatus = purchaseOrderItem.purchaseOrder.status
   if (poStatus === "CLOSED" || poStatus === "CANCELLED") {
