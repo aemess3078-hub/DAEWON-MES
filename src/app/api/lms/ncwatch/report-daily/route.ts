@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/db/prisma"
 import { verifyAgentKey } from "@/lib/ncwatch/auth"
+import { INGEST_MAX_BODY_BYTES, INGEST_MAX_MACHINES, INGEST_MAX_MACHINE_NAME_LENGTH } from "@/lib/ncwatch/agent-key"
 import { writeSyncLog } from "@/lib/ncwatch/transform"
 import type { MachineReportPayload, MachineResult } from "@/lib/ncwatch/types"
 
@@ -14,7 +15,11 @@ export async function POST(request: NextRequest) {
   }
   const { tenantId } = auth
 
-  // ── 2. payload 파싱 ───────────────────────────────────────────────────────
+  // ── 2. payload 파싱 (크기/건수 상한: DG-033) ──────────────────────────────
+  const declaredLength = Number(request.headers.get("content-length") ?? "0")
+  if (Number.isFinite(declaredLength) && declaredLength > INGEST_MAX_BODY_BYTES) {
+    return NextResponse.json({ error: "Payload too large" }, { status: 413 })
+  }
   let body: { machines?: unknown }
   try {
     body = await request.json()
@@ -29,7 +34,12 @@ export async function POST(request: NextRequest) {
     )
   }
 
-  const machines = body.machines as MachineReportPayload[]
+  if (body.machines.length > INGEST_MAX_MACHINES) {
+    return NextResponse.json({ error: `machines 는 최대 ${INGEST_MAX_MACHINES}건까지 허용됩니다` }, { status: 400 })
+  }
+  const machines = (body.machines as MachineReportPayload[]).filter(
+    (m) => m && typeof m === "object" && (typeof m.machineName !== "string" || m.machineName.length <= INGEST_MAX_MACHINE_NAME_LENGTH)
+  )
   const results: MachineResult[] = []
 
   // ── 3. 기계별 처리 ───────────────────────────────────────────────────────

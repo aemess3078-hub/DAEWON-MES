@@ -27,8 +27,9 @@ function buildEventMessage(m: MachineStatusPayload): string | null {
 export function parseNcwatchTs(ts: string | null | undefined): Date | null {
   if (!ts) return null
   const trimmed = ts.trim()
+  // "2026-10-18 11:39:21", "2026-10-18T11:39:21.123", "2026/10/18 11:39" 등 타임존 없는 값
   const localMatch = trimmed.match(
-    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?$/
+    /^(\d{4})[-/](\d{2})[-/](\d{2})[ T](\d{2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?$/
   )
 
   if (localMatch) {
@@ -57,13 +58,23 @@ export async function syncEquipmentEvent(
   m:             MachineStatusPayload,
   prevStatusCode: number | null
 ): Promise<void> {
-  const statusCode   = m.statusCode ?? 1
+  // 상태코드를 알 수 없는 수신(컬럼 비어있음 등)은 임의로 STOP 으로 간주하지 않는다.
+  if (m.statusCode == null) return
+
+  const statusCode   = m.statusCode
   const newEventType = mapStatusCodeToEventType(statusCode)
   const prevEventType =
     prevStatusCode !== null ? mapStatusCodeToEventType(prevStatusCode) : null
 
-  // 이벤트 타입이 바뀌지 않았으면 skip
-  if (newEventType === prevEventType) return
+  // 이벤트 타입이 바뀌지 않았으면 skip.
+  // 단, 매핑이 상태 수신보다 늦게 만들어진 경우(열린 이벤트가 하나도 없음)에는 현재 상태 이벤트를 1회 연다.
+  if (newEventType === prevEventType) {
+    const hasOpen = await prisma.equipmentEvent.findFirst({
+      where:  { equipmentId, endedAt: null },
+      select: { id: true },
+    })
+    if (hasOpen) return
+  }
 
   const now       = new Date()
   const startedAt = parseNcwatchTs(m.ncwatchTs) ?? now
@@ -73,8 +84,11 @@ export async function syncEquipmentEvent(
     const openEvent = await tx.equipmentEvent.findFirst({
       where:   { equipmentId, endedAt: null },
       orderBy: { startedAt: "desc" },
-      select:  { id: true, startedAt: true },
+      select:  { id: true, startedAt: true, eventType: true },
     })
+
+    // 동시 수신 등으로 이미 같은 타입의 이벤트가 열려 있으면 중복 생성하지 않는다.
+    if (openEvent && openEvent.eventType === newEventType) return
 
     if (openEvent) {
       const durationSec = Math.round(
@@ -209,6 +223,16 @@ export async function syncTagValues(
         }
       }
 
+      // 값·시각이 직전 저장분과 완전히 같으면(설비 오프라인 등으로 NCWatch 행이 갱신되지 않는 경우)
+      // 동일 행 재기록과 스냅샷 조회를 생략한다. (저장 결과는 동일, DB 쓰기/조회만 감소)
+      if (
+        tag.currentValue &&
+        tag.currentValue.value === value &&
+        tag.currentValue.timestamp.getTime() === receivedAt.getTime()
+      ) {
+        return
+      }
+
       // TagCurrentValue upsert (항상 최신 수신값+시각 유지)
       await prisma.tagCurrentValue.upsert({
         where:  { tagId: tag.id },
@@ -240,11 +264,37 @@ export async function syncTagValues(
 }
 
 // ─── NcwatchSyncLog 기록 ─────────────────────────────────────────────────────
+// 10초 주기 수신마다 기계 수+1 행을 쌓으면 하루 4만 행 이상이 된다.
+// 오류는 항상 기록하고, 같은 결과(OK/UNMAPPED)의 반복은 간격(기본 5분)마다 한 번만 기록한다.
+// (서버리스 인스턴스별 메모리 기준의 최선 노력 제한 — 인스턴스가 바뀌면 한 번 더 기록될 수 있다.)
+const SYNC_LOG_REPEAT_INTERVAL_MS = parseInt(
+  process.env.NCWATCH_SYNCLOG_REPEAT_INTERVAL_MS ?? "300000"
+)
+const lastSyncLogAt = new Map<string, number>()
+
+export function shouldWriteSyncLog(
+  key: string,
+  result: string,
+  now: number,
+  intervalMs: number = SYNC_LOG_REPEAT_INTERVAL_MS
+): boolean {
+  if (result === "ERROR") return true
+  const last = lastSyncLogAt.get(key)
+  if (last !== undefined && now - last < intervalMs) return false
+  lastSyncLogAt.set(key, now)
+  return true
+}
+
 export async function writeSyncLog(
   tenantId:     string,
   endpoint:     string,
-  results:      { machineName: string; result: string; message?: string }[],
+  allResults:   { machineName: string; result: string; message?: string }[],
 ): Promise<void> {
+  const now     = Date.now()
+  const results = allResults.filter((r) =>
+    shouldWriteSyncLog(`${tenantId}|${endpoint}|${r.machineName}|${r.result}`, r.result, now)
+  )
+  if (results.length === 0) return
   const hasError    = results.some((r) => r.result === "ERROR")
   const allUnmapped = results.every((r) => r.result === "UNMAPPED")
   const overallResult = hasError ? "ERROR" : allUnmapped ? "UNMAPPED" : "OK"
