@@ -13,6 +13,7 @@ import { requireDeveloper } from "@/lib/auth"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { generateAgentKey, hashAgentKey } from "@/lib/ncwatch/agent-key"
 import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
+import { NCWATCH_DEFAULT_TAGS, ensureNcwatchGateway, isGatewayHeartbeatStale } from "@/lib/ncwatch/provision"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -157,18 +158,6 @@ export type UpsertNcwatchMappingInput = {
   memo?: string | null
 }
 
-type NcwatchDefaultTagDefinition = {
-  tagCode: string
-  displayName: string
-  dataType: TagDataType
-  unit: string | null
-  category: TagCategory
-  plcAddress: string
-  isVisible: boolean
-  isPrimary: boolean
-  displayOrder: number
-}
-
 export type CopyTagConflictMode = "SKIP" | "UPDATE" | "REPLACE"
 
 export type CopyEquipmentTagsInput = {
@@ -200,7 +189,13 @@ export async function getGateways(tenantId: string): Promise<EdgeGatewayRow[]> {
     orderBy: { createdAt: "desc" },
   })
   // 저장된 값은 해시(또는 과거 평문)이므로 목록 응답에는 포함하지 않는다.
-  return rows.map((row) => ({ ...row, apiKey: "********" })) as any
+  // 하트비트(30초 주기)가 끊겨도 DB 의 status 는 ONLINE 으로 남으므로, 표시용으로 마지막 통신이 오래되면 OFFLINE 으로 보여준다.
+  const now = Date.now()
+  return rows.map((row) => ({
+    ...row,
+    apiKey: "********",
+    status: row.status === "ONLINE" && isGatewayHeartbeatStale(row.lastHeartbeat, now) ? "OFFLINE" : row.status,
+  })) as any
 }
 
 export async function createGateway(
@@ -423,178 +418,6 @@ async function resolveNcwatchSiteId(
   return status?.siteId ?? null
 }
 
-const NCWATCH_GATEWAY_NAME = "NCWatch Agent"
-
-const NCWATCH_DEFAULT_TAGS: NcwatchDefaultTagDefinition[] = [
-  // ── 카드 요약(상위 6개) ──────────────────────────────────────────
-  {
-    tagCode: "STATUS",
-    displayName: "운전 상태",
-    dataType: "STRING",
-    unit: null,
-    category: "STATUS",
-    plcAddress: "statusLabel",
-    isVisible: true,
-    isPrimary: true,
-    displayOrder: 10,
-  },
-  {
-    tagCode: "PROGRAM_NAME",
-    displayName: "가공 프로그램",
-    dataType: "STRING",
-    unit: null,
-    category: "PROCESS",
-    plcAddress: "programName",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 20,
-  },
-  {
-    tagCode: "MODE",
-    displayName: "운전 모드",
-    dataType: "STRING",
-    unit: null,
-    category: "STATUS",
-    plcAddress: "modeCode",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 30,
-  },
-  {
-    tagCode: "SPINDLE_SPEED",
-    displayName: "주축 회전수",
-    dataType: "INT",
-    unit: "rpm",
-    category: "PROCESS",
-    plcAddress: "spindleSpeed",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 40,
-  },
-  {
-    tagCode: "FEED_RATE",
-    displayName: "이송 속도",
-    dataType: "INT",
-    unit: "mm/min",
-    category: "PROCESS",
-    plcAddress: "feedRate",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 50,
-  },
-  {
-    tagCode: "PART_COUNT",
-    displayName: "생산 수량",
-    dataType: "INT",
-    unit: "ea",
-    category: "COUNTER",
-    plcAddress: "partCount",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 60,
-  },
-  // ── 파라미터 상세(카드 외, 파라미터보기에서 노출) ────────────────
-  {
-    tagCode: "TOOL_NO",
-    displayName: "공구 번호",
-    dataType: "STRING",
-    unit: null,
-    category: "STATUS",
-    plcAddress: "toolNo",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 70,
-  },
-  {
-    tagCode: "RATIO",
-    displayName: "진행률",
-    dataType: "FLOAT",
-    unit: "%",
-    category: "PROCESS",
-    plcAddress: "ratio",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 80,
-  },
-  {
-    tagCode: "BLOCK_NUMBER",
-    displayName: "블록 번호",
-    dataType: "INT",
-    unit: null,
-    category: "PROCESS",
-    plcAddress: "blockNumber",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 90,
-  },
-  {
-    tagCode: "O_NUMBER",
-    displayName: "프로젝트 번호",
-    dataType: "STRING",
-    unit: null,
-    category: "PROCESS",
-    plcAddress: "oNumber",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 100,
-  },
-  {
-    tagCode: "ALARM_MESSAGE",
-    displayName: "알람 메시지",
-    dataType: "STRING",
-    unit: null,
-    category: "ALARM",
-    plcAddress: "alarmMessage",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 110,
-  },
-  {
-    tagCode: "POS_X",
-    displayName: "X축 위치",
-    dataType: "FLOAT",
-    unit: "mm",
-    category: "PROCESS",
-    plcAddress: "positionX",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 120,
-  },
-  {
-    tagCode: "POS_Y",
-    displayName: "Y축 위치",
-    dataType: "FLOAT",
-    unit: "mm",
-    category: "PROCESS",
-    plcAddress: "positionY",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 130,
-  },
-  {
-    tagCode: "POS_Z",
-    displayName: "Z축 위치",
-    dataType: "FLOAT",
-    unit: "mm",
-    category: "PROCESS",
-    plcAddress: "positionZ",
-    isVisible: true,
-    isPrimary: false,
-    displayOrder: 140,
-  },
-  {
-    tagCode: "ALARM_CODE",
-    displayName: "알람 코드",
-    dataType: "STRING",
-    unit: null,
-    category: "ALARM",
-    plcAddress: "alarmCode",
-    isVisible: false,
-    isPrimary: false,
-    displayOrder: 150,
-  },
-]
-
 async function ensureNcwatchConnectionAndDefaultTags(
   tenantId: string,
   equipmentId: string,
@@ -606,21 +429,7 @@ async function ensureNcwatchConnectionAndDefaultTags(
   })
   if (!equipment) throw new Error("선택한 MES 설비를 찾을 수 없습니다.")
 
-  const gateway =
-    (await prisma.edgeGateway.findFirst({
-      where: { tenantId, siteId: equipment.siteId, name: NCWATCH_GATEWAY_NAME },
-      select: { id: true },
-    })) ??
-    (await prisma.edgeGateway.create({
-      data: {
-        tenantId,
-        siteId: equipment.siteId,
-        name: NCWATCH_GATEWAY_NAME,
-        description: "Virtual gateway for NCWatch Agent push integration",
-        status: "OFFLINE",
-      },
-      select: { id: true },
-    }))
+  const gateway = await ensureNcwatchGateway(prisma, tenantId, equipment.siteId)
 
   const connection = await prisma.equipmentConnection.upsert({
     where: {

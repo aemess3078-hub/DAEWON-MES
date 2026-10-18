@@ -75,6 +75,8 @@
     "test:kpi-report-scope-timezone-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-kpi-report-scope-timezone-integrity.ts",
     "test:f25-master-menu-cleanup-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-f25-master-menu-cleanup-integrity.ts",
     "test:phase10-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-phase10-security.ts",
+    "test:ncwatch-phase12": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-ncwatch-phase12.ts",
+    "ncwatch:ops": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/ncwatch-ops.ts",
     "test:phase11-lot-qr": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-phase11-lot-qr.ts",
     "lot-policy:dry-run": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/lot-policy-dry-run.ts",
     "test:f27-inventory-adjustment-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-f27-inventory-adjustment-integrity.ts",
