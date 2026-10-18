@@ -13,7 +13,7 @@ import {
   type DefectCauseAnalysisRow,
 } from "./defect-cause-analysis.helpers"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
-import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { requireReadActor } from "@/lib/auth/action-guards"
 
 export type { DefectCauseAnalysisRow }
 
@@ -90,7 +90,7 @@ async function getDefectCauseAnalysisRecords(tenantId: string, filter: DefectCau
 export async function getDefectCauseAnalysisList(
   filter: DefectCauseAnalysisFilter = {}
 ): Promise<DefectCauseAnalysisRow[]> {
-  await assertDaewonFeatureScope()
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
   await requireRole("VIEWER")
   const tenantId = await getTenantId()
   const records = await getDefectCauseAnalysisRecords(tenantId, filter)
@@ -106,7 +106,7 @@ export type DefectCauseAnalysisFilterOptions = {
 }
 
 export async function getDefectCauseAnalysisFilterOptions(): Promise<DefectCauseAnalysisFilterOptions> {
-  await assertDaewonFeatureScope()
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
   await requireRole("VIEWER")
   const tenantId = await getTenantId()
 
@@ -168,7 +168,6 @@ export type CreateDefectCauseAnalysisInput = {
 export async function createDefectCauseAnalysis(
   data: CreateDefectCauseAnalysisInput
 ): Promise<{ id: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("DEFECT_MANAGEMENT", "CREATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
@@ -221,7 +220,6 @@ export type UpdateDefectCauseAnalysisInput = {
 }
 
 export async function updateDefectCauseAnalysis(id: string, data: UpdateDefectCauseAnalysisInput) {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("DEFECT_MANAGEMENT", "UPDATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()

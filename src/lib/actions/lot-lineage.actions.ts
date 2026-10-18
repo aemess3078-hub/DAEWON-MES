@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { assertSessionTenant } from "@/lib/auth/action-guards"
 
 function toNumber(value: unknown): number {
   return Number(value ?? 0)
@@ -14,7 +15,9 @@ function unique(values: Array<string | null | undefined>): string[] {
 export type LotLineageResult = Awaited<ReturnType<typeof getLotLineageByNo>>
 
 export async function getLotLineageByNo(lotNo: string, tenantId: string) {
-  await requireResourcePermission("LOT", "READ")
+  // 클라이언트 tenantId 는 신뢰하지 않는다 — 세션 tenant 와 다르면 거부.
+  const actor = await requireResourcePermission("LOT", "READ")
+  assertSessionTenant(actor, tenantId)
   const query = lotNo.trim()
   if (!query) return null
 

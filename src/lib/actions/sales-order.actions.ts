@@ -9,10 +9,13 @@ import { hasResourcePermission, getCurrentPermissionSnapshot, requireResourcePer
 import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { getSalesOrderProgressForTenant } from "@/lib/sales-order-progress.server"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
 export async function getSalesOrders(tenantId: string) {
+  const sessionActor = await requireReadActor("SALES_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   const rows = await prisma.salesOrder.findMany({
     where: { tenantId },
     include: {
@@ -38,6 +41,8 @@ export async function getSalesOrders(tenantId: string) {
 export type SalesOrderStatusRow = Awaited<ReturnType<typeof getSalesOrderStatusRows>>[number]
 
 export async function getSalesOrderStatusRows(tenantId: string) {
+  const sessionActor = await requireReadActor("SALES_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   const rows = await prisma.salesOrder.findMany({
     where: { tenantId },
     select: {
@@ -83,6 +88,8 @@ export async function getSalesOrderStatusRows(tenantId: string) {
 }
 
 export async function getCustomers(tenantId: string) {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   return prisma.businessPartner.findMany({
     where: { tenantId, partnerType: { in: ["CUSTOMER", "BOTH"] } },
     orderBy: { name: "asc" },
@@ -90,6 +97,8 @@ export async function getCustomers(tenantId: string) {
 }
 
 export async function getItemsForSales(tenantId: string) {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   return prisma.item.findMany({
     where: { tenantId, status: "ACTIVE", itemType: "FINISHED" },
     orderBy: { name: "asc" },
@@ -99,6 +108,8 @@ export async function getItemsForSales(tenantId: string) {
 // ─── Business Logic ───────────────────────────────────────────────────────────
 
 export async function generateSalesOrderNo(tenantId: string): Promise<string> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   const { year } = kstDateParts()
   const prefix = `SO-${year}-`
   const last = await prisma.salesOrder.findFirst({
@@ -344,6 +355,8 @@ export async function checkInventoryForSalesOrder(
   salesOrderId: string,
   tenantId: string
 ): Promise<ItemStockStatus[]> {
+  const sessionActor = await requireReadActor("SALES_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   const order = await prisma.salesOrder.findUniqueOrThrow({
     where: { id: salesOrderId },
     include: {
@@ -422,6 +435,8 @@ export async function getSalesOrderFulfillmentStatus(
   tenantId: string,
   includeNonConfirmed: boolean
 ): Promise<FulfillmentRow[]> {
+  const sessionActor = await requireReadActor(["SALES_ORDER", "PRODUCTION_PLAN", "MRP", "DASHBOARD"])
+  assertSessionTenant(sessionActor, tenantId)
   const statusFilter: SalesOrderStatus[] = [
     "CONFIRMED",
     "IN_PRODUCTION",

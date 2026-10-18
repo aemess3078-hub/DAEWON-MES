@@ -9,6 +9,7 @@ import { ItemFormValues } from "@/app/app/mes/items/item-form-schema"
 import { checkItemReferencesForBulk } from "./reference-check.server"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { normalizeSafetyStock } from "@/lib/item-safety-stock"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 /** 선택 일괄삭제 권한: ADMIN 이상, 또는 role 계층과 무관한 개발자 계정(loginId='test'). */
 async function requireBulkDeletePermission(): Promise<CurrentUser> {
@@ -38,6 +39,7 @@ export type WarehouseForItemForm = {
 }
 
 export async function getItems(): Promise<ItemWithDetails[]> {
+  await requireReadActor("ITEM")
   const tenantId = await getTenantId()
   return prisma.item.findMany({
     where: { tenantId },
@@ -51,6 +53,7 @@ export async function getItems(): Promise<ItemWithDetails[]> {
 }
 
 export async function getWarehousesForItemForm(): Promise<WarehouseForItemForm[]> {
+  await requireActor()
   const tenantId = await getTenantId()
   const warehouses = await prisma.warehouse.findMany({
     where: { tenantId },
@@ -116,6 +119,7 @@ function resolveLotNumberingSettings(data: ItemFormValues): {
 }
 
 export async function getItemCategories() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.itemCategory.findMany({
     where: { tenantId, itemType: { not: null } },
@@ -124,6 +128,7 @@ export async function getItemCategories() {
 }
 
 export async function getItemGroupsForForm() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.itemGroup.findMany({
     where: { tenantId, isActive: true },
@@ -280,6 +285,7 @@ export type ItemReferenceCount = {
 
 /** 품목 삭제 전 참조 건수 조회 (dry-run). DB를 수정하지 않는다. */
 export async function checkItemReferences(id: string): Promise<ItemReferenceCount> {
+  await requireReadActor("ITEM")
   const tenantId = await getTenantId()
   const [bom, bomComponent, routing, workOrder, inventory, salesOrder, wipUnit, txHistory, workStandardMapping] =
     await Promise.all([

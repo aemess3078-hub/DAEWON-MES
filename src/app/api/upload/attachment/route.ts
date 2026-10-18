@@ -14,10 +14,8 @@ import {
 } from "@/lib/actions/attachment.helpers"
 
 // 대원정밀 구축 범위 밖 화면(원인분석/조치관리/재발방지/설비수리)에서만 쓰이는 업무유형
+// (원인분석/조치관리/재발방지는 Phase 10 / DG-016 에서 범위에 포함 — 설비수리만 개발자 전용으로 남는다)
 const OUT_OF_SCOPE_ENTITY_TYPES = new Set([
-  "DEFECT_CAUSE_ANALYSIS",
-  "DEFECT_CORRECTIVE_ACTION",
-  "DEFECT_RECURRENCE_PREVENTION",
   "EQUIPMENT_REPAIR_REQUEST",
 ])
 

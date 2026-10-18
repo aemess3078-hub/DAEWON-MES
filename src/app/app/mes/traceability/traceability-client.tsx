@@ -1,11 +1,14 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { Search } from "lucide-react"
+import { Camera, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { getLotLineageByNo, type LotLineageResult } from "@/lib/actions/lot-lineage.actions"
 import { formatQuantity } from "@/lib/utils"
+import { LotScanDialog } from "@/components/common/barcode/lot-scan-dialog"
+import { classifyScanInput, lotNoFromScan } from "@/lib/qr/lot-qr"
+import { LotTracePanel } from "./lot-trace-panel"
 
 type Lineage = NonNullable<LotLineageResult>
 
@@ -78,6 +81,7 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
   const [lineage, setLineage] = useState<Lineage | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [scanOpen, setScanOpen] = useState(false)
 
   const hasAnyProductionLink = useMemo(() => Boolean(
     lineage && (
@@ -92,9 +96,17 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
     ),
   ), [lineage])
 
-  const handleSearch = async () => {
-    const q = query.trim()
-    if (!q) return
+  const handleSearch = async (override?: string) => {
+    const typed = (override ?? query).trim()
+    if (!typed) return
+    // LOT QR 문자열을 붙여넣었거나 스캐너가 입력한 경우 LOT 번호로 풀어 쓴다.
+    const scan = classifyScanInput(typed)
+    if (scan.kind === "INVALID") {
+      setError(scan.message)
+      return
+    }
+    const q = lotNoFromScan(scan) ?? typed
+    setQuery(q)
     setLoading(true)
     setError(null)
     setLineage(null)
@@ -127,10 +139,19 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-            placeholder="LOT 번호 입력"
-            className="flex-1 text-[14px]"
+            placeholder="LOT 번호 입력 또는 QR 스캔"
+            className="h-11 flex-1 text-[15px]"
           />
-          <Button onClick={handleSearch} disabled={loading || !query.trim()} className="shrink-0 gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => setScanOpen(true)}
+            className="h-11 shrink-0 gap-2 text-[15px]"
+          >
+            <Camera className="h-4 w-4" />
+            QR 스캔
+          </Button>
+          <Button onClick={() => void handleSearch()} disabled={loading || !query.trim()} className="h-11 shrink-0 gap-2 text-[15px]">
             <Search className="h-4 w-4" />
             {loading ? "추적 중..." : "추적"}
           </Button>
@@ -139,6 +160,13 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
       </div>
 
       {lineage && <LotSummary lineage={lineage} />}
+
+      {lineage && (
+        <LotTracePanel
+          lotNo={lineage.lot.lotNo}
+          defaultDirection={lineage.lot.item.itemType === "FINISHED" ? "REVERSE" : "FORWARD"}
+        />
+      )}
 
       {lineage && !hasAnyProductionLink && (
         <Empty>연결된 생산이력을 확인할 수 없습니다. LOT 번호/일자/품목명으로 생산이력을 추정 연결하지 않습니다.</Empty>
@@ -311,6 +339,16 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
           <p className="mt-1 text-[13px] text-slate-400">원자재 투입, 작업지시, 공정/실적, 검사, 입고, 출하를 LOT FK 기준으로 조회합니다.</p>
         </div>
       )}
+
+      <LotScanDialog
+        open={scanOpen}
+        onOpenChange={setScanOpen}
+        context={{ purpose: "TRACE" }}
+        title="LOT QR 스캔 — 제조이력 추적"
+        confirmLabel="이 LOT 추적"
+        allowUnusable
+        onConfirm={(res) => void handleSearch(res.lot.lotNo)}
+      />
     </div>
   )
 }

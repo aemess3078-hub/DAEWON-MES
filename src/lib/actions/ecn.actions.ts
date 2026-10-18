@@ -6,6 +6,8 @@ import { revalidatePath } from "next/cache"
 import { getCurrentUser, requireRole, type CurrentUser } from "@/lib/auth"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
+import { isDeveloperUser } from "@/lib/developer"
 
 export type ECNDetail = {
   id: string
@@ -95,11 +97,17 @@ export async function getECNs(
   profileId: string,
   isAdmin: boolean,
 ): Promise<ECNWithDetails[]> {
+  // 호출 인자의 profileId/isAdmin 은 신뢰하지 않는다(권한 상승 방지) — 세션 사용자 기준으로 서버가 결정한다.
+  void profileId
+  void isAdmin
+  const user = await requireReadActor("ECN")
+  assertSessionTenant(user, tenantId)
+  const canSeeAll = isDeveloperUser(user) || isManagerRole(user)
   try {
     const results = await prisma.engineeringChange.findMany({
       where: {
-        tenantId,
-        ...(isAdmin ? {} : { requestedBy: profileId }),
+        tenantId: user.tenantId,
+        ...(canSeeAll ? {} : { requestedBy: user.profileId }),
       },
       include: ECN_INCLUDE,
       orderBy: { createdAt: "desc" },
@@ -112,17 +120,21 @@ export async function getECNs(
 }
 
 export async function getECNById(id: string): Promise<ECNWithDetails | null> {
-  const result = await prisma.engineeringChange.findUnique({
-    where: { id },
+  const user = await requireReadActor("ECN")
+  const canSeeAll = isDeveloperUser(user) || isManagerRole(user)
+  const result = await prisma.engineeringChange.findFirst({
+    where: { id, tenantId: user.tenantId, ...(canSeeAll ? {} : { requestedBy: user.profileId }) },
     include: ECN_INCLUDE,
   })
   return result as any
 }
 
 export async function getItemsForECN(tenantId: string) {
+  const user = await requireReadActor("ECN")
+  assertSessionTenant(user, tenantId)
   try {
     return await prisma.item.findMany({
-      where: { tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] }, status: "ACTIVE" },
+      where: { tenantId: user.tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] }, status: "ACTIVE" },
       select: { id: true, code: true, name: true, itemType: true },
       orderBy: { name: "asc" },
     })
@@ -133,8 +145,9 @@ export async function getItemsForECN(tenantId: string) {
 }
 
 export async function getCurrentBOM(itemId: string) {
+  const user = await requireReadActor("ECN")
   return prisma.bOM.findFirst({
-    where: { itemId, status: "ACTIVE" },
+    where: { itemId, tenantId: user.tenantId, status: "ACTIVE" },
     include: {
       bomItems: {
         include: { componentItem: { select: { id: true, code: true, name: true, uom: true } } },
@@ -145,11 +158,13 @@ export async function getCurrentBOM(itemId: string) {
 }
 
 export async function getCurrentRouting(itemId: string) {
+  const user = await requireReadActor("ECN")
   const itemRouting = await prisma.itemRouting.findFirst({
     where: {
       itemId,
+      tenantId: user.tenantId,
       isDefault: true,
-      routing: { status: "ACTIVE" },
+      routing: { tenantId: user.tenantId, status: "ACTIVE" },
     },
     include: {
       routing: {
@@ -188,6 +203,9 @@ export async function createECN(data: CreateECNInput, tenantId: string, requeste
   if (tenantId !== user.tenantId || requestedBy !== user.profileId) {
     throw new Error("권한이 없습니다.")
   }
+
+  const ownedItem = await prisma.item.findFirst({ where: { id: data.targetItemId, tenantId }, select: { id: true } })
+  if (!ownedItem) throw new Error("대상 품목을 찾을 수 없습니다.")
 
   const ecnNo = await generateECNNo(tenantId)
   await prisma.engineeringChange.create({

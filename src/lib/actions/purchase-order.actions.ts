@@ -13,10 +13,14 @@ import {
   closePurchaseOrderRemainder as closePurchaseOrderRemainderCore,
   type PurchaseOrderCloseResult,
 } from "@/lib/services/purchase-order-close.service"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
+import { PO_CREATE_STATUSES, isAllowedPurchaseOrderTransition, transitionRequiresNoHistory } from "@/lib/purchase-order-status"
 
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
 export async function getPurchaseOrders(tenantId: string) {
+  const sessionActor = await requireReadActor("PURCHASE_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   const rows = await prisma.purchaseOrder.findMany({
     where: {
       tenantId,
@@ -60,6 +64,8 @@ export async function getPurchaseOrders(tenantId: string) {
 //  - 입고 대기 상태(ORDERED / PARTIAL_RECEIVED)만
 //  - 외주발주(OS- / [OUTSOURCING]) 제외 — getPurchaseOrders와 동일 정책
 export async function getPendingPurchaseOrdersForReceipt(tenantId: string, siteId: string) {
+  const sessionActor = await requireReadActor("PURCHASE_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
   const rows = await prisma.purchaseOrder.findMany({
     where: {
       tenantId,
@@ -101,6 +107,8 @@ export async function getPendingPurchaseOrdersForReceipt(tenantId: string, siteI
 }
 
 export async function getSuppliers(tenantId: string) {
+  const sessionActor = await requireReadActor(["PURCHASE_ORDER", "PARTNER_MANAGEMENT"])
+  assertSessionTenant(sessionActor, tenantId)
   return prisma.businessPartner.findMany({
     where: { tenantId, partnerType: { in: ["SUPPLIER", "BOTH"] } },
     orderBy: { name: "asc" },
@@ -108,6 +116,8 @@ export async function getSuppliers(tenantId: string) {
 }
 
 export async function getRawMaterials(tenantId: string) {
+  const sessionActor = await requireReadActor(["PURCHASE_ORDER", "ITEM"])
+  assertSessionTenant(sessionActor, tenantId)
   return prisma.item.findMany({
     where: {
       tenantId,
@@ -118,7 +128,8 @@ export async function getRawMaterials(tenantId: string) {
   })
 }
 
-export async function getItemCurrentStock(
+// 서버 내부(이미 인증된 createPurchaseOrder 루프)에서 재사용하는 비공개 조회 — 품목마다 권한 쿼리를 반복하지 않는다.
+async function loadItemCurrentStock(
   itemId: string,
   tenantId: string
 ): Promise<{ qtyOnHand: number; qtyAvailable: number }> {
@@ -130,11 +141,22 @@ export async function getItemCurrentStock(
   return { qtyOnHand, qtyAvailable }
 }
 
+export async function getItemCurrentStock(
+  itemId: string,
+  tenantId: string
+): Promise<{ qtyOnHand: number; qtyAvailable: number }> {
+  const sessionActor = await requireReadActor("PURCHASE_ORDER")
+  assertSessionTenant(sessionActor, tenantId)
+  return loadItemCurrentStock(itemId, tenantId)
+}
+
 export async function getItemPrice(
   tenantId: string,
   itemId: string,
   partnerId: string
 ) {
+  const sessionActor = await requireReadActor(["PURCHASE_ORDER", "ITEM_PRICE"])
+  assertSessionTenant(sessionActor, tenantId)
   return prisma.itemPrice.findFirst({
     where: {
       tenantId,
@@ -192,6 +214,39 @@ async function assertPurchaseOrderHasNoOperationalHistory(
   }
 }
 
+// 발주 입력 무결성: 수량/단가 숫자 검증 + site/supplier/item 이 세션 tenant 소유인지 확인(DG-021).
+function assertPurchaseOrderItemInputs(items: { itemId: string; qty: number; unitPrice: number }[]) {
+  if (!Array.isArray(items) || items.length === 0) throw new Error("발주 품목을 1개 이상 입력해 주세요.")
+  const seen = new Set<string>()
+  for (const item of items) {
+    if (!item.itemId) throw new Error("품목을 선택해 주세요.")
+    if (seen.has(item.itemId)) throw new Error("같은 품목을 한 발주에 중복 등록할 수 없습니다.")
+    seen.add(item.itemId)
+    if (!Number.isFinite(item.qty) || item.qty <= 0) throw new Error("발주수량은 0보다 큰 숫자여야 합니다.")
+    if (!Number.isFinite(item.unitPrice) || item.unitPrice < 0) throw new Error("발주단가는 0 이상의 숫자여야 합니다.")
+  }
+}
+
+async function assertPurchaseOrderRelationsOwned(
+  tenantId: string,
+  rel: { siteId?: string; supplierId?: string; itemIds?: string[] }
+) {
+  const itemIds = Array.from(new Set(rel.itemIds ?? []))
+  const [site, supplier, itemCount] = await Promise.all([
+    rel.siteId ? prisma.site.findFirst({ where: { id: rel.siteId, tenantId }, select: { id: true } }) : Promise.resolve(true),
+    rel.supplierId
+      ? prisma.businessPartner.findFirst({
+          where: { id: rel.supplierId, tenantId, partnerType: { in: ["SUPPLIER", "BOTH"] } },
+          select: { id: true },
+        })
+      : Promise.resolve(true),
+    itemIds.length > 0 ? prisma.item.count({ where: { id: { in: itemIds }, tenantId } }) : Promise.resolve(0),
+  ])
+  if (!site) throw new Error("사업장을 찾을 수 없습니다.")
+  if (!supplier) throw new Error("공급처를 찾을 수 없습니다.")
+  if (itemCount !== itemIds.length) throw new Error("발주 품목 중 사용할 수 없는 품목이 있습니다.")
+}
+
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
 
 export type CreatePurchaseOrderItemInput = {
@@ -220,9 +275,18 @@ export async function createPurchaseOrder(
   await requireResourcePermission("PURCHASE_ORDER", "CREATE")
   const actor = await requireRole("OPERATOR")
   if (actor.tenantId !== tenantId) throw new Error("FORBIDDEN")
+  if (!PO_CREATE_STATUSES.includes(data.status)) {
+    throw new Error("발주 생성 시에는 초안 또는 발주완료 상태만 지정할 수 있습니다.")
+  }
+  assertPurchaseOrderItemInputs(data.items)
+  await assertPurchaseOrderRelationsOwned(tenantId, {
+    siteId,
+    supplierId: data.supplierId,
+    itemIds: data.items.map((item) => item.itemId),
+  })
   const itemsWithStock = await Promise.all(
     data.items.map(async (item) => {
-      const stock = await getItemCurrentStock(item.itemId, tenantId)
+      const stock = await loadItemCurrentStock(item.itemId, tenantId)
       return { ...item, stockAtOrder: stock.qtyOnHand }
     })
   )
@@ -294,7 +358,21 @@ export async function updatePurchaseOrder(id: string, data: UpdatePurchaseOrderI
   const current = await prisma.purchaseOrder.findFirstOrThrow({ where: { id, tenantId } })
   const canEditItems = current.status === "DRAFT"
 
+  // 상태 전이 검증: 입고/종결 상태는 시스템 처리(입고·잔량 종결)로만 바뀐다.
+  const statusChanged = data.status !== undefined && data.status !== current.status
+  if (data.status !== undefined && !isAllowedPurchaseOrderTransition(current.status, data.status)) {
+    throw new Error(`발주 상태를 ${current.status} 에서 ${data.status} (으)로 변경할 수 없습니다.`)
+  }
+  if (canEditItems && data.items) assertPurchaseOrderItemInputs(data.items)
+  await assertPurchaseOrderRelationsOwned(tenantId, {
+    supplierId: data.supplierId,
+    itemIds: canEditItems ? data.items?.map((item) => item.itemId) : undefined,
+  })
+
   await prisma.$transaction(async (tx) => {
+    if (statusChanged && data.status && transitionRequiresNoHistory(current.status, data.status)) {
+      await assertPurchaseOrderHasNoOperationalHistory(tx, id, tenantId)
+    }
     if (canEditItems && data.items) {
       await assertPurchaseOrderHasNoOperationalHistory(tx, id, tenantId)
       await tx.purchaseOrderItem.deleteMany({ where: { purchaseOrderId: id } })

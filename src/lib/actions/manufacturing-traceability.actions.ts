@@ -3,6 +3,7 @@
 import { prisma } from "@/lib/db/prisma"
 import { getLotGenealogyForTraceability, type LotGenealogyNode } from "./lot-genealogy.helpers"
 import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { requireActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── 의료기기 제조번호 추적성 ────────────────────────────────────────────────
 //
@@ -171,6 +172,7 @@ export async function getManufacturingTraceability(
   tenantId: string,
 ): Promise<ManufacturingTraceability | null> {
   await assertDaewonFeatureScope()
+  assertSessionTenant(await requireActor(), tenantId)
   const trimmed = manufacturingNo.trim()
   if (!trimmed) return null
 
@@ -519,6 +521,7 @@ export async function listManufacturingNos(
   search?: string,
 ): Promise<{ manufacturingNo: string; orderNo: string; itemName: string }[]> {
   await assertDaewonFeatureScope()
+  assertSessionTenant(await requireActor(), tenantId)
   const rows = await prisma.workOrder.findMany({
     where: {
       tenantId,

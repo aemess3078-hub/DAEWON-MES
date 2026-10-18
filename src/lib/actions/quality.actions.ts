@@ -20,6 +20,7 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { recordAuditLog } from "@/lib/audit-log"
 import { assertNoAttachmentsForEntity } from "./attachment.actions"
 import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type { CreateMeasurementInput }
 
@@ -328,6 +329,8 @@ async function getQualityInspectionRecords(tenantId: string) {
 }
 
 export async function getDefectCodes(tenantId: string): Promise<DefectCodeRow[]> {
+  const sessionActor = await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION"])
+  assertSessionTenant(sessionActor, tenantId)
   return prisma.defectCode.findMany({
     where: { tenantId },
     orderBy: [{ defectCategory: "asc" }, { code: "asc" }],
@@ -336,7 +339,8 @@ export async function getDefectCodes(tenantId: string): Promise<DefectCodeRow[]>
 
 export async function createDefectCode(data: CreateDefectCodeInput, tenantId: string) {
   await requireResourcePermission("DEFECT_MANAGEMENT", "CREATE")
-  await requireRole("OPERATOR")
+  const sessionUser = await requireRole("OPERATOR")
+  assertSessionTenant(sessionUser, tenantId)
   const existing = await prisma.defectCode.findFirst({
     where: { tenantId, code: data.code },
   })
@@ -469,6 +473,8 @@ export async function bulkDeleteDefectCodes(ids: string[]): Promise<BulkDeleteDe
 }
 
 export async function getInspectionSpecs(tenantId: string): Promise<InspectionSpecWithItems[]> {
+  const sessionActor = await requireReadActor(["INSPECTION_SPEC", "QUALITY_INSPECTION"])
+  assertSessionTenant(sessionActor, tenantId)
   const specs = await prisma.inspectionSpec.findMany({
     where: { tenantId },
     include: {
@@ -486,7 +492,15 @@ export async function createInspectionSpec(
   tenantId: string
 ) {
   await requireResourcePermission("INSPECTION_SPEC", "CREATE")
-  await requireRole("OPERATOR")
+  const sessionUser = await requireRole("OPERATOR")
+  assertSessionTenant(sessionUser, tenantId)
+  // 품목·공정이 세션 tenant 소유인지 서버에서 확인(타 tenant 관계 ID 혼입 방지)
+  const [ownedItem, ownedOperation] = await Promise.all([
+    prisma.item.findFirst({ where: { id: data.itemId, tenantId }, select: { id: true } }),
+    prisma.routingOperation.findFirst({ where: { id: data.routingOperationId, routing: { tenantId } }, select: { id: true } }),
+  ])
+  if (!ownedItem) throw new Error("품목을 찾을 수 없습니다.")
+  if (!ownedOperation) throw new Error("공정을 찾을 수 없습니다.")
   const existing = await prisma.inspectionSpec.findFirst({
     where: {
       tenantId,
@@ -768,6 +782,7 @@ export async function deleteQualityInspection(id: string) {
 }
 
 export async function getItemsForQuality() {
+  await requireActor()
   return prisma.item.findMany({
     select: { id: true, code: true, name: true },
     where: { status: "ACTIVE" },
@@ -776,6 +791,8 @@ export async function getItemsForQuality() {
 }
 
 export async function getRoutingOperationsForQuality(tenantId: string) {
+  const sessionActor = await requireReadActor(["INSPECTION_SPEC", "QUALITY_INSPECTION"])
+  assertSessionTenant(sessionActor, tenantId)
   return prisma.routingOperation.findMany({
     where: { routing: { tenantId } },
     select: {

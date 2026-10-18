@@ -6,6 +6,7 @@ import { WorkCenterKind } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { checkWorkCenterReferencesForBulk } from "./reference-check.server"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type WorkCenterWithDetails = {
   id: string
@@ -20,6 +21,7 @@ export type WorkCenterWithDetails = {
 }
 
 export async function getWorkCentersWithDetails(): Promise<WorkCenterWithDetails[]> {
+  await requireReadActor("ROUTING")
   const tenantId = await getTenantId()
   return prisma.workCenter.findMany({
     where: { site: { tenantId } },
@@ -32,6 +34,7 @@ export async function getWorkCentersWithDetails(): Promise<WorkCenterWithDetails
 }
 
 export async function getSitesForWorkCenter() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.site.findMany({
     where: { tenantId },

@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { getTenantId } from "@/lib/auth"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +31,7 @@ function getTodayRangeKst(): { date: string; from: Date; to: Date } {
 // ─── 일일 생산현황 요약 (KST 오늘) ──────────────────────────────────────────────
 
 export async function getDailyProductionSummary(): Promise<DailyProductionSummary> {
+  await requireReadActor(["WORK_RESULT", "EQUIPMENT_MONITOR", "DASHBOARD"])
   const tenantId = await getTenantId()
   const { date, from, to } = getTodayRangeKst()
 

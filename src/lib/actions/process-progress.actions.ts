@@ -7,7 +7,7 @@ import { requireRole, getTenantId } from "@/lib/auth"
 import { startOperation } from "@/lib/actions/pop.actions"
 import { assertDirectOperationStatusRequestAllowed } from "@/lib/operation-status-integrity"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
-import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -75,6 +75,8 @@ export type ReworkRow = {
 export async function getOperationProgressList(
   tenantId: string
 ): Promise<OperationProgressRow[]> {
+  const sessionActor = await requireReadActor("WORK_RESULT")
+  assertSessionTenant(sessionActor, tenantId)
   const operations = await prisma.workOrderOperation.findMany({
     where: {
       workOrder: {
@@ -158,7 +160,8 @@ export async function getOperationProgressList(
 export async function getReworkPendingList(
   tenantId: string
 ): Promise<ReworkRow[]> {
-  await assertDaewonFeatureScope()
+  const sessionActor = await requireReadActor("WORK_RESULT")
+  assertSessionTenant(sessionActor, tenantId)
   const reworkWipUnits = await prisma.wipUnit.findMany({
     where: {
       tenantId,
@@ -341,11 +344,12 @@ export type CompleteReworkInput = {
 export async function completeRework(
   input: CompleteReworkInput
 ): Promise<{ ok: boolean; error?: string }> {
-  await assertDaewonFeatureScope()
-  await requireResourcePermission("WORK_RESULT", "UPDATE")
+  // 개발자 전용이던 것을 기존 Role/Permission 체계(WORK_RESULT UPDATE = MANAGER 이상)로 전환한다.
+  const actor = await requireResourcePermission("WORK_RESULT", "UPDATE")
   try {
     await prisma.$transaction(async (tx) => {
       const { reworkWipUnitId, mergedQty, scrapQty } = input
+      if (!reworkWipUnitId) throw new Error("재작업 대상을 선택해 주세요.")
       if (
         !Number.isFinite(mergedQty) ||
         !Number.isFinite(scrapQty) ||
@@ -356,8 +360,9 @@ export async function completeRework(
         throw new Error("복귀 수량과 폐기 수량을 올바르게 입력하세요.")
       }
 
-      const child = await tx.wipUnit.findUnique({
-        where: { id: reworkWipUnitId },
+      // id 만으로 조회하면 타 tenant 재공을 종결할 수 있으므로 세션 tenant 를 함께 조건으로 둔다.
+      const child = await tx.wipUnit.findFirst({
+        where: { id: reworkWipUnitId, tenantId: actor.tenantId },
         include: {
           parentWipUnit: {
             select: {

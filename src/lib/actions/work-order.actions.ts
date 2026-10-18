@@ -25,6 +25,7 @@ import {
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { isUniqueConstraintError, kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -221,7 +222,9 @@ export type ProductionPlanItemForWorkOrder = {
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
 export async function getWorkOrders(): Promise<WorkOrderWithDetails[]> {
+  const sessionActor = await requireReadActor("WORK_ORDER")
   const workOrders = await prisma.workOrder.findMany({
+    where: { tenantId: sessionActor.tenantId },
     include: workOrderInclude,
     orderBy: [{ createdAt: "desc" }],
   })
@@ -232,6 +235,8 @@ export async function getWorkOrders(): Promise<WorkOrderWithDetails[]> {
 export type WipInventoryRow = Awaited<ReturnType<typeof getWipInventoryRows>>[number]
 
 export async function getWipInventoryRows(tenantId: string) {
+  const sessionActor = await requireReadActor(["INVENTORY", "WORK_ORDER", "WORK_RESULT"])
+  assertSessionTenant(sessionActor, tenantId)
   const workOrders = await prisma.workOrder.findMany({
     where: {
       tenantId,
@@ -461,8 +466,10 @@ export async function getWipInventoryRows(tenantId: string) {
 }
 
 export async function getWorkOrderById(id: string): Promise<WorkOrderWithDetails | null> {
-  const workOrder = await prisma.workOrder.findUnique({
-    where: { id },
+  const sessionActor = await requireReadActor("WORK_ORDER")
+  // id 만으로 조회하면 타 tenant 작업지시가 노출되므로 세션 tenant 를 함께 조건으로 둔다(IDOR 방지).
+  const workOrder = await prisma.workOrder.findFirst({
+    where: { id, tenantId: sessionActor.tenantId },
     include: workOrderInclude,
   })
 
@@ -470,23 +477,27 @@ export async function getWorkOrderById(id: string): Promise<WorkOrderWithDetails
 }
 
 export async function getSites() {
+  const sessionActor = await requireActor()
   return prisma.site.findMany({
+    where: { tenantId: sessionActor.tenantId },
     select: { id: true, code: true, name: true, type: true },
     orderBy: { name: "asc" },
   })
 }
 
 export async function getItemsForWorkOrder() {
+  const sessionActor = await requireActor()
   return prisma.item.findMany({
-    where: { itemType: { in: ["FINISHED", "SEMI_FINISHED"] } },
+    where: { tenantId: sessionActor.tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] } },
     select: { id: true, code: true, name: true, itemType: true },
     orderBy: { code: "asc" },
   })
 }
 
 export async function getBomsForItem(itemId: string) {
+  const sessionActor = await requireActor()
   return prisma.bOM.findMany({
-    where: { itemId, status: "ACTIVE" },
+    where: { itemId, tenantId: sessionActor.tenantId, status: "ACTIVE" },
     select: { id: true, version: true, isDefault: true },
     orderBy: { version: "asc" },
   })
@@ -495,6 +506,7 @@ export async function getBomsForItem(itemId: string) {
 // 범용(COMMON) + 품목전용(ITEM_SPECIFIC) 라우팅을 함께 조회한다. 작업지시 화면은 공정 자동 채움을
 // 위해 operations까지 필요해 routing.actions.ts의 getAvailableRoutingsForItem(요약본)과 별도로 둔다.
 export async function getRoutingsForItem(itemId: string) {
+  await requireActor()
   const tenantId = await getTenantId()
   const operationsInclude = {
     orderBy: { seq: "asc" as const },
@@ -539,7 +551,9 @@ export async function getRoutingsForItem(itemId: string) {
 }
 
 export async function getEquipments() {
+  const sessionActor = await requireActor()
   return prisma.equipment.findMany({
+    where: { tenantId: sessionActor.tenantId },
     select: { id: true, code: true, name: true, equipmentType: true, workCenterId: true },
     orderBy: { code: "asc" },
   })
@@ -548,6 +562,8 @@ export async function getEquipments() {
 export async function getConfirmedProductionPlanItemsForWorkOrder(
   tenantId: string
 ): Promise<ProductionPlanItemForWorkOrder[]> {
+  const sessionActor = await requireReadActor(["WORK_ORDER", "PRODUCTION_PLAN"])
+  assertSessionTenant(sessionActor, tenantId)
   const rows = await prisma.productionPlanItem.findMany({
     where: {
       plan: {
@@ -765,6 +781,8 @@ async function validateWorkOrderOperationAssignments(
 // ─── Business Logic ───────────────────────────────────────────────────────────
 
 export async function generateOrderNo(tenantId: string): Promise<string> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   const { year } = kstDateParts()
   const prefix = `WO-${year}-`
 
@@ -841,6 +859,8 @@ export async function generateManufacturingNo(
   itemId?: string | null,
   sequenceOffset = 0,
 ): Promise<string> {
+  const sessionActor = await requireActor()
+  assertSessionTenant(sessionActor, tenantId)
   const itemContext = await getCnsItemRuleContext(tenantId, itemId)
   return generateCnsManufacturingNo(prisma, tenantId, itemContext, new Date(), sequenceOffset)
 }

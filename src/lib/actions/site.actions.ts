@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db/prisma"
 import { SiteType } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type SiteWithLocations = {
   id: string
@@ -34,6 +35,7 @@ export type SiteRow = {
 }
 
 export async function getSites(): Promise<SiteRow[]> {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.site.findMany({
     where: { tenantId },
@@ -43,6 +45,7 @@ export async function getSites(): Promise<SiteRow[]> {
 }
 
 export async function getSitesSimple() {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.site.findMany({
     where: { tenantId },
@@ -52,6 +55,7 @@ export async function getSitesSimple() {
 }
 
 export async function getSiteWithLocations(siteId: string): Promise<SiteWithLocations | null> {
+  await requireActor()
   const tenantId = await getTenantId()
   return prisma.site.findFirst({
     where: { id: siteId, tenantId },

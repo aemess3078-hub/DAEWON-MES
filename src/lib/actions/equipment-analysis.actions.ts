@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db/prisma"
 import { getTenantId } from "@/lib/auth"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { monitoringEligibleEquipmentWhere } from "@/lib/actions/equipment-monitoring.utils"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,7 @@ export type EquipmentAnalysisData = {
 export async function getEquipmentAnalysisData(
   period: AnalysisPeriod = "today"
 ): Promise<EquipmentAnalysisData> {
+  await requireReadActor("EQUIPMENT_MONITOR")
   const tenantId = await getTenantId()
   const { from, to, label } = getDateRange(period)
   // from/to 는 reportDate(=KST 날짜의 UTC 자정) 매칭용.
@@ -357,6 +359,7 @@ export async function getEquipmentAnalysisData(
 // protocol 컬럼 미접근 — NCWATCH_AGENT enum 역직렬화 위험 없음.
 
 export async function getEquipmentTimelineData(): Promise<TimelineData> {
+  await requireReadActor("EQUIPMENT_MONITOR")
   const tenantId = await getTenantId()
   const now = new Date()
   // KST 자정을 실제 UTC 인스턴트로 환산 (이벤트 startedAt 은 실제 시각이므로)

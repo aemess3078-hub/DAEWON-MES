@@ -2,7 +2,7 @@
 
 import { ColumnDef } from "@tanstack/react-table"
 import { format } from "date-fns"
-import { MoreHorizontal, ScanLine } from "lucide-react"
+import { MoreHorizontal, Printer, ScanLine } from "lucide-react"
 import Link from "next/link"
 
 import { Badge } from "@/components/ui/badge"
@@ -42,9 +42,11 @@ const ITEM_TYPE_LABELS: Record<string, string> = {
 
 type ColumnActions = {
   onStatusChange: (lot: LotWithDetails, status: string) => void
+  /** Phase 11: LOT QR 라벨 출력/재출력(미리보기 후 인쇄 시 감사 기록) */
+  onPrintLabel: (lot: LotWithDetails) => void
 }
 
-export function getColumns({ onStatusChange }: ColumnActions): ColumnDef<LotWithDetails>[] {
+export function getColumns({ onStatusChange, onPrintLabel }: ColumnActions): ColumnDef<LotWithDetails>[] {
   return [
     {
       accessorKey: "lotNo",
@@ -163,7 +165,16 @@ export function getColumns({ onStatusChange }: ColumnActions): ColumnDef<LotWith
         const lot = row.original
         return (
           <div className="flex items-center justify-end gap-1">
-            <Link href={`/app/mes/traceability?lotNo=${lot.lotNo}`}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-[13px]"
+              onClick={() => onPrintLabel(lot)}
+            >
+              <Printer className="mr-1 h-3.5 w-3.5" />
+              라벨
+            </Button>
+            <Link href={`/app/mes/traceability?lotNo=${encodeURIComponent(lot.lotNo)}`}>
               <Button variant="ghost" size="sm" className="h-7 px-2 text-[13px] text-blue-600 hover:text-blue-700">
                 <ScanLine className="h-3.5 w-3.5 mr-1" />
                 추적

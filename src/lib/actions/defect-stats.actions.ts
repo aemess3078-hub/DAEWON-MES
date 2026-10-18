@@ -14,6 +14,7 @@ import {
   DefectCategory,
   DefectSeverity,
 } from "@prisma/client"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 // ─── 타입 ─────────────────────────────────────────────────────────────────────
 
@@ -147,6 +148,7 @@ function parseDateRange(filter: DefectStatsFilter): { from: Date; toExclusive: D
 export async function getDefectStats(
   filter: DefectStatsFilter = {}
 ): Promise<DefectStatsResult> {
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION", "REPORT", "DASHBOARD"])
   const tenantId = await getTenantId()
   const { from, toExclusive } = parseDateRange(filter)
 
@@ -404,6 +406,7 @@ export async function getDefectStats(
 // ─── 필터 옵션 ────────────────────────────────────────────────────────────────
 
 export async function getDefectStatsFilterOptions(): Promise<DefectStatsFilterOptions> {
+  await requireReadActor(["DEFECT_MANAGEMENT", "QUALITY_INSPECTION", "REPORT", "DASHBOARD"])
   const tenantId = await getTenantId()
 
   const [items, ops] = await Promise.all([

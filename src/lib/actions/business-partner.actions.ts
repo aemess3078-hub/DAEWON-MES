@@ -4,6 +4,7 @@ import { getTenantId, requireRole } from "@/lib/auth"
 import { prisma } from "@/lib/db/prisma"
 import { Prisma, PartnerType, PartnerStatus } from "@prisma/client"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { requireActor, requireReadActor, assertSessionTenant } from "@/lib/auth/action-guards"
 
 export type BusinessPartner = {
   id: string
@@ -67,6 +68,7 @@ function partnerDetailData(data: BusinessPartnerFormValues) {
 }
 
 export async function getBusinessPartners(type?: "CUSTOMER" | "SUPPLIER"): Promise<BusinessPartner[]> {
+  await requireReadActor(["PARTNER_MANAGEMENT", "SALES_ORDER", "PURCHASE_ORDER", "SHIPMENT"])
   const tenantId = await getTenantId()
   const where: Prisma.BusinessPartnerWhereInput = { tenantId }
   if (type === "CUSTOMER") {

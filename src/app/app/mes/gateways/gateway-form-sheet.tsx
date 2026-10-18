@@ -121,7 +121,7 @@ export function GatewayFormSheet({
               control={form.control}
               name="name"
               label="게이트웨이 이름"
-              placeholder="예: 본공장 게이트웨이 #1"
+              placeholder="예: 본공장 게이트웨이 #1 (NCWatch 연동용은 'NCWatch Agent')"
             />
             <FormSelectField
               control={form.control}

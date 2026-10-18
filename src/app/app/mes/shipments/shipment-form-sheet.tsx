@@ -31,6 +31,10 @@ import {
 } from "@/lib/actions/shipment.actions"
 import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
+import { lookupLotByQr } from "@/lib/actions/lot-qr.actions"
+import { encodeLotQr } from "@/lib/qr/lot-qr"
+import { planLotScanSelection } from "@/lib/qr/scan-apply"
+import { createScanDebouncer } from "@/lib/qr/scan-guard"
 import { formatQuantity } from "@/lib/utils"
 
 type SalesOrderOption = {
@@ -270,9 +274,75 @@ export function ShipmentFormSheet({
     setLotAllocations(itemIndex, allocations)
   }
 
+  const scanGuardRef = useRef(createScanDebouncer(1500))
+
+  /**
+   * 출하 LOT QR 스캔 → 서버가 내려준 출하 가능 LOT(ACTIVE · 품질 게이트 통과 후보) 중에서 선택만 한다.
+   * 수량/수주 잔량/LOT 상태/품질 게이트는 저장 시 createShipment/confirmShipment 가 다시 검증한다.
+   */
+  async function handleLotScan(lotNo: string) {
+    const candidates = fields.map((field, index) => {
+      const row = form.getValues(`items.${index}`)
+      return {
+        key: String(index),
+        options: (availableLotsByItem[field.itemId] ?? []).map((lot) => ({
+          lotId: lot.lotId,
+          lotNo: lot.lotNo,
+          qtyAvailable: lot.qtyAvailable,
+        })),
+        selectedLotIds: row.lotAllocations.map((a) => a.lotId).filter(Boolean),
+      }
+    })
+    const plan = planLotScanSelection(lotNo, candidates)
+
+    if (plan.kind === "ALREADY_SELECTED") {
+      const index = Number(plan.key)
+      setHighlightedIndex(index)
+      setTimeout(() => setHighlightedIndex(null), 3000)
+      alert(`이미 선택된 LOT 입니다: ${plan.lotNo}`)
+      return
+    }
+    if (plan.kind === "SELECT") {
+      const index = Number(plan.key)
+      const allocations = form.getValues(`items.${index}.lotAllocations`)
+      let allocationIndex = allocations.findIndex((a) => !a.lotId)
+      if (allocationIndex === -1) {
+        addLotAllocation(index)
+        allocationIndex = allocations.length
+      }
+      handleLotChange(index, allocationIndex, plan.option.lotId)
+      setHighlightedIndex(index)
+      rowRefs.current[index]?.scrollIntoView({ behavior: "smooth", block: "center" })
+      setTimeout(() => setHighlightedIndex(null), 3000)
+      return
+    }
+
+    const expectedItemIds = new Set(fields.map((f) => f.itemId))
+    const res = await lookupLotByQr(encodeLotQr(plan.lotNo), { purpose: "SHIPMENT" })
+    if (!res.ok) {
+      alert(res.message)
+    } else if (!expectedItemIds.has(res.lot.item.id)) {
+      alert(`${res.lot.lotNo}: 이 수주의 출하 품목이 아닌 LOT 입니다.`)
+    } else if (!res.usable) {
+      alert(`${res.lot.lotNo}: ${res.blockReason ?? "출하할 수 없는 LOT 입니다."}`)
+    } else {
+      alert(`${res.lot.lotNo}: 선택한 출하 창고의 출하 가능 LOT 목록에 없습니다. 창고/재고 상태를 확인해 주세요.`)
+    }
+  }
+
   function handleScan(parsed: ParsedBarcode) {
     if (!selectedOrder) {
       alert("먼저 수주를 선택하세요.")
+      return
+    }
+    if (!scanGuardRef.current.accept(parsed.raw, Date.now())) return
+    const codeMatchIndex = fields.findIndex(
+      (field) => selectedOrder.items.find((row) => row.id === field.salesOrderItemId)?.item.code === parsed.itemCode,
+    )
+    // LOT QR 이거나, 수동 입력 값이 품목코드와 일치하지 않으면 LOT 번호로 처리한다.
+    if (parsed.lotNo && (parsed.kind === "LOT_QR" || (parsed.kind === "MANUAL_TEXT" && codeMatchIndex === -1))) {
+      scanGuardRef.current.begin()
+      void handleLotScan(parsed.lotNo).finally(() => scanGuardRef.current.end())
       return
     }
     const index = fields.findIndex((field) => {
@@ -516,7 +586,8 @@ export function ShipmentFormSheet({
             {selectedOrderId && fields.length > 0 && (
               <BarcodeScanInput
                 onScan={handleScan}
-                placeholder="품목 바코드를 스캔하면 해당 행으로 이동합니다"
+                placeholder="완제품 LOT QR/바코드를 스캔하면 출하 LOT 가 선택됩니다"
+                cameraContext={{ purpose: "SHIPMENT" }}
               />
             )}
 
