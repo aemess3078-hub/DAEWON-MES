@@ -3,10 +3,14 @@ import { prisma } from "@/lib/db/prisma"
 import type { MachineStatusPayload } from "./types"
 
 // ─── 설정 ────────────────────────────────────────────────────────────────────
-// 기본 60초. NCWATCH_SNAPSHOT_INTERVAL_MS 환경변수로 조정 가능.
-export const SNAPSHOT_INTERVAL_MS = parseInt(
-  process.env.NCWATCH_SNAPSHOT_INTERVAL_MS ?? "60000"
-)
+function envMs(name: string, def: number, min: number): number {
+  const n = Number.parseInt(process.env[name] ?? "", 10)   // 빈 문자열/비숫자는 기본값
+  return Number.isFinite(n) && n >= min ? n : def
+}
+// 값이 같을 때의 정기 스냅샷 간격. 기본 15분. NCWATCH_SNAPSHOT_INTERVAL_MS 로 조정 가능(최소 1초).
+export const SNAPSHOT_INTERVAL_MS = envMs("NCWATCH_SNAPSHOT_INTERVAL_MS", 15 * 60 * 1000, 1000)
+// 변동 태그(위치·회전수 등)의 변경 스냅샷 최소 간격. 기본 0 = 제한 없음(변경 즉시 저장).
+export const SNAPSHOT_VOLATILE_MIN_INTERVAL_MS = envMs("NCWATCH_SNAPSHOT_VOLATILE_MIN_INTERVAL_MS", 0, 0)
 
 // ─── NCWatch statusCode → EquipmentEventType ────────────────────────────────
 // mapper.js 기준: 3=START→RUN, 5=ALARM→ALARM, 나머지→STOP
@@ -115,9 +119,7 @@ export async function syncEquipmentEvent(
 // isActive=true, isEnabled=true, source='NCWATCH' 태그만 처리.
 //
 // TagCurrentValue: 매 수신마다 upsert (파라미터보기 "마지막 수신" 시각 반영)
-// TagSnapshot 삽입 조건:
-//   1) 값이 이전 스냅샷과 다를 때
-//   2) 값이 같아도 마지막 스냅샷으로부터 SNAPSHOT_INTERVAL_MS 이상 경과했을 때
+// TagSnapshot 저장 정책은 아래 "TagSnapshot 저장 정책" 참조.
 //
 // NCWatch 필드명 → tagCode 매핑 (태그사전 Phase 4에서 자동 생성되는 tagCode 기준)
 const FIELD_MAP: Record<string, keyof MachineStatusPayload> = {
@@ -161,12 +163,64 @@ const MODE_LABEL: Record<number, string> = {
   10: "REMOTE",
 }
 
+// ─── TagSnapshot 저장 정책 ───────────────────────────────────────────────────
+// TagCurrentValue 는 매 수신마다 갱신하고(마지막 수신 시각), TagSnapshot 은 "이력"이므로 아래 경우에만 저장한다.
+//   1) 최초 수신(현재값 없음)
+//   2) 값이 직전 값과 달라졌을 때 — 즉시 저장 (NCWatch 원본 TIMESTAMP 만 달라진 것은 값 변경이 아니다)
+//   3) 값이 같아도 마지막 스냅샷으로부터 SNAPSHOT_INTERVAL_MS(기본 15분) 이상 지났을 때 — 정기 스냅샷
+// 선택 정책(기본 꺼짐): 위치·회전수처럼 가동 중 매 주기 바뀌는 "변동 태그"는 NCWATCH_SNAPSHOT_VOLATILE_MIN_INTERVAL_MS
+// (예: 60000) 이상 간격으로만 변경 스냅샷을 저장한다. 0 이면 변경 즉시 저장(기본).
+// 시각 비교는 모두 NCWatch 데이터 시각(receivedAt) 기준이며, 시계가 거꾸로 가면 저장하지 않는다.
+
+/** 가동 중 거의 매 주기 값이 바뀌는 태그. 선택 정책의 대상. */
+export const VOLATILE_TAG_CODES: ReadonlySet<string> = new Set([
+  "POS_X", "POS_Y", "POS_Z", "SPINDLE_SPEED", "FEED_RATE", "RATIO", "BLOCK_NUMBER",
+])
+/** 값이 없어지는 것이 곧 "해제"인 태그 (알람 해제 시 NCWatch 는 알람 필드를 비운다). */
+const CLEARABLE_TAG_CODES: ReadonlySet<string> = new Set(["ALARM_CODE", "ALARM_MESSAGE"])
+
+export function decideSnapshot(input: {
+  hasCurrent:    boolean
+  changed:       boolean
+  volatile:      boolean
+  lastSnapAtMs:  number | null   // 마지막 스냅샷 시각(데이터 시각), 없으면 null
+  receivedAtMs:  number
+  heartbeatMs:   number          // 정기 스냅샷 간격
+  volatileMinMs: number          // 변동 태그 변경 스냅샷 최소 간격 (0 = 제한 없음)
+}): boolean {
+  const { hasCurrent, changed, volatile, lastSnapAtMs, receivedAtMs, heartbeatMs, volatileMinMs } = input
+  if (!hasCurrent) return true                                   // 최초 수신
+  if (changed) {
+    if (!volatile || volatileMinMs <= 0) return true             // 값 변경 → 즉시
+    return lastSnapAtMs === null || receivedAtMs - lastSnapAtMs >= volatileMinMs
+  }
+  return lastSnapAtMs === null || receivedAtMs - lastSnapAtMs >= heartbeatMs   // 정기 스냅샷
+}
+
+/** 판정에 마지막 스냅샷 시각이 필요한가? (필요 없는 경우 DB 조회를 하지 않는다) */
+function needsLastSnapshot(hasCurrent: boolean, changed: boolean, volatile: boolean, volatileMinMs: number): boolean {
+  if (!hasCurrent) return false
+  if (!changed) return true
+  return volatile && volatileMinMs > 0
+}
+
+// 태그별 마지막 스냅샷 시각 캐시(서버리스 인스턴스 메모리, 최선 노력).
+// 캐시는 실제보다 오래된 값일 수는 있어도 새로운 값일 수는 없으므로 "저장해야 할 스냅샷을 건너뛰는" 일은 없고,
+// 저장 시점이 되었다고 판단되면 항상 DB 의 실제 마지막 시각을 한 번 더 확인해 다른 인스턴스와의 중복 저장을 막는다.
+const NEVER = -1
+const lastSnapshotAtCache = new Map<string, number>()
+const SNAPSHOT_CACHE_MAX = 5000
+export function resetSnapshotCache(): void {
+  lastSnapshotAtCache.clear()
+}
+
 export async function syncTagValues(
   equipmentId:      string,
   m:                MachineStatusPayload,
-  snapshotInterval: number = SNAPSHOT_INTERVAL_MS
+  snapshotInterval: number = SNAPSHOT_INTERVAL_MS,
+  volatileMinMs:    number = SNAPSHOT_VOLATILE_MIN_INTERVAL_MS
 ): Promise<void> {
-  // 이 equipment의 NCWatch 연결에 속한 활성+동기화가능 태그 조회
+  // 이 equipment의 NCWatch 연결에 속한 활성+동기화가능 태그 조회 (현재값 포함, 1회)
   const tags = await prisma.dataTag.findMany({
     where: {
       isActive:  true,
@@ -189,19 +243,33 @@ export async function syncTagValues(
 
   if (tags.length === 0) return
 
-  const receivedAt = parseNcwatchTs(m.ncwatchTs) ?? new Date()
+  const receivedAt   = parseNcwatchTs(m.ncwatchTs) ?? new Date()
+  const receivedAtMs = receivedAt.getTime()
 
-  // 병렬로 처리 (태그 수가 많지 않음)
-  await Promise.all(
-    tags.map(async (tag) => {
-      const payloadField = FIELD_MAP[tag.tagCode]
-      if (!payloadField) return
+  type Plan = {
+    tagId: string; value: string; numericValue: number | null
+    hasCurrent: boolean; changed: boolean; volatile: boolean
+  }
+  const plans: Plan[] = []
 
-      const rawValue = m[payloadField]
-      if (rawValue == null) return
+  for (const tag of tags) {
+    const payloadField = FIELD_MAP[tag.tagCode]
+    if (!payloadField) continue
 
+    const rawValue = m[payloadField]
+    let value: string
+    let numericValue: number | null
+
+    if (rawValue == null) {
+      // 알람 해제: NCWatch 가 알람 필드를 비우면 이전에 남아 있던 알람 값을 빈 값으로 갱신한다(없던 값은 그대로 둔다).
+      if (CLEARABLE_TAG_CODES.has(tag.tagCode) && tag.currentValue && tag.currentValue.value !== "") {
+        value = ""
+        numericValue = null
+      } else {
+        continue
+      }
+    } else {
       // 일부 태그는 코드값을 사람이 읽는 라벨로 변환해 표기
-      let value: string
       if (tag.tagCode === "STATUS" && m.statusCode != null) {
         value = STATUS_LABEL_KO[m.statusCode] ?? String(rawValue)
       } else if (tag.tagCode === "MODE" && m.modeCode != null) {
@@ -209,8 +277,8 @@ export async function syncTagValues(
       } else {
         value = String(rawValue)
       }
-      const numericVal  = Number(rawValue)
-      let numericValue = isFinite(numericVal) ? numericVal : null
+      const numericVal = Number(rawValue)
+      numericValue = isFinite(numericVal) ? numericVal : null
 
       // 주축 회전수는 실시간 실제값이라 가동 중에도 급속이송/복귀 순간 0으로 떨어진다.
       // 가동(RUN=3) 중 순간 0은 직전 비0 회전수를 유지해 표시를 안정화한다.
@@ -222,45 +290,78 @@ export async function syncTagValues(
           numericValue = prevNum
         }
       }
+    }
 
-      // 값·시각이 직전 저장분과 완전히 같으면(설비 오프라인 등으로 NCWatch 행이 갱신되지 않는 경우)
-      // 동일 행 재기록과 스냅샷 조회를 생략한다. (저장 결과는 동일, DB 쓰기/조회만 감소)
-      if (
-        tag.currentValue &&
-        tag.currentValue.value === value &&
-        tag.currentValue.timestamp.getTime() === receivedAt.getTime()
-      ) {
-        return
-      }
+    // 값·시각이 직전 저장분과 완전히 같으면 동일 행 재기록과 스냅샷 판단을 모두 생략한다.
+    if (
+      tag.currentValue &&
+      tag.currentValue.value === value &&
+      tag.currentValue.timestamp.getTime() === receivedAtMs
+    ) {
+      continue
+    }
 
-      // TagCurrentValue upsert (항상 최신 수신값+시각 유지)
-      await prisma.tagCurrentValue.upsert({
-        where:  { tagId: tag.id },
-        update: { value, numericValue, quality: "GOOD", timestamp: receivedAt },
-        create: { tagId: tag.id, value, numericValue, quality: "GOOD", timestamp: receivedAt },
-      })
-
-      // TagSnapshot 삽입 여부 결정 — 직전 스냅샷 "1건"만 조회한다.
-      // (기존: tagIds 전체에 대한 distinct + orderBy 무제한 findMany → 이력이 누적될수록
-      //  TagSnapshot 대량 row가 매 수신(에이전트 10초 주기)마다 DB→서버로 전송되어 egress 폭증.
-      //  태그별 take:1(findFirst) 조회로 바꿔 반환 row를 태그당 1건으로 제한한다. 판정 로직은 동일.)
-      const lastSnap = await prisma.tagSnapshot.findFirst({
-        where:   { tagId: tag.id },
-        orderBy: { timestamp: "desc" },
-        select:  { value: true, timestamp: true },
-      })
-      const shouldSnapshot =
-        !lastSnap ||                                                        // 최초 수신
-        lastSnap.value !== value ||                                         // 값 변경
-        receivedAt.getTime() - lastSnap.timestamp.getTime() >= snapshotInterval  // 주기 경과
-
-      if (shouldSnapshot) {
-        await prisma.tagSnapshot.create({
-          data: { tagId: tag.id, value, quality: "GOOD", timestamp: receivedAt },
-        })
-      }
+    plans.push({
+      tagId:      tag.id,
+      value,
+      numericValue,
+      hasCurrent: Boolean(tag.currentValue),
+      // 값 비교는 문자열 값만 사용한다 — NCWatch 원본 TIMESTAMP/ALIVECOUNT 등은 값 변경이 아니다.
+      changed:    !tag.currentValue || tag.currentValue.value !== value,
+      volatile:   VOLATILE_TAG_CODES.has(tag.tagCode),
     })
+  }
+
+  if (plans.length === 0) return
+
+  const decide = (p: Plan, lastSnapAtMs: number | null) =>
+    decideSnapshot({
+      hasCurrent: p.hasCurrent, changed: p.changed, volatile: p.volatile,
+      lastSnapAtMs, receivedAtMs, heartbeatMs: snapshotInterval, volatileMinMs,
+    })
+
+  // 1단계: 마지막 스냅샷 시각이 필요한 태그 중, 캐시로 "아직 이르다"고 확정되지 않은 것만 DB 에서 한 번에 확인한다.
+  const verify: string[] = []
+  for (const p of plans) {
+    if (!needsLastSnapshot(p.hasCurrent, p.changed, p.volatile, volatileMinMs)) continue
+    const c = lastSnapshotAtCache.get(p.tagId)
+    if (c === undefined) { verify.push(p.tagId); continue }
+    if (decide(p, c === NEVER ? null : c)) verify.push(p.tagId)   // 저장할 때가 된 것 → 실제값 확인
+  }
+  if (verify.length > 0) {
+    const rows = await prisma.tagSnapshot.groupBy({
+      by:    ["tagId"],
+      where: { tagId: { in: verify } },
+      _max:  { timestamp: true },
+    })
+    if (lastSnapshotAtCache.size > SNAPSHOT_CACHE_MAX) lastSnapshotAtCache.clear()
+    const found = new Map(rows.map((r) => [r.tagId, r._max.timestamp?.getTime() ?? NEVER]))
+    for (const id of verify) lastSnapshotAtCache.set(id, found.get(id) ?? NEVER)
+  }
+
+  // 2단계: 현재값은 항상 갱신, 스냅샷은 정책에 맞는 것만 한 번에 저장
+  const toSnapshot: { tagId: string; value: string; quality: string; timestamp: Date }[] = []
+  for (const p of plans) {
+    const c = needsLastSnapshot(p.hasCurrent, p.changed, p.volatile, volatileMinMs) ? lastSnapshotAtCache.get(p.tagId) : undefined
+    const lastSnapAtMs = c === undefined || c === NEVER ? null : c
+    if (decide(p, lastSnapAtMs)) toSnapshot.push({ tagId: p.tagId, value: p.value, quality: "GOOD", timestamp: receivedAt })
+  }
+
+  await Promise.all(
+    plans.map((p) =>
+      prisma.tagCurrentValue.upsert({
+        where:  { tagId: p.tagId },
+        update: { value: p.value, numericValue: p.numericValue, quality: "GOOD", timestamp: receivedAt },
+        create: { tagId: p.tagId, value: p.value, numericValue: p.numericValue, quality: "GOOD", timestamp: receivedAt },
+      })
+    )
   )
+
+  if (toSnapshot.length > 0) {
+    await prisma.tagSnapshot.createMany({ data: toSnapshot })
+    if (lastSnapshotAtCache.size > SNAPSHOT_CACHE_MAX) lastSnapshotAtCache.clear()
+    for (const s of toSnapshot) lastSnapshotAtCache.set(s.tagId, receivedAtMs)
+  }
 }
 
 // ─── NcwatchSyncLog 기록 ─────────────────────────────────────────────────────
