@@ -4,7 +4,9 @@ import { prisma } from "@/lib/db/prisma"
 import { getTenantId, requireRole } from "@/lib/auth"
 import { generateCnsManufacturingNo } from "@/lib/lot-numbering/lot-number-generator"
 import type { CnsItemRuleContext } from "@/lib/lot-numbering/lot-rule-resolver"
-import { failureResult, type ActionResult } from "@/lib/errors/user-error"
+import { failureResult, UserFacingError, type ActionResult } from "@/lib/errors/user-error"
+import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
+import { decideManufacturingNo } from "@/lib/lot-numbering/manufacturing-no-policy"
 import { WorkOrderStatus, OperationStatus, Prisma } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { computeWipReceiptStatus } from "./wip-receipt.helpers"
@@ -825,15 +827,23 @@ async function validateManualManufacturingNoPolicy(
   tenantId: string,
   itemId: string,
   manufacturingNo: string | null,
+  options: { blankMeansAuto: boolean },
 ) {
   const item = await prisma.item.findFirst({
     where: { id: itemId, tenantId },
     select: { lotNumberingType: true, manualLotPolicy: true },
   })
   if (!item) throw new Error("INVALID_ITEM")
-  if ((item.lotNumberingType === "MANUAL" || item.manualLotPolicy === "REQUIRED") && !manufacturingNo) {
-    throw new Error("제조번호를 직접 입력해야 하는 품목입니다.")
-  }
+  // 품목 정책(lotNumberingType x manualLotPolicy) 조합 판정. 대원정밀은 자동 채번이 불가능하므로
+  // 처리할 수 없는 조합은 명확한 안내 메시지로 거절한다(채번 규칙/품목 정책은 변경하지 않는다).
+  const decision = decideManufacturingNo({
+    lotNumberingType: item.lotNumberingType,
+    manualLotPolicy: item.manualLotPolicy,
+    input: manufacturingNo,
+    autoAllowed: isCnsLotRuleAllowed(),
+    blankMeansAuto: options.blankMeansAuto,
+  })
+  if (decision.kind === "ERROR") throw new UserFacingError(decision.message)
   return item.manualLotPolicy === "DISABLED"
 }
 
@@ -913,6 +923,7 @@ export async function createWorkOrder(data: CreateWorkOrderInput, tenantId: stri
       tenantId,
       headerFields.itemId,
       trimmed && trimmed.length > 0 ? trimmed : null,
+      { blankMeansAuto: true },
     )
     const useManualManufacturingNo = !!trimmed && trimmed.length > 0 && !manualDisabled
 
@@ -1037,6 +1048,7 @@ export async function updateWorkOrder(id: string, data: CreateWorkOrderInput) {
     existing.tenantId,
     headerFields.itemId,
     trimmed && trimmed.length > 0 ? trimmed : null,
+    { blankMeansAuto: false },
   )
   const nextManufacturingNo = trimmed && trimmed.length > 0
     ? (manualDisabled ? await generateManufacturingNo(existing.tenantId, headerFields.itemId) : trimmed)

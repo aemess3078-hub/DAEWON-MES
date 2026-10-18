@@ -6,6 +6,8 @@
  *  C. 대원정밀 LOT/제조번호 자동 채번 가드 유지(규칙 미확정 → fail-closed) + 수동 입력 허용
  *  D. 소스 구조: 액션 반환 계약, 클라이언트 결과 처리, 자재출고 경고 아이콘 겹침 제거, 재고 차감 로직 불변
  *
+ *  E. 사용자 오류 메시지 allowlist · F. 다품목 입고 부분 성공/재시도 · G. 제조번호 정책 조합 (PR #5 검토 보완)
+ *
  * 실제 DB 가 필요한 항목(실 Prisma void 직렬화, 트랜잭션 격리, 재고 정합성)은 이 테스트에서 검증하지 않는다.
  */
 import assert from "node:assert/strict"
@@ -41,6 +43,10 @@ ModuleInternals._resolveFilename = function (request: string, ...rest: unknown[]
 }
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { isUniqueConstraintError, withUniqueBusinessNumberRetry } = require("../src/lib/business-numbering") as typeof import("../src/lib/business-numbering")
+
+const receivingBatchModule = require("../src/lib/receiving-batch") as typeof import("../src/lib/receiving-batch")
+const userErrorModule = require("../src/lib/errors/user-error") as typeof import("../src/lib/errors/user-error")
+const policyModule = require("../src/lib/lot-numbering/manufacturing-no-policy") as typeof import("../src/lib/lot-numbering/manufacturing-no-policy")
 
 let passed = 0
 function ok(value: unknown, label: string) {
@@ -313,7 +319,7 @@ function testSourceStructure() {
   ok(/isCnsLotRuleAllowed\(\)/.test(woForm) && /제조번호를 직접 입력해 주세요/.test(woForm), "D4 대원정밀: 제조번호 미입력 시 자동 발행이라고 안내하지 않고 직접 입력을 요구")
 
   const rcvDialog = read("src", "app", "app", "mes", "purchase-orders", "receiving-dialog.tsx")
-  ok(/const result = await createReceivingInspection\([\s\S]*?if \(!result\.success\)/.test(rcvDialog), "D5 발주 입고 다이얼로그가 실패 결과를 무시하지 않음(성공으로 닫히던 결함 수정)")
+  ok(/createReceivingInspection\(/.test(rcvDialog) && /runReceivingBatch\(/.test(rcvDialog), "D5 발주 입고 다이얼로그가 실패 결과를 무시하지 않음(성공으로 닫히던 결함 수정, 품목별 결과 기억)")
   const rcv = read("src", "lib", "actions", "receiving.actions.ts")
   ok(/toUserErrorMessage\(error/.test(rcv) && /console\.error\("\[createReceivingInspection\] error:"/.test(rcv), "D5 입고 액션: 서버 로그 유지 + 사용자 메시지 변환")
   ok(/try \{\s*await requireResourcePermission\("PURCHASE_ORDER", "CREATE"\)\s*return await createReceivingInspectionInternal/.test(rcv), "D5 입고 액션: 권한 오류도 반환값으로 전달")
@@ -330,11 +336,244 @@ function testSourceStructure() {
   ok(/min-w-\[940px\]/.test(dlg) && /overflow-x-auto/.test(dlg), "D7 좁은 화면은 가로 스크롤 컨테이너 유지")
 }
 
+// ─── E. 사용자 오류 메시지 allowlist (알 수 없는 오류 원문 비노출) ────────────────
+
+function testUserErrorAllowlist() {
+  const { UserFacingError, isAllowedBusinessMessage } = userErrorModule
+  const unknowns: Array<[string, unknown]> = [
+    ["TypeError", new TypeError("Cannot read properties of undefined (reading 'id')")],
+    ["영문 예외", new Error("Insufficient stock for item RM-001")],
+    ["DB 호스트", new Error("getaddrinfo ENOTFOUND db.abcdefg.supabase.co")],
+    ["환경변수", new Error("Environment variable not found: DATABASE_URL")],
+    ["SQL", new Error('relation "InventoryBalance" does not exist')],
+    ["제약조건", new Error('duplicate key value violates unique constraint "Lot_tenantId_lotNo_key"')],
+    ["한글+서버경로", new Error("저장 실패: /var/task/.next/server/app/page.js:12 에서 오류")],
+    ["한글+윈도우경로", new Error("저장 실패: C:\\app\\src\\lib\\x.ts 오류")],
+    ["한글+소스위치", new Error("처리 오류 at work-order.actions.ts:931")],
+    ["한글+SQL", new Error('조회 실패: SELECT id FROM "Lot" WHERE x')],
+    ["너무 긴 메시지", new Error("재고가 부족합니다. ".repeat(40))],
+    ["객체", { foo: "bar" }],
+    ["빈 문자열", ""],
+    ["null", null],
+  ]
+  for (const [label, e] of unknowns) {
+    const m = toUserErrorMessage(e)
+    eq(m, GENERIC_USER_ERROR_MESSAGE, `E1 알 수 없는 오류(${label}) → 원문 비노출, 일반 안내`)
+  }
+  // 호출부가 fallback 을 지정하면 그 문구 사용
+  eq(toUserErrorMessage(new TypeError("x is not a function"), { fallback: "입고 처리 중 오류가 발생했습니다." }), "입고 처리 중 오류가 발생했습니다.", "E2 fallback 문구 사용")
+
+  // 허용된 업무 메시지는 유지
+  const business = [
+    "입고수량은 잔여수량을 초과할 수 없습니다. 잔여수량: 30 EA",
+    "선택한 창고를 찾을 수 없습니다.",
+    "LOT 번호 'A-1'는 다른 품목에 이미 사용 중입니다. 다른 번호를 입력해주세요.",
+    "종결되었거나 취소된 발주에는 입고할 수 없습니다.",
+    "재고 없음: 해당 창고에 P1000 재고가 없습니다.", // 품목코드 P1000 은 내부 오류 코드로 오인하지 않는다
+    "가용재고 부족: RM-001 — 가용재고 3, 출고 요청 5",
+    "이미 사용 중인 제조번호입니다.",
+    "이 기능을 사용할 권한이 없습니다.",
+    "발주번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요.",
+    "다른 작업으로 수량이 변경되었습니다. 현재 수량을 확인한 후 다시 시도해주세요.",
+  ]
+  for (const msg of business) eq(toUserErrorMessage(new Error(msg)), msg, `E3 업무 메시지 유지: ${msg.slice(0, 22)}…`)
+  ok(toUserErrorMessage(new UserFacingError("Bad input")) === "Bad input", "E4 UserFacingError 는 명시적으로 허용되어 그대로 전달")
+  ok(toUserErrorMessage(new UserFacingError("Unique constraint failed on the fields")) !== "Unique constraint failed on the fields", "E4 UserFacingError 라도 내부 정보 패턴은 차단")
+  ok(isAllowedBusinessMessage("재고 부족") && !isAllowedBusinessMessage("Out of stock"), "E5 allowlist: 한글 업무 메시지만 허용")
+  eq(toUserErrorMessage(new Error("AUTO_LOT_COLLISION")).includes("AUTO_LOT_COLLISION"), false, "E6 내부 코드 AUTO_LOT_COLLISION 은 한글 안내로 변환")
+}
+
+// ─── F. 다품목 입고 부분 성공 · 재시도 ────────────────────────────────────────────
+
+/** 서버(receiving.actions)의 잔량 검증/수량 갱신 규칙을 흉내 낸 Fake: receivedQty += acceptedQty, 입고수량 > 잔량이면 거부 */
+class FakeReceivingServer {
+  items = new Map<string, { ordered: number; received: number }>()
+  calls: string[] = []
+  failOnce = new Set<string>()
+  throwOnce = new Set<string>()
+  constructor(init: Record<string, { ordered: number; received?: number }>) {
+    for (const [id, v] of Object.entries(init)) this.items.set(id, { ordered: v.ordered, received: v.received ?? 0 })
+  }
+  async receive(id: string, receivedQty: number, acceptedQty: number): Promise<{ success: boolean; message?: string }> {
+    this.calls.push(id)
+    if (this.throwOnce.delete(id)) throw new Error("fetch failed") // 응답 없음(처리 여부 불명)
+    if (this.failOnce.delete(id)) return { success: false, message: "선택한 창고를 찾을 수 없습니다." }
+    const it = this.items.get(id)!
+    const remaining = it.ordered - it.received
+    if (receivedQty > remaining) return { success: false, message: `입고수량은 잔여수량을 초과할 수 없습니다. 잔여수량: ${remaining}` }
+    it.received += acceptedQty
+    return { success: true }
+  }
+}
+
+async function testReceivingBatch() {
+  const { runReceivingBatch, applyReceiptToQuantities, isRowLocked } = receivingBatchModule
+  const rows = [
+    { purchaseOrderItemId: "A", receivedInput: 40, acceptedInput: 40 },
+    { purchaseOrderItemId: "B", receivedInput: 10, acceptedInput: 10 },
+    { purchaseOrderItemId: "C", receivedInput: 0, acceptedInput: 0 },
+  ]
+  const mk = () => new FakeReceivingServer({ A: { ordered: 100 }, B: { ordered: 50 }, C: { ordered: 20 } })
+  const submitTo = (srv: FakeReceivingServer) => (r: { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number }) =>
+    srv.receive(r.purchaseOrderItemId, r.receivedInput, r.acceptedInput)
+
+  // F1. A 성공 → B 실패 → 재시도: A 는 다시 입고되지 않는다
+  {
+    const srv = mk()
+    srv.failOnce.add("B")
+    const first = await runReceivingBatch(rows, {}, submitTo(srv))
+    eq(first.statuses.A?.state, "done", "F1 A 입고 성공 기록")
+    eq(first.statuses.B?.state, "failed", "F1 B 실패 기록")
+    eq(first.stoppedAt, "B", "F1 B 에서 중단")
+    eq(first.allDone, false, "F1 아직 전체 완료 아님")
+    const second = await runReceivingBatch(rows, first.statuses, submitTo(srv))
+    eq(srv.calls, ["A", "B", "B"], "F1 재시도 때 A 는 서버로 다시 보내지 않음(호출: A,B,B)")
+    eq(srv.items.get("A")!.received, 40, "F1 A 서버 기입고수량 40 (중복 입고 없음)")
+    eq(srv.items.get("B")!.received, 10, "F1 B 재시도 성공 후 10")
+    eq(second.allDone, true, "F1 재시도 후 전체 완료")
+    eq(second.newlyDone, ["B"], "F1 재시도에서 새로 성공한 품목은 B 뿐")
+  }
+
+  // F2. 대조군: 상태를 기억하지 않는 기존 방식이면 A 가 두 번 입고된다
+  {
+    const srv = mk()
+    srv.failOnce.add("B")
+    const naive = async () => {
+      for (const r of rows) {
+        if (r.receivedInput <= 0) continue
+        const res = await srv.receive(r.purchaseOrderItemId, r.receivedInput, r.acceptedInput)
+        if (!res.success) return
+      }
+    }
+    await naive()
+    await naive()
+    eq(srv.items.get("A")!.received, 80, "F2 대조군: 기존 방식은 재시도 때 A 가 80(중복 입고)")
+  }
+
+  // F3. 표시 수량 = 서버 수량 (새로고침 없이도 기입고/잔여가 일치)
+  {
+    const srv = mk()
+    const out = await runReceivingBatch(rows, {}, submitTo(srv))
+    for (const id of out.newlyDone) {
+      const row = rows.find((r) => r.purchaseOrderItemId === id)!
+      const server = srv.items.get(id)!
+      const view = applyReceiptToQuantities({ orderedQty: server.ordered, receivedQty: 0 }, row.acceptedInput)
+      eq([view.receivedQty, view.pendingQty], [server.received, server.ordered - server.received], `F3 ${id} 화면 수량 = 서버 수량`)
+    }
+    eq(applyReceiptToQuantities({ orderedQty: 10, receivedQty: 8 }, 5).pendingQty, 0, "F3 잔여수량은 음수가 되지 않음")
+    eq(out.allDone, true, "F3 수량 0 인 C 는 대상이 아니며 A,B 성공 시 전체 완료")
+  }
+
+  // F4. 응답 불명(throw): 처리 여부를 알 수 없으므로 자동 재전송하지 않는다
+  {
+    const srv = mk()
+    srv.throwOnce.add("A")
+    const first = await runReceivingBatch(rows, {}, submitTo(srv))
+    eq(first.statuses.A?.state, "unknown", "F4 응답 불명 기록")
+    ok(isRowLocked(first.statuses.A), "F4 결과 불명 품목은 잠금")
+    const again = await runReceivingBatch(rows, first.statuses, submitTo(srv))
+    eq(srv.calls, ["A", "B"], "F4 불명 품목 A 는 재시도 때 서버로 보내지 않음(B 는 진행)")
+    eq(again.allDone, false, "F4 불명 품목이 남아 있으면 자동으로 닫지 않음")
+    const a = first.statuses.A
+    ok(a !== undefined && a.state === "unknown" && a.message.includes("중복 입고"), "F4 불명 안내 문구")
+  }
+
+  // F5. 잔량 초과는 서버가 거부 → 실패 안내, 기입고 수량은 변하지 않음
+  {
+    const srv = new FakeReceivingServer({ A: { ordered: 100, received: 80 }, B: { ordered: 50 }, C: { ordered: 20 } })
+    const out = await runReceivingBatch(rows, {}, submitTo(srv))
+    eq(out.statuses.A?.state, "failed", "F5 잔량 초과 입고는 서버가 거부")
+    eq(srv.items.get("A")!.received, 80, "F5 거부된 입고는 수량을 바꾸지 않음")
+    const a = out.statuses.A
+    ok(a !== undefined && a.state === "failed" && a.message.includes("잔여수량"), "F5 잔여수량 안내 유지")
+    eq(srv.calls, ["A"], "F5 첫 실패에서 중단(뒤 품목 미처리)")
+  }
+
+  // F6. 모든 품목 수량이 0 이면 아무것도 보내지 않고 완료로 보지도 않는다
+  {
+    const srv = mk()
+    const out = await runReceivingBatch(rows.map((r) => ({ ...r, receivedInput: 0 })), {}, submitTo(srv))
+    eq([srv.calls.length, out.allDone], [0, false], "F6 입고 대상 없음 → 호출 0, 완료 아님")
+  }
+
+  // F7. 소스 구조: 두 다이얼로그가 같은 모듈 사용 · 더블클릭 방어 · 잠금
+  for (const [label, path] of [
+    ["발주 입고(purchase-orders)", ["src", "app", "app", "mes", "purchase-orders", "receiving-dialog.tsx"]],
+    ["자재입고(material-receipt)", ["src", "app", "app", "mes", "material-receipt", "receiving-form-dialog.tsx"]],
+  ] as const) {
+    const src = read(...path)
+    ok(/runReceivingBatch\(/.test(src) && /rowStatus/.test(src), `F7 ${label}: 품목별 결과를 기억하고 순차 처리 모듈 사용`)
+    ok(/if \(savingRef\.current\) return/.test(src) && /savingRef\.current = true/.test(src) && /savingRef\.current = false/.test(src), `F7 ${label}: 저장 중 중복 클릭 방어(ref 가드)`)
+    ok(/<fieldset[\s\S]*?isRowLocked\(rowStatus\[ins\.purchaseOrderItemId\]\)/.test(src), `F7 ${label}: 완료/불명 품목 입력 잠금`)
+    ok(/입고 완료 — 다시 저장되지 않습니다/.test(src) && /입고 실패:/.test(src), `F7 ${label}: 성공/실패 상태 구분 표시`)
+    ok(/applyReceiptToQuantities/.test(src) && /router\.refresh\(\)/.test(src), `F7 ${label}: 성공 품목 수량 즉시 반영 + 서버 새로고침`)
+    ok(!/error instanceof Error \? error\.message/.test(src), `F7 ${label}: 예외 메시지 원문을 그대로 alert 하지 않음`)
+  }
+  const server = read("src", "lib", "actions", "receiving.actions.ts")
+  ok(/data\.receivedQty > lockedRemainingQty/.test(server) && /lockPurchaseOrderItemsForUpdate/.test(server), "F8 서버 입고 트랜잭션의 행 잠금 + 잔량 재검증은 변경되지 않음")
+}
+
+// ─── G. 제조번호 수동 입력 정책 조합 ───────────────────────────────────────────────
+
+function testManufacturingPolicy() {
+  const {
+    decideManufacturingNo,
+    MANUFACTURING_NO_DISABLED_NO_AUTO_MESSAGE,
+    MANUFACTURING_NO_POLICY_CONFLICT_MESSAGE,
+    MANUFACTURING_NO_REQUIRED_MESSAGE,
+  } = policyModule
+  const types = ["DEFAULT", "MANUAL", "RAW_DATE_SEQ", "PREFIX_MONTH_SEQ"]
+  const policies = ["ALLOWED", "REQUIRED", "DISABLED"]
+  let cells = 0
+  for (const t of types) for (const p of policies) for (const input of ["", "  ", "M-001", " M-002 "]) for (const autoAllowed of [false, true]) for (const blankMeansAuto of [true, false]) {
+    const d = decideManufacturingNo({ lotNumberingType: t, manualLotPolicy: p, input, autoAllowed, blankMeansAuto })
+    cells += 1
+    if (!autoAllowed) assert.notEqual(d.kind, "AUTO", `대원정밀(자동 채번 불가)에서 AUTO 판정 금지: ${t}/${p}/${JSON.stringify(input)}`)
+    if (d.kind === "MANUAL") assert.equal(d.value, input.trim(), "수동 번호는 trim 된 입력 그대로")
+    if (d.kind === "ERROR") assert.ok(/[가-힣]/.test(d.message), "오류는 한글 안내")
+  }
+  ok(cells === 4 * 3 * 4 * 2 * 2, `G1 ${cells}개 조합 모두 불변식 통과(자동 채번 불가 시 AUTO 없음, 수동 번호 보존, 한글 안내)`)
+
+  const D = (t: string, p: string, input: string, autoAllowed = false, blankMeansAuto = true) =>
+    decideManufacturingNo({ lotNumberingType: t, manualLotPolicy: p, input, autoAllowed, blankMeansAuto })
+  // 대원정밀(autoAllowed=false)
+  for (const t of ["DEFAULT", "RAW_DATE_SEQ", "PREFIX_MONTH_SEQ"]) {
+    eq(D(t, "ALLOWED", "M-1"), { kind: "MANUAL", value: "M-1" }, `G2 ${t}/ALLOWED 수동 입력 허용`)
+    eq(D(t, "ALLOWED", ""), { kind: "ERROR", message: DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE }, `G2 ${t}/ALLOWED 미입력 → 규칙 미설정 안내`)
+    eq(D(t, "REQUIRED", ""), { kind: "ERROR", message: MANUFACTURING_NO_REQUIRED_MESSAGE }, `G2 ${t}/REQUIRED 미입력 → 직접 입력 요구`)
+    eq(D(t, "REQUIRED", "M-1"), { kind: "MANUAL", value: "M-1" }, `G2 ${t}/REQUIRED 입력 → 수동 사용`)
+    eq(D(t, "DISABLED", "M-1"), { kind: "ERROR", message: MANUFACTURING_NO_DISABLED_NO_AUTO_MESSAGE }, `G3 ${t}/DISABLED 입력 → 입력이 무시되어 자동 채번을 시도하던 문제를 명확한 안내로 대체`)
+    eq(D(t, "DISABLED", ""), { kind: "ERROR", message: MANUFACTURING_NO_DISABLED_NO_AUTO_MESSAGE }, `G3 ${t}/DISABLED 미입력 → 동일 안내`)
+  }
+  eq(D("MANUAL", "ALLOWED", ""), { kind: "ERROR", message: MANUFACTURING_NO_REQUIRED_MESSAGE }, "G4 MANUAL 유형은 직접 입력 필수")
+  eq(D("MANUAL", "ALLOWED", "M-9"), { kind: "MANUAL", value: "M-9" }, "G4 MANUAL 유형 입력 시 수동")
+  eq(D("MANUAL", "DISABLED", "M-9"), { kind: "ERROR", message: MANUFACTURING_NO_POLICY_CONFLICT_MESSAGE }, "G5 MANUAL + DISABLED 는 설정 충돌 안내")
+  eq(D("DEFAULT", "REQUIRED", "x", true).kind, "MANUAL", "G6 REQUIRED 는 자동 채번 가능해도 수동 사용")
+  eq(D("DEFAULT", "REQUIRED", "", true, true).kind, "ERROR", "G6 REQUIRED 미입력은 자동 채번 가능해도 거절")
+  // 자동 채번이 가능한 환경(NMES 개발)에서는 기존 동작 유지
+  eq(D("DEFAULT", "ALLOWED", "", true).kind, "AUTO", "G7 자동 채번 가능 환경: 미입력 → AUTO(기존 동작)")
+  eq(D("DEFAULT", "DISABLED", "M-1", true).kind, "AUTO", "G7 자동 채번 가능 환경: DISABLED 는 입력을 무시하고 AUTO(기존 동작)")
+  // 수정 흐름(blankMeansAuto=false): 미입력은 번호 없이 저장 — 기존 수정 동작 유지
+  eq(D("DEFAULT", "ALLOWED", "", false, false).kind, "NONE", "G8 수정: 미입력은 번호 없음(기존 동작)")
+  eq(D("DEFAULT", "DISABLED", "", false, false).kind, "NONE", "G8 수정: DISABLED 미입력도 기존처럼 차단하지 않음")
+  eq(D("DEFAULT", "REQUIRED", "", false, false).kind, "ERROR", "G8 수정: REQUIRED 미입력은 기존처럼 거절")
+
+  // 가드 유지 + 호출 구조
+  const wo = read("src", "lib", "actions", "work-order.actions.ts")
+  ok(/decideManufacturingNo\(/.test(wo) && /blankMeansAuto: true/.test(wo) && /blankMeansAuto: false/.test(wo), "G9 작업지시 등록/수정이 정책 판정 모듈을 사용")
+  ok(/throw new UserFacingError\(decision\.message\)/.test(wo), "G9 정책 오류는 사용자 안내(UserFacingError)로 전달")
+  ok(/assertCnsLotRuleAllowed\(\)/.test(read("src", "lib", "lot-numbering", "lot-rule-resolver.ts")), "G9 자동 채번 가드(assertCnsLotRuleAllowed) 유지")
+  ok(!/lotNumberingType:\s*["']/.test(read("src", "lib", "lot-numbering", "manufacturing-no-policy.ts")), "G9 품목 정책을 변경하는 코드 없음")
+}
+
 async function main() {
   await testPurchaseOrderLock()
   testUserErrors()
   testLotGuard()
   testSourceStructure()
+  testUserErrorAllowlist()
+  await testReceivingBatch()
+  testManufacturingPolicy()
   console.log(`\nAll ${passed} assertions passed`)
 }
 

@@ -5,10 +5,23 @@
  * 그래서 사용자 안내가 필요한 업무 액션(발주/입고/작업지시/출고)은 오류를 잡아
  * `{ success: false, message }` 형태로 반환하고, 이 모듈이 message 를 안전하게 만든다.
  *
- *  - 업무 규칙 메시지(한글로 작성한 "재고 부족", "이미 사용 중인 제조번호입니다" 등)는 그대로 전달한다.
- *  - Prisma/DB/네트워크 내부 오류(쿼리 원문, 테이블·컬럼명, 오류 코드, 스택)는 사용자에게 노출하지 않고
- *    이해하기 쉬운 안내로 바꾼다. 원본 오류는 호출부가 console.error 로 서버 로그에 남긴다.
+ * 원칙: **허용된 업무 메시지만 그대로 전달하고, 나머지는 모두 일반 안내로 바꾼다(allowlist).**
+ *  전달 허용:
+ *   1) `UserFacingError` 로 던진 오류
+ *   2) 영문 업무 코드(FORBIDDEN, UNAUTHORIZED 등) → 정해진 한글 안내로 변환
+ *   3) 한글로 작성된 업무 규칙 메시지("재고 부족", "이미 사용 중인 제조번호입니다" 등) 중
+ *      길이 제한을 넘지 않고 내부 정보 패턴(쿼리/테이블/오류코드/경로/스택/연결정보)이 없는 것
+ *  그 밖의 모든 오류(영문 예외 문구, Prisma/DB/네트워크 오류, TypeError 등)는 원문을 노출하지 않는다.
+ * 원본 오류는 호출부가 console.error 로 서버 로그에 남긴다.
  */
+
+/** 사용자에게 그대로 보여도 되는 업무 규칙 오류. 메시지는 한글 안내문이어야 한다. */
+export class UserFacingError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "UserFacingError"
+  }
+}
 
 export type ActionResult = { success: true } | { success: false; message: string }
 
@@ -32,6 +45,7 @@ const CODE_MESSAGES: Record<string, string> = {
   FORBIDDEN: FORBIDDEN_USER_ERROR_MESSAGE,
   UNAUTHORIZED: UNAUTHORIZED_USER_ERROR_MESSAGE,
   INVALID_ITEM: "품목 정보를 찾을 수 없습니다. 품목을 다시 선택해 주세요.",
+  AUTO_LOT_COLLISION: "LOT 번호 자동 발행 중 번호가 겹쳤습니다. 잠시 후 다시 시도해 주세요.",
 }
 
 /** Prisma 오류 코드 → 사용자 안내 (P2002 는 호출부가 duplicateMessage 로 덮어쓸 수 있다) */
@@ -56,7 +70,7 @@ const INTERNAL_MESSAGE_PATTERNS: RegExp[] = [
   /Inconsistent column data/i,
   /Argument [`"]?\w+[`"]? (is missing|must not be)/i,
   /Unknown (argument|field|arg)/i,
-  /\bP\d{4}\b/,
+  /\bcode[:= ]+[`'"]?P\d{4}\b/i, // 품목코드(P1000 등)와 구분하기 위해 "code: P2002" 형태만 내부 오류로 본다
   /Can't reach database/i,
   /Timed out fetching a new connection/i,
   /Transaction (API error|already closed)/i,
@@ -72,7 +86,25 @@ const INTERNAL_MESSAGE_PATTERNS: RegExp[] = [
   /postgres(ql)?:\/\//i,
   /supabase\.co/i,
   /\bDATABASE_URL\b/,
+  /duplicate key value|violates (unique|foreign key|not-null|check) constraint/i,
+  /invalid input syntax|syntax error at or near|permission denied for|password authentication/i,
+  /deadlock detected|could not serialize|serialization failure/i,
+  /[A-Za-z]:\\[\w\\ .-]+/, // Windows 경로
+  /\/(var|app|home|usr|tmp|opt|workspace)\/[\w/.-]+/, // 서버 경로
+  /\.(tsx?|jsx?|mjs|cjs):\d+/, // 소스 위치
+  /node_modules/,
 ]
+
+/** 업무 메시지로 그대로 전달할 수 있는 최대 길이 */
+const MAX_BUSINESS_MESSAGE_LENGTH = 300
+const HANGUL = /[가-힣]/
+
+/** 한글로 작성된 짧은 업무 규칙 메시지이고 내부 정보 패턴이 없을 때만 true */
+export function isAllowedBusinessMessage(message: string): boolean {
+  return (
+    message.length <= MAX_BUSINESS_MESSAGE_LENGTH && HANGUL.test(message) && !isInternalErrorMessage(message)
+  )
+}
 
 export function isInternalErrorMessage(message: string): boolean {
   return INTERNAL_MESSAGE_PATTERNS.some((pattern) => pattern.test(message))
@@ -121,7 +153,10 @@ export function toUserErrorMessage(error: unknown, options: UserErrorOptions = {
     if (/Foreign key constraint/i.test(trimmed)) return REFERENCE_USER_ERROR_MESSAGE
     return fallback
   }
-  return trimmed
+  // 명시적으로 허용된 업무 오류 / 한글 업무 규칙 메시지만 그대로 전달. 그 외 알 수 없는 원문은 노출하지 않는다.
+  if (error instanceof UserFacingError || errorName(error) === "UserFacingError") return trimmed
+  if (isAllowedBusinessMessage(trimmed)) return trimmed
+  return fallback
 }
 
 /** 업무 액션 공통: 오류를 서버 로그에 남기고 `{ success:false, message }` 로 변환한다. */
