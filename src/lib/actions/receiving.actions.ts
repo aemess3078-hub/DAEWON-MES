@@ -11,6 +11,7 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
 import { recordAuditLog } from "@/lib/audit-log"
 import { BUSINESS_NUMBER_MAX_ATTEMPTS, isUniqueConstraintError, kstDateParts } from "@/lib/business-numbering"
+import { toUserErrorMessage } from "@/lib/errors/user-error"
 
 export type CreateReceivingInspectionInput = {
   purchaseOrderItemId: string
@@ -68,17 +69,18 @@ async function generateTxNo(tenantId: string): Promise<string> {
 export async function createReceivingInspection(
   data: CreateReceivingInspectionInput,
 ): Promise<{ success: boolean; message?: string }> {
-  await requireResourcePermission("PURCHASE_ORDER", "CREATE")
   try {
+    await requireResourcePermission("PURCHASE_ORDER", "CREATE")
     return await createReceivingInspectionInternal(data)
   } catch (error) {
     // Next.js는 프로덕션에서 Server Action이 throw한 에러 메시지를 자동으로
-    // 지우므로(보안상 기본 동작), 여기서 잡아 메시지를 그대로 반환값에 담아
+    // 지우므로(보안상 기본 동작), 여기서 잡아 메시지를 반환값에 담아
     // 클라이언트가 실제 원인을 표시할 수 있게 한다.
+    // 업무 규칙 메시지는 그대로, Prisma/DB 내부 오류는 안전한 안내문으로 바꾼다(원본은 서버 로그에만 남긴다).
     console.error("[createReceivingInspection] error:", error)
     return {
       success: false,
-      message: error instanceof Error ? error.message : "입고 처리 중 오류가 발생했습니다.",
+      message: toUserErrorMessage(error, { fallback: "입고 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." }),
     }
   }
 }

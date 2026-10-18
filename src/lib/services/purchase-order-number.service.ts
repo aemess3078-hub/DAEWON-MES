@@ -50,9 +50,15 @@ export function purchaseOrderNumberLockKey(tenantId: string, year: number): stri
   return `PO_NO|${tenantId}|${year}`
 }
 
-/** 운영용 잠금: pg_advisory_xact_lock(hashtext(key)). 트랜잭션이 끝나면 자동 해제된다. */
+/**
+ * 운영용 잠금: pg_advisory_xact_lock(hashtext(key)). 트랜잭션이 끝나면 자동 해제된다.
+ *
+ * pg_advisory_xact_lock 은 반환 타입이 PostgreSQL `void` 이다. `$queryRaw` 로 실행하면 Prisma 가
+ * 결과 컬럼(void)을 역직렬화하지 못해 "Failed to deserialize column of type 'void'" 로 실패한다.
+ * 결과 행을 읽지 않는 `$executeRaw` 로 실행한다(잠금은 동일하게 획득되고 트랜잭션 종료까지 유지된다).
+ */
 export async function pgAdvisoryXactLock(tx: any, key: string): Promise<void> {
-  await tx.$queryRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`)
+  await tx.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${key}))`)
 }
 
 /**

@@ -10,6 +10,7 @@ import {
   withQuantityTransactionRetry,
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
+import { toUserErrorMessage } from "@/lib/errors/user-error"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -249,9 +250,15 @@ export async function issueMaterialsForWorkOrder(
   data: IssueMaterialInput,
   tenantId: string
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireResourcePermission("PURCHASE_ORDER", "CREATE")
-  const actor = await requireRole("OPERATOR")
-  if (actor.tenantId !== tenantId) return { ok: false, error: "FORBIDDEN" }
+  let actor: Awaited<ReturnType<typeof requireRole>>
+  try {
+    await requireResourcePermission("PURCHASE_ORDER", "CREATE")
+    actor = await requireRole("OPERATOR")
+  } catch (e) {
+    // 서버 액션이 throw 한 메시지는 프로덕션에서 지워지므로 반환값으로 권한 안내를 전달한다
+    return { ok: false, error: toUserErrorMessage(e) }
+  }
+  if (actor.tenantId !== tenantId) return { ok: false, error: toUserErrorMessage("FORBIDDEN") }
   const activeItems = data.items.filter((i) => i.issueQty > 0)
   if (activeItems.length === 0)
     return { ok: false, error: "출고 수량을 입력하세요." }
@@ -687,6 +694,10 @@ export async function issueMaterialsForWorkOrder(
     revalidatePath("/app/mes/production/wip-inventory")
     return { ok: true }
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "오류가 발생했습니다." }
+    console.error("[issueMaterialsForWorkOrder] error:", e)
+    return {
+      ok: false,
+      error: toUserErrorMessage(e, { fallback: "자재출고 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." }),
+    }
   }
 }

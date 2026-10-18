@@ -505,8 +505,8 @@ export function IssueFormDialog({
                                       placeholder="수량"
                                     />
                                     {rowOverStock && (
-                                      <p className="mt-0.5 text-[11px] text-red-600 flex items-center gap-0.5">
-                                        <AlertCircle className="h-3 w-3" />재고 초과
+                                      <p className="mt-1 flex items-center justify-end gap-1 text-[13px] leading-tight text-red-600">
+                                        <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />재고 초과
                                       </p>
                                     )}
                                   </div>
@@ -648,22 +648,25 @@ export function IssueFormDialog({
                         {formatQuantity(material.issuedQty)}
                       </div>
                       <div className="px-3 py-2.5">
-                        <div className="relative">
-                          <Input
-                            type="number"
-                            min={0}
-                            max={material.pendingQty}
-                            step={0.001}
-                            value={qtyMap[material.itemId] ?? ""}
-                            onChange={(event) =>
-                              setQtyMap((prev) => ({ ...prev, [material.itemId]: event.target.value }))
-                            }
-                            className={`h-8 pr-2 text-right text-[13px] ${isOverStock ? "border-red-400 focus-visible:ring-red-400" : ""}`}
-                          />
-                          {isOverStock && (
-                            <AlertCircle className="absolute right-7 top-2 h-3.5 w-3.5 text-red-500" />
-                          )}
-                        </div>
+                        <Input
+                          type="number"
+                          min={0}
+                          max={material.pendingQty}
+                          step={0.001}
+                          value={qtyMap[material.itemId] ?? ""}
+                          onChange={(event) =>
+                            setQtyMap((prev) => ({ ...prev, [material.itemId]: event.target.value }))
+                          }
+                          aria-invalid={isOverStock || undefined}
+                          className={`h-8 pr-2 text-right text-[13px] ${isOverStock ? "border-red-400 focus-visible:ring-red-400" : ""}`}
+                        />
+                        {/* 경고는 입력칸 위에 겹치지 않도록 입력칸 아래 별도 줄에 표시한다 */}
+                        {isOverStock && (
+                          <p className="mt-1 flex items-center justify-end gap-1 text-[13px] leading-tight text-red-600">
+                            <AlertCircle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                            재고 초과
+                          </p>
+                        )}
                       </div>
                       <div className="px-3 py-2.5 text-right">
                         <span className="font-mono text-[13px] text-blue-700">-</span>

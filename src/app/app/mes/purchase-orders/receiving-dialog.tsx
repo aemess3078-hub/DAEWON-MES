@@ -142,7 +142,7 @@ export function ReceivingDialog({
           return
         }
 
-        await createReceivingInspection({
+        const result = await createReceivingInspection({
           purchaseOrderItemId: ins.purchaseOrderItemId,
           purchaseOrderId: purchaseOrder.id,
           warehouseId: ins.warehouseId,
@@ -154,6 +154,15 @@ export function ReceivingDialog({
           note: ins.note || undefined,
           lotNo: ins.lotNo.trim() || undefined,
         })
+        if (!result.success) {
+          // 실패를 성공처럼 닫지 않는다: 이미 처리된 품목은 새로고침으로 반영하고 실패 사유를 안내한다
+          alert(
+            `[${ins.itemCode}] ${ins.itemName}\n` +
+            (result.message ?? "저장 중 오류가 발생했습니다.")
+          )
+          router.refresh()
+          return
+        }
       }
       onClose()
       router.refresh()
