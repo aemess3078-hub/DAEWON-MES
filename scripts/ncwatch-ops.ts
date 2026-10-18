@@ -436,6 +436,126 @@ async function verifyKey(prisma: PrismaClient, tenantId: string) {
   }, { timeout: 60000 })
 }
 
+/**
+ * 수신 데이터 저장 검증 (READ ONLY — SET TRANSACTION READ ONLY + SELECT 만). 키·rawPayload 는 조회하지 않는다.
+ * 해당 테넌트(--tenant) 데이터만 조회한다.
+ */
+async function verifyData(prisma: PrismaClient, tenantId: string) {
+  const kst = (d: Date | null | undefined) =>
+    d ? new Date(d.getTime() + 9 * 3600_000).toISOString().replace("T", " ").slice(0, 19) + " KST" : "-"
+  const nowMs = Date.now()
+  const ageSec = (d: Date | null | undefined) => (d ? Math.round((nowMs - d.getTime()) / 1000) : null)
+  console.log(`조회 시각: ${kst(new Date())}  tenant=${tenantId}  (READ ONLY)`)
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe("SET TRANSACTION READ ONLY")
+
+    const maps = await tx.ncwatchEquipmentMapping.findMany({
+      where: { tenantId }, orderBy: { machineName: "asc" },
+      select: { machineName: true, equipmentId: true, isActive: true, siteId: true, equipment: { select: { code: true, tenantId: true, siteId: true } } },
+    })
+    console.log("\n[7. NcwatchEquipmentMapping]")
+    for (const m of maps) console.log(`  ${m.machineName} → ${m.equipmentId} (${m.equipment?.code}) active=${m.isActive} site=${m.siteId} 설비테넌트일치=${m.equipment?.tenantId === tenantId}`)
+    const eqByMachine = new Map(maps.map((m) => [m.machineName, m.equipmentId]))
+
+    const gw = await tx.edgeGateway.findMany({
+      where: { tenantId }, select: { id: true, name: true, status: true, lastHeartbeat: true, siteId: true },
+    })
+    console.log("\n[6. EdgeGateway] (키 미조회)")
+    for (const g of gw) console.log(`  ${g.name} ${g.id} status=${g.status} lastHeartbeat=${kst(g.lastHeartbeat)} (${ageSec(g.lastHeartbeat)}초 전)`)
+
+    const statuses = await tx.ncwatchStatus.findMany({
+      where: { tenantId }, orderBy: { machineName: "asc" },
+      select: {
+        machineName: true, siteId: true, statusCode: true, statusLabel: true, runCode: true, modeCode: true, messageCode: true,
+        programName: true, oNumber: true, partCount: true, spindleSpeed: true, aliveCount: true, alarmCode: true, alarmMessage: true,
+        ncwatchTs: true, receivedAt: true, updatedAt: true,
+      },
+    })
+    console.log(`\n[1. NcwatchStatus] ${statuses.length}행`)
+    for (const s of statuses) {
+      console.log(`  ${s.machineName}: STATUS=${s.statusCode}(${s.statusLabel}) RUN=${s.runCode} MODE=${s.modeCode} MESSAGE=${s.messageCode} 프로그램=${s.programName} O=${s.oNumber} 수량=${s.partCount} 회전=${s.spindleSpeed} alive=${s.aliveCount} 알람=${s.alarmCode ?? "-"}`)
+      console.log(`      NCWatch행시각=${s.ncwatchTs} | 최종수신=${kst(s.receivedAt)} (${ageSec(s.receivedAt)}초 전) | site=${s.siteId}`)
+    }
+
+    const hist = await tx.ncwatchStatusHistory.findMany({
+      where: { tenantId }, orderBy: [{ machineName: "asc" }, { changedAt: "asc" }],
+      select: { machineName: true, statusCode: true, statusLabel: true, partCount: true, alarmMessage: true, changedAt: true, receivedAt: true },
+    })
+    console.log(`\n[2. NcwatchStatusHistory] 총 ${hist.length}건`)
+    for (const m of ["CNC-1", "CNC-8", "CNC-9", "MCT-6"]) {
+      const rows = hist.filter((h) => h.machineName === m)
+      console.log(`  ${m}: ${rows.length}건` + (rows.length ? " — " + rows.map((h) => `${h.statusCode}(${h.statusLabel}) 변경=${kst(h.changedAt)} 수신=${kst(h.receivedAt)}`).join(" | ") : ""))
+      // 연속 동일 상태 중복
+      let dup = 0
+      for (let i = 1; i < rows.length; i++) if (rows[i].statusCode === rows[i - 1].statusCode) dup++
+      if (rows.length) console.log(`      연속 동일 상태 중복: ${dup}건`)
+    }
+
+    const events = await tx.equipmentEvent.findMany({
+      where: { equipment: { tenantId } }, orderBy: [{ equipmentId: "asc" }, { startedAt: "asc" }],
+      select: { equipmentId: true, eventType: true, message: true, startedAt: true, endedAt: true, duration: true, equipment: { select: { code: true } } },
+    })
+    console.log(`\n[3. EquipmentEvent] 총 ${events.length}건`)
+    for (const m of ["CNC-1", "CNC-8", "CNC-9", "MCT-6"]) {
+      const rows = events.filter((e) => e.equipment.code === m)
+      const open = rows.filter((e) => e.endedAt === null).length
+      console.log(`  ${m}: ${rows.length}건 (열린 이벤트 ${open}건)` + (rows.length ? " — " + rows.map((e) => `${e.eventType}[${e.message ?? "-"}] 시작=${kst(e.startedAt)} 종료=${kst(e.endedAt)}`).join(" | ") : ""))
+    }
+
+    const tags = await tx.dataTag.findMany({
+      where: { source: "NCWATCH", connection: { equipment: { tenantId } } },
+      select: { id: true, tagCode: true, connection: { select: { equipment: { select: { code: true } } } }, currentValue: { select: { value: true, numericValue: true, timestamp: true } } },
+    })
+    console.log(`\n[4. TagCurrentValue] NCWATCH 태그 ${tags.length}개`)
+    for (const m of ["CNC-1", "CNC-8", "CNC-9", "MCT-6"]) {
+      const ts = tags.filter((t) => t.connection.equipment.code === m)
+      const filled = ts.filter((t) => t.currentValue)
+      const latest = filled.map((t) => t.currentValue!.timestamp).sort((a, b) => b.getTime() - a.getTime())[0]
+      const empty = ts.filter((t) => !t.currentValue).map((t) => t.tagCode)
+      console.log(`  ${m}: 태그 ${ts.length}개 중 값 저장 ${filled.length}개, 마지막 갱신(값 시각)=${kst(latest)}${empty.length ? ", 값 없음=" + empty.join(",") : ""}`)
+      const pick = ["STATUS", "MODE", "PROGRAM_NAME", "O_NUMBER", "SPINDLE_SPEED", "FEED_RATE", "PART_COUNT", "TOOL_NO", "ALARM_MESSAGE", "POS_X"]
+      console.log("      " + pick.map((c) => { const t = ts.find((x) => x.tagCode === c); return `${c}=${t?.currentValue ? t.currentValue.value : "∅"}` }).join(", "))
+    }
+
+    const snaps = await tx.tagSnapshot.groupBy({ by: ["tagId"], where: { tag: { source: "NCWATCH", connection: { equipment: { tenantId } } } }, _count: { _all: true } })
+    const snapByTag = new Map(snaps.map((s) => [s.tagId, s._count._all]))
+    console.log(`\n[5. TagSnapshot] 총 ${snaps.reduce((a, s) => a + s._count._all, 0)}건`)
+    for (const m of ["CNC-1", "CNC-8", "CNC-9", "MCT-6"]) {
+      const ts = tags.filter((t) => t.connection.equipment.code === m)
+      const counts = ts.map((t) => snapByTag.get(t.id) ?? 0)
+      console.log(`  ${m}: 태그별 스냅샷 수 min=${Math.min(...counts)} max=${Math.max(...counts)} 합=${counts.reduce((a, b) => a + b, 0)}`)
+    }
+    const allSnap = await tx.tagSnapshot.findMany({
+      where: { tag: { source: "NCWATCH", connection: { equipment: { tenantId } } } },
+      select: { tagId: true, value: true, timestamp: true }, orderBy: [{ tagId: "asc" }, { timestamp: "asc" }],
+    })
+    let exactDup = 0, sameValueConsec = 0
+    for (let i = 1; i < allSnap.length; i++) {
+      const a = allSnap[i - 1], b = allSnap[i]
+      if (a.tagId !== b.tagId) continue
+      if (a.value === b.value && a.timestamp.getTime() === b.timestamp.getTime()) exactDup++
+      if (a.value === b.value) sameValueConsec++
+    }
+    console.log(`  동일 태그·값·시각 완전 중복: ${exactDup}건 / 같은 값이 연속 저장(주기 스냅샷 포함): ${sameValueConsec}건`)
+
+    const reports = await tx.ncwatchReportDaily.findMany({
+      where: { tenantId }, orderBy: [{ machineName: "asc" }, { reportDate: "asc" }],
+      select: { machineName: true, reportDate: true, runTime: true, runPct: true, partCount: true, stopTime: true, offlineTime: true, offlinePct: true, receivedAt: true },
+    })
+    console.log(`\n[8. NcwatchReportDaily] ${reports.length}건 (reportDate 는 날짜형: UTC 자정 = KST 날짜 그대로 저장)`)
+    for (const r of reports) console.log(`  ${r.machineName} ${r.reportDate.toISOString().slice(0, 10)} 가동=${r.runTime}(${r.runPct}%) 수량=${r.partCount} 정지=${r.stopTime} 오프라인=${r.offlineTime}(${r.offlinePct}%) 수신=${kst(r.receivedAt)}`)
+    console.log(`  현재 KST 날짜: ${kst(new Date()).slice(0, 10)}`)
+
+    const logs = await tx.ncwatchSyncLog.groupBy({ by: ["endpoint", "result"], where: { tenantId }, _count: { _all: true } })
+    console.log("\n[참고: NcwatchSyncLog 집계]")
+    for (const l of logs) console.log(`  ${l.endpoint} / ${l.result}: ${l._count._all}건`)
+    const lastErr = await tx.ncwatchSyncLog.findMany({ where: { tenantId, result: "ERROR" }, orderBy: { createdAt: "desc" }, take: 5, select: { machineName: true, endpoint: true, message: true, createdAt: true } })
+    console.log(`  최근 ERROR ${lastErr.length}건` + lastErr.map((e) => ` | ${kst(e.createdAt)} ${e.endpoint} ${e.machineName ?? ""} ${e.message ?? ""}`).join(""))
+    void eqByMachine
+  }, { timeout: 120000 })
+}
+
 async function main() {
   loadEnvLocal()
   normalizeDatabaseUrl()
@@ -446,6 +566,7 @@ async function main() {
     if (cmd === "inspect") await inspect(prisma, tenantId)
     else if (cmd === "provision") await provision(prisma, tenantId)
     else if (cmd === "verify-key") await verifyKey(prisma, tenantId)
+    else if (cmd === "verify-data") await verifyData(prisma, tenantId)
     else {
       console.log("사용법: ncwatch-ops.ts <inspect|provision> [--tenant <id>] [--apply --confirm-tenant <id> [--issue-key <file>] [--rotate-key]]")
       process.exitCode = 1
