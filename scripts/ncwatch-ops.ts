@@ -2,6 +2,7 @@
  * 대원정밀 NCWatch 연동 운영 도구 (Phase 12).
  *
  *   inspect     READ ONLY. 테넌트/사업장/설비/Gateway/매핑/태그/수신 현황을 조회한다. (키·비밀번호 출력 없음)
+ *   verify-key  READ ONLY. 운영 키 파일(--key-file)로 신/구 서버 인증 방식의 호환성을 점검한다(출력에 키·해시 없음).
  *   provision   dry-run 이 기본. `--apply` + `--confirm-tenant <id>` 가 모두 있어야만 쓴다.
  *               - "NCWatch Agent" Gateway 재사용(없을 때만 생성), 설비 4대 NCWatch 매핑/연결/기본 태그 생성(없는 것만).
  *               - 기존 데이터는 수정/삭제하지 않는다(설비 미존재 시 임의 연결 금지 → 해당 설비만 건너뜀).
@@ -16,7 +17,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { PrismaClient } from "@prisma/client"
-import { generateAgentKey, hashAgentKey, isStoredAgentKeyHash } from "../src/lib/ncwatch/agent-key"
+import { generateAgentKey, hashAgentKey, isPresentableAgentKey, isStoredAgentKeyHash } from "../src/lib/ncwatch/agent-key"
 import { NCWATCH_DEFAULT_TAGS, NCWATCH_GATEWAY_NAME } from "../src/lib/ncwatch/provision"
 
 /** 연동 대상 설비 — NCWatch 수집 기계명 = MES 설비 코드(이름) 로 매핑한다. */
@@ -367,6 +368,58 @@ async function provision(prisma: PrismaClient, tenantId: string) {
   console.log(`  생성 레코드 기록: ${createdFile}`)
 }
 
+/**
+ * 운영 인증키 호환성 점검 (READ ONLY, 키·해시 값은 출력하지 않고 true/false 만 출력).
+ *  - 신규 서버(auth.ts)가 쓰는 해시 조회와, 구버전 서버(main: 평문 조회)가 쓰는 조회를 각각 재현한다.
+ *  - 이 점검은 하트비트를 전송하지 않으므로 Gateway 상태/시각을 바꾸지 않는다.
+ */
+async function verifyKey(prisma: PrismaClient, tenantId: string) {
+  const keyFile = arg("key-file")
+  if (!keyFile) throw new Error("--key-file <파일> 이 필요합니다.")
+  const key = readFileSync(keyFile, "utf8").trim()
+  const show = (label: string, value: unknown) => console.log(`  ${label}: ${value}`)
+  console.log(`DB host : ${maskHost(process.env.DATABASE_URL)}`)
+  console.log(`키 형식 : 길이충족(>=40)=${key.length >= 40}, dwk_ 접두=${key.startsWith("dwk_")}, 해시형식 아님=${!key.startsWith("sha256:")}`)
+
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe("SET TRANSACTION READ ONLY")
+    const expected = await tx.edgeGateway.findMany({ where: { tenantId, name: NCWATCH_GATEWAY_NAME }, select: { id: true, tenantId: true, siteId: true, apiKey: true } })
+    show('"NCWatch Agent" Gateway 수', expected.length)
+    const gw = expected[0]
+    show("저장된 키가 sha256 해시", gw ? isStoredAgentKeyHash(gw.apiKey) : "?")
+
+    // 신규 서버 방식 (src/lib/ncwatch/auth.ts 1단계): 제시 키를 해시해 조회
+    const hashed = await tx.edgeGateway.findUnique({ where: { apiKey: hashAgentKey(key) }, select: { id: true, tenantId: true, siteId: true } })
+    console.log("[신규 서버(Phase 10+) 인증 방식]")
+    show("새 키 → Gateway 식별됨", Boolean(hashed))
+    show("식별된 Gateway 가 기존 NCWatch Agent Gateway 와 동일", hashed?.id === gw?.id)
+    show("tenant 가 대원정밀(" + tenantId + ")로 확정", hashed?.tenantId === tenantId)
+    show("siteId 일치", hashed?.siteId === gw?.siteId)
+    show("저장된 해시값 자체를 키로 제시하면 거부(접두 sha256: 차단)", !isPresentableAgentKey(gw?.apiKey ?? ""))
+    const wrong = await tx.edgeGateway.findUnique({ where: { apiKey: hashAgentKey(generateAgentKey()) }, select: { id: true } })
+    show("임의의 잘못된 키 → 식별 안 됨", wrong === null)
+    show('데모 키 "gw-api-key-demo-001" → 식별 안 됨', (await tx.edgeGateway.findUnique({ where: { apiKey: hashAgentKey("gw-api-key-demo-001") }, select: { id: true } })) === null)
+
+    // 구버전 서버 방식 (main 의 auth.ts): 제시 키 원문을 그대로 조회
+    const legacy = await tx.edgeGateway.findUnique({ where: { apiKey: key }, select: { id: true } })
+    console.log("[현재 운영 배포본(main 계열, 평문 조회) 인증 방식]")
+    show("새 키 → Gateway 식별됨", Boolean(legacy))
+
+    const others = await tx.edgeGateway.count({ where: { tenantId: { not: tenantId } } })
+    show("다른 테넌트 Gateway 수(이 키와 무관해야 함)", others)
+
+    console.log("[코드↔DB 호환성: 수신 경로가 쓰는 테이블 접근(count)]")
+    const counts = {
+      ncwatchStatus: await tx.ncwatchStatus.count(), ncwatchStatusHistory: await tx.ncwatchStatusHistory.count(),
+      ncwatchSyncLog: await tx.ncwatchSyncLog.count(), ncwatchReportDaily: await tx.ncwatchReportDaily.count(),
+      ncwatchEquipmentMapping: await tx.ncwatchEquipmentMapping.count({ where: { tenantId } }),
+      equipmentEvent: await tx.equipmentEvent.count(), dataTag: await tx.dataTag.count({ where: { source: "NCWATCH" } }),
+      tagCurrentValue: await tx.tagCurrentValue.count(), tagSnapshot: await tx.tagSnapshot.count(),
+    }
+    for (const [k, v] of Object.entries(counts)) show(k, v)
+  }, { timeout: 60000 })
+}
+
 async function main() {
   loadEnvLocal()
   normalizeDatabaseUrl()
@@ -376,6 +429,7 @@ async function main() {
   try {
     if (cmd === "inspect") await inspect(prisma, tenantId)
     else if (cmd === "provision") await provision(prisma, tenantId)
+    else if (cmd === "verify-key") await verifyKey(prisma, tenantId)
     else {
       console.log("사용법: ncwatch-ops.ts <inspect|provision> [--tenant <id>] [--apply --confirm-tenant <id> [--issue-key <file>] [--rotate-key]]")
       process.exitCode = 1
