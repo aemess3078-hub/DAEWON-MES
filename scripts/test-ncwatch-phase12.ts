@@ -95,6 +95,14 @@ const fakePrisma: any = {
   tagSnapshot: {
     findFirst: async ({ where }: Row) => T.tagSnapshot.filter((s) => s.tagId === where.tagId).sort((a, b) => b.timestamp - a.timestamp)[0] ?? null,
     create: async ({ data }: Row) => { counters.tagSnapshotCreate++; T.tagSnapshot.push({ id: newId(), ...data }); return data },
+    createMany: async ({ data }: Row) => { for (const d of data) { counters.tagSnapshotCreate++; T.tagSnapshot.push({ id: newId(), ...d }) } return { count: data.length } },
+    groupBy: async ({ where }: Row) => {
+      const ids: string[] = where.tagId.in
+      return ids
+        .map((tagId) => ({ tagId, rows: T.tagSnapshot.filter((x) => x.tagId === tagId) }))
+        .filter((g) => g.rows.length > 0)
+        .map((g) => ({ tagId: g.tagId, _max: { timestamp: new Date(Math.max(...g.rows.map((x) => x.timestamp.getTime()))) } }))
+    },
   },
   ncwatchSyncLog: {
     createMany: async ({ data }: Row) => { counters.syncLogCreateMany++; T.ncwatchSyncLog.push(...data); return { count: data.length } },
@@ -112,6 +120,20 @@ const fakePrisma: any = {
   $transaction: async (cb: any) => cb(fakePrisma),
 }
 T.connection = []
+
+// DB 호출 횟수 계측 (find*/groupBy/count = 조회, 그 외 = 쓰기)
+const dbops = { reads: 0, writes: 0, by: {} as Record<string, number> }
+for (const [model, methods] of Object.entries(fakePrisma)) {
+  if (model.startsWith("$")) continue
+  for (const [name, fn] of Object.entries(methods as Record<string, any>)) {
+    ;(methods as any)[name] = async (...a: any[]) => {
+      dbops.by[model + "." + name] = (dbops.by[model + "." + name] ?? 0) + 1
+      if (/^(find|group|count)/.test(name)) dbops.reads++
+      else dbops.writes++
+      return fn(...a)
+    }
+  }
+}
 
 const origResolve = (Module as any)._resolveFilename
 const origLoad = (Module as any)._load
@@ -336,6 +358,113 @@ async function main() {
   res = await post(statusRoute, "/api/lms/ncwatch/status", { machines: [offline("CNC-8")] })
   eq(res.status, 200, "대원정밀 키로 수신")
   eq(T.ncwatchStatus.filter((s) => s.machineName === "CNC-8").map((s) => s.tenantId).sort(), [TENANT, OTHER_TENANT].sort(), "같은 기계명도 테넌트별로 분리 저장")
+
+  // ═════════════════════════════════════════════════════════════════════════
+  section("TagSnapshot 저장 정책 — 값 변경 즉시 · 동일 값은 정기(기본 15분)")
+  eq(transform.SNAPSHOT_INTERVAL_MS, 15 * 60 * 1000, "정기 스냅샷 기본 간격 15분")
+  eq(transform.SNAPSHOT_VOLATILE_MIN_INTERVAL_MS, 0, "변동 태그 간격 제한은 기본 꺼짐(변경 즉시 저장)")
+
+  const T0 = Date.UTC(2026, 9, 18, 2, 0, 0) // 11:00:00 KST
+  const kstStr = (ms: number) => new Date(ms + 9 * 3600_000).toISOString().slice(0, 19).replace("T", " ")
+  const at = (sec: number) => kstStr(T0 + sec * 1000)
+  const send = (machines: Row[]) => post(statusRoute, "/api/lms/ncwatch/status", { machines })
+  const snaps = (m: string, tag?: string) =>
+    T.tagSnapshot.filter((x) => x.tagId.startsWith(`tag-${m}-`) && (!tag || x.tagId === `tag-${m}-${tag}`)).length
+  const cur = (m: string, tag: string) => T.tagCurrentValue.find((v) => v.tagId === `tag-${m}-${tag}`)?.value
+  const row = (m: string, sec: number, over: Row = {}) => offline(m, { ncwatchTs: at(sec), ...over })
+  const openEvents = (eq: string) => T.equipmentEvent.filter((e) => e.equipmentId === eq && e.endedAt === null).length
+
+  // ── 1·2. 동일 값 반복 수신 / 15분 경과 후 정기 스냅샷 ──
+  seedProduction(); transform.resetSnapshotCache()
+  await send([row("CNC-8", 0)])
+  const N = snaps("CNC-8")
+  eq(N, 5, "최초 수신: 값이 있는 태그(5개) 각각 스냅샷 1건")
+  const opsBefore = { ...dbops.by }
+  for (let i = 1; i <= 30; i++) await send([row("CNC-8", i * 10)])        // 10초 간격 5분, 값은 그대로(NCWatch 시각만 변경)
+  eq(snaps("CNC-8"), N, "동일 값 30회 반복(원본 TIMESTAMP 만 변경) → 스냅샷 추가 0건")
+  eq((dbops.by["tagSnapshot.findFirst"] ?? 0) - (opsBefore["tagSnapshot.findFirst"] ?? 0), 0, "태그별 스냅샷 개별 조회(N+1) 없음")
+  ok(((dbops.by["tagSnapshot.groupBy"] ?? 0) - (opsBefore["tagSnapshot.groupBy"] ?? 0)) <= 1, "마지막 스냅샷 확인 조회는 최초 1회뿐(이후 캐시)")
+  eq(T.equipmentEvent.filter((e) => e.equipmentId === "eq-CNC-8").length, 1, "동일 상태 반복 → 이벤트 1건 유지")
+  await send([row("CNC-8", 899)])
+  eq(snaps("CNC-8"), N, "14분 59초 → 아직 정기 스냅샷 없음")
+  await send([row("CNC-8", 901)])
+  eq(snaps("CNC-8"), 2 * N, "15분 경과 → 정기 스냅샷 태그당 1건")
+  await send([row("CNC-8", 920)])
+  eq(snaps("CNC-8"), 2 * N, "정기 스냅샷 직후에는 다시 저장하지 않음")
+
+  // ── 3·4·5. 상태 / 프로그램 번호 / RPM 변경 — 변경된 태그만 즉시 저장 ──
+  let b = snaps("CNC-8")
+  await send([row("CNC-8", 1000, { statusCode: 3, statusLabel: "START", runCode: 3, spindleSpeed: 3000 })])
+  eq([snaps("CNC-8", "STATUS") - snaps("CNC-8", "MODE"), snaps("CNC-8") - b], [1, 2], "상태 변경(오프라인→가동) + 회전수 변경 → STATUS·SPINDLE_SPEED 2건만 즉시 저장")
+  eq(cur("CNC-8", "STATUS"), "가동", "TagCurrentValue 즉시 갱신")
+  b = snaps("CNC-8")
+  await send([row("CNC-8", 1010, { statusCode: 3, statusLabel: "START", runCode: 3, spindleSpeed: 3000, programName: "O4700" })])
+  eq([snaps("CNC-8") - b, cur("CNC-8", "PROGRAM_NAME")], [1, "O4700"], "프로그램 번호 변경 → PROGRAM_NAME 1건 즉시 저장")
+  b = snaps("CNC-8", "SPINDLE_SPEED")
+  await send([row("CNC-8", 1020, { statusCode: 3, statusLabel: "START", runCode: 3, spindleSpeed: 3500, programName: "O4700" })])
+  eq([snaps("CNC-8", "SPINDLE_SPEED") - b, cur("CNC-8", "SPINDLE_SPEED")], [1, "3500"], "RPM 변경 → 즉시 저장 (기본 정책)")
+
+  // 선택 정책: 변동 태그 최소 간격 60초 (이 값을 켜면 RPM 변경이 잦아도 분당 1건)
+  const cncEq = "eq-CNC-8"
+  const payload = (sec: number, over: Row = {}) => row("CNC-8", sec, { statusCode: 3, statusLabel: "START", runCode: 3, programName: "O4700", ...over }) as any
+  b = snaps("CNC-8", "SPINDLE_SPEED")
+  await transform.syncTagValues(cncEq, payload(1030, { spindleSpeed: 3600 }), 900_000, 60_000)
+  eq([snaps("CNC-8", "SPINDLE_SPEED") - b, cur("CNC-8", "SPINDLE_SPEED")], [0, "3600"], "[선택정책 60초] 10초 뒤 RPM 변경 → 현재값만 갱신, 스냅샷 보류")
+  await transform.syncTagValues(cncEq, payload(1085, { spindleSpeed: 3700 }), 900_000, 60_000)
+  eq([snaps("CNC-8", "SPINDLE_SPEED") - b, cur("CNC-8", "SPINDLE_SPEED")], [1, "3700"], "[선택정책 60초] 65초 뒤 변경 → 스냅샷 저장")
+  b = snaps("CNC-8", "STATUS")
+  await transform.syncTagValues(cncEq, payload(1090, { statusCode: 1, statusLabel: "STOP", spindleSpeed: 3700 }), 900_000, 60_000)
+  eq(snaps("CNC-8", "STATUS") - b, 1, "[선택정책 60초] 상태 같은 이산 태그는 간격 제한 없이 즉시 저장")
+
+  // ── 6. 알람 발생 및 해제 ──
+  seedProduction(); transform.resetSnapshotCache()
+  await send([row("CNC-9", 0, { statusCode: 3, statusLabel: "START", runCode: 3 })])
+  b = snaps("CNC-9")
+  await send([row("CNC-9", 10, { statusCode: 5, statusLabel: "ALARM", runCode: 2, alarmCode: "1234", alarmMessage: "SERVO ALARM" })])
+  eq([cur("CNC-9", "ALARM_MESSAGE"), cur("CNC-9", "ALARM_CODE"), cur("CNC-9", "STATUS")], ["SERVO ALARM", "1234", "알람"], "알람 발생 → 알람 태그와 상태 즉시 반영")
+  ok(snaps("CNC-9", "ALARM_MESSAGE") === 1 && snaps("CNC-9", "ALARM_CODE") === 1 && snaps("CNC-9", "STATUS") === 2, "알람 발생 스냅샷: 알람 코드·메시지·상태")
+  eq(T.equipmentEvent.filter((e) => e.equipmentId === "eq-CNC-9").map((e) => e.eventType + (e.endedAt ? "(종료)" : "")), ["RUN(종료)", "ALARM"], "알람 이벤트 열림, 가동 이벤트 종료")
+  await send([row("CNC-9", 20, { statusCode: 3, statusLabel: "START", runCode: 3 })])
+  eq([cur("CNC-9", "ALARM_MESSAGE"), cur("CNC-9", "ALARM_CODE"), cur("CNC-9", "STATUS")], ["", "", "가동"], "알람 해제 → 알람 태그가 빈 값으로 정리(이전에는 알람 문구가 남아 있었음)")
+  ok(snaps("CNC-9", "ALARM_MESSAGE") === 2 && snaps("CNC-9", "ALARM_CODE") === 2, "알람 해제 스냅샷 기록")
+  eq(T.equipmentEvent.filter((e) => e.equipmentId === "eq-CNC-9").map((e) => e.eventType + (e.endedAt ? "(종료)" : "")), ["RUN(종료)", "ALARM(종료)", "RUN"], "알람 이벤트 종료, 가동 이벤트 재개")
+  await send([row("CNC-9", 30, { statusCode: 3, statusLabel: "START", runCode: 3 })])
+  eq(snaps("CNC-9", "ALARM_MESSAGE"), 2, "해제 후 같은 상태 반복 → 알람 태그 추가 저장 없음")
+
+  // ── 7·8. Agent 재시작 / 인터넷 장애 후 재연결 ──
+  const upsertBefore = counters.tagCurrentUpsert; b = snaps("CNC-9")
+  await send([row("CNC-9", 30, { statusCode: 3, statusLabel: "START", runCode: 3 })])
+  eq([counters.tagCurrentUpsert - upsertBefore, snaps("CNC-9") - b], [0, 0], "Agent 재시작 직후 같은 행 재전송 → 쓰기·스냅샷 0건")
+  await send([row("CNC-9", 45, { statusCode: 3, statusLabel: "START", runCode: 3 })])
+  eq(snaps("CNC-9") - b, 0, "재시작 후 시각만 다른 동일 값 → 스냅샷 0건")
+  transform.resetSnapshotCache() // 서버리스 인스턴스 교체(캐시 소실)에도 DB 의 마지막 스냅샷으로 판단
+  await send([row("CNC-9", 60, { statusCode: 3, statusLabel: "START", runCode: 3 })])
+  eq(snaps("CNC-9") - b, 0, "서버 캐시가 비어도 DB 확인으로 중복 저장하지 않음")
+  const tagsWithValue = T.tagCurrentValue.filter((v) => v.tagId.startsWith("tag-CNC-9-") && v.value !== "").length  // 해제된 알람 태그(빈 값)는 정기 저장 대상이 아님
+  b = snaps("CNC-9")
+  await send([row("CNC-9", 40 * 60, { statusCode: 3, statusLabel: "START", runCode: 3 })])  // 40분 단절 뒤 재연결
+  eq(snaps("CNC-9") - b, tagsWithValue, `40분 단절 후 재연결 → 정기 스냅샷 태그당 1건(${tagsWithValue}건), 놓친 구간을 채우지 않음`)
+  eq(T.equipmentEvent.filter((e) => e.equipmentId === "eq-CNC-9").length, 3, "재연결로 인한 이벤트 중복 생성 없음")
+
+  // ── 9·10. 여러 설비 동시 수신 / 중복 이벤트 방지 ──
+  seedProduction(); transform.resetSnapshotCache()
+  await send(MACHINES.map((m, i) => row(m, 0, { programName: `O${4600 + i}` })))
+  eq(MACHINES.map((m) => snaps(m)), [5, 5, 5, 5], "4대 동시 수신 → 설비별로 독립 저장")
+  ok(new Set(T.tagSnapshot.map((x) => x.tagId)).size === 20 && T.tagSnapshot.every((x) => T.dataTag.some((t) => t.id === x.tagId)), "스냅샷은 각 설비 자기 태그에만 기록")
+  b = T.tagSnapshot.length
+  await send(MACHINES.map((m, i) => row(m, 10, { programName: i === 2 ? "O9999" : `O${4600 + i}` })))
+  eq([T.tagSnapshot.length - b, snaps("CNC-9", "PROGRAM_NAME"), snaps("CNC-8", "PROGRAM_NAME")], [1, 2, 1], "한 설비만 프로그램이 바뀌면 그 설비 1건만 저장")
+  for (let i = 2; i <= 6; i++) await send(MACHINES.map((m, k) => row(m, i * 10, { programName: k === 2 ? "O9999" : `O${4600 + k}` })))
+  ok(MACHINES.every((m) => openEvents(`eq-${m}`) === 1 && T.equipmentEvent.filter((e) => e.equipmentId === `eq-${m}`).length === 1), "반복 수신에도 설비당 이벤트 1건·열린 이벤트 1건")
+
+  // ── DB 호출 계측: 정상 상태(값 변화 없음) 1회 수신 ──
+  const r0 = dbops.reads, w0 = dbops.writes, snapRead0 = dbops.by["tagSnapshot.findFirst"] ?? 0
+  await send(MACHINES.map((m, k) => row(m, 7 * 10, { programName: k === 2 ? "O9999" : `O${4600 + k}` })))
+  const reads = dbops.reads - r0
+  ok(reads <= 4 * 4 + 1, `4대 정상 상태 1회 수신 조회 ${reads}회 이하 (설비당 상태·매핑·열린이벤트·태그 4회 + 인증 1회; 이전 구현은 설비당 태그 수만큼 스냅샷 개별 조회가 추가됨)`)
+  eq((dbops.by["tagSnapshot.findFirst"] ?? 0) - snapRead0, 0, "스냅샷 개별 조회 0회")
+  console.log(`    (계측: 조회 ${reads}회 / 쓰기 ${dbops.writes - w0}회 — 가짜 DB 기준, 설비당 값이 있는 태그 5개)`)
+
 
   section("GET 요청은 405")
   eq(typeof statusRoute.GET, "undefined", "status 는 POST 만 구현")
