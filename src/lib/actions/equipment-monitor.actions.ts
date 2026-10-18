@@ -4,7 +4,7 @@ import { prisma } from "@/lib/db/prisma"
 import { getTenantId } from "@/lib/auth"
 import { isMissingDbObjectError, isSchemaCompatibilityError } from "@/lib/db/prisma-error"
 import { Prisma } from "@prisma/client"
-import { monitoringEligibleEquipmentWhere } from "@/lib/actions/equipment-monitoring.utils"
+import { fetchLatestSnapshotsByTag, monitoringEligibleEquipmentWhere } from "@/lib/actions/equipment-monitoring.utils"
 
 // reportDate는 Agent가 한국 날짜 문자열("YYYY-MM-DD")을 UTC midnight으로 저장한다.
 // Vercel 서버는 UTC이므로 setHours(0,0,0,0)은 UTC 기준이 돼 KST 날짜와 어긋난다.
@@ -56,21 +56,8 @@ function normalizePercent(value: unknown): number | null {
 }
 
 async function getLatestSnapshotFallbacks(tagIds: string[]): Promise<Map<string, LatestTagValue>> {
-  if (tagIds.length === 0) return new Map()
-
-  const latestSnapshots = await prisma.$queryRaw<Array<{ tagId: string; value: string | null; timestamp: Date }>>(
-    Prisma.sql`
-      SELECT DISTINCT ON ("tagId") "tagId", "value", "timestamp"
-      FROM "TagSnapshot"
-      WHERE "tagId" IN (${Prisma.join(tagIds)})
-      ORDER BY "tagId", "timestamp" DESC
-    `,
-  )
-  const values = new Map<string, LatestTagValue>()
-  for (const snapshot of latestSnapshots) {
-    values.set(snapshot.tagId, snapshot)
-  }
-  return values
+  // 태그당 최신 1건만 인덱스로 조회한다(이력 전체를 읽거나 전송하지 않음).
+  return fetchLatestSnapshotsByTag(prisma, tagIds)
 }
 
 async function getLatestEquipmentEvents(equipmentIds: string[]): Promise<Map<string, LatestEquipmentEvent>> {
@@ -255,18 +242,16 @@ export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> 
             tags: {
               where: { isActive: true, isEnabled: true, isVisible: true },
               orderBy: [{ displayOrder: "asc" }, { tagCode: "asc" }],
-              include: {
-                snapshots: {
-                  orderBy: { timestamp: "desc" },
-                  take: 1,
-                },
-              },
             },
           },
         },
       },
       orderBy: { code: "asc" },
     })
+    // 태그별 최신 스냅샷 1건만 조회 (중첩 take:1 은 LIMIT 없이 전체 이력을 가져온다)
+    const latestSnapshots = await getLatestSnapshotFallbacks(
+      equipments.flatMap((eq) => eq.connections.flatMap((c) => c.tags.map((t) => t.id))),
+    )
     const todayPartCounts = await getNcwatchTodayPartCounts(
       tenantId,
       equipments.map((equipment) => equipment.id),
@@ -297,8 +282,8 @@ export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> 
           tagCode: tag.tagCode,
           displayName: tag.displayName,
           unit: tag.unit,
-          latestValue: tag.snapshots[0]?.value ?? null,
-          timestamp: tag.snapshots[0]?.timestamp ?? null,
+          latestValue: latestSnapshots.get(tag.id)?.value ?? null,
+          timestamp: latestSnapshots.get(tag.id)?.timestamp ?? null,
         })),
       }
     })
@@ -321,14 +306,10 @@ export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> 
                 where: { isActive: true },
                 orderBy: { tagCode: "asc" },
                 select: {
+                  id:          true,
                   tagCode:     true,
                   displayName: true,
                   unit:        true,
-                  snapshots: {
-                    orderBy: { timestamp: "desc" },
-                    take: 1,
-                    select: { value: true, timestamp: true },
-                  },
                 },
               },
             },
@@ -336,6 +317,10 @@ export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> 
         },
         orderBy: { code: "asc" },
       })
+
+      const latestSnapshots = await getLatestSnapshotFallbacks(
+        equipments.flatMap((eq) => eq.connections.flatMap((c) => c.tags.map((t) => t.id))),
+      )
 
       return equipments.map((eq) => {
         const tags = eq.connections
@@ -357,8 +342,8 @@ export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> 
             tagCode: tag.tagCode,
             displayName: tag.displayName,
             unit: tag.unit,
-            latestValue: tag.snapshots[0]?.value ?? null,
-            timestamp: tag.snapshots[0]?.timestamp ?? null,
+            latestValue: latestSnapshots.get(tag.id)?.value ?? null,
+            timestamp: latestSnapshots.get(tag.id)?.timestamp ?? null,
           })),
         }
       })
