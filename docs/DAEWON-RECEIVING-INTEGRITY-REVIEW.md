@@ -263,3 +263,60 @@ CREATE UNIQUE INDEX IF NOT EXISTS "InventoryBalance_tenantId_itemId_warehouseId_
 ## 14. 남은 문제 B — 비LOT 재고 행 유일성 (T13b FAIL)
 - 현재 상태: 입고 경로는 (tenant,날짜) 잠금 덕에 보호되지만(T13a/R2b PASS) DB 제약이 없어 **다른 경로**(완제품 입고 `finished-goods.actions`, 재고조정 등 `inventoryBalance.create`)나 향후 코드 변경에서 중복 행이 생길 수 있다.
 - 해결 방향: ① 운영 DB 에서 `lotId IS NULL` 중복 행 점검(읽기 전용 SQL, §8-2) → 있으면 수량 합산 병합 절차를 별도 승인으로 수행 ② `CREATE UNIQUE INDEX … WHERE "lotId" IS NULL` 를 새 migration 으로 추가(이번과 같은 방식으로 테스트 DB 선적용) ③ `inventoryBalance.create` 호출부(입고·완제품 입고·재고조정)를 "P2002 이면 재조회 후 increment" 로 방어 — 테스트 DB 실험(T13c)에서 인덱스+잠금은 80/80 성공, 잠금 없이 인덱스만 두면 70/80 이 generic 중복 오류로 실패함을 확인했다. TenantUser partial unique 2건도 같은 방식으로 복구 검토.
+
+---
+
+## 15. 비LOT 재고 유일성(Partial Unique Index) + 동시 입고 정합성 — 후속 작업 B 완료
+
+### 구현
+- **Migration** `20261019010000_add_inventory_balance_null_lot_unique` (기존 migration 무수정, 전체가 한 트랜잭션): ① 같은 이름의 relation 이 이미 있으면 `IF NOT EXISTS` 에 맡기지 않고 **정의를 직접 검사**(인덱스인지, UNIQUE, VALID·READY, 대상 테이블 `InventoryBalance`, 컬럼 `(tenantId,itemId,warehouseId)` 순서, 표현식 없음, 조건 `lotId IS NULL`) — 맞으면 건너뛰고 통과, 하나라도 다르면 **덮어쓰지 않고** `NULL_LOT_INDEX_MISMATCH` 로 중단 ② 인덱스가 없으면 `lotId IS NULL` 중복 그룹을 점검해 있으면 **자동 삭제·합산 없이** `NULL_LOT_DUPLICATES` 로 중단 ③ 중복이 없으면 `CREATE UNIQUE INDEX "InventoryBalance_tenantId_itemId_warehouseId_null_lot_key" ON "InventoryBalance"("tenantId","itemId","warehouseId") WHERE "lotId" IS NULL`. LOT 재고의 기존 `@@unique([tenantId,itemId,warehouseId,lotId])` 는 그대로 유지(LOT 행에만 유효).
+- **Prisma 와의 관계**: partial index 는 Prisma 가 모델링할 수 없어 **SQL migration 이 기준**이고, `schema.prisma` 에는 이를 알리는 주석만 추가했다(모델 의미 변경 없음). `prisma migrate diff` 로 확인: ① 테스트 DB → schema, ② migrations 전체(shadow DB) → schema 모두 **"empty migration"** — Prisma 는 이 partial index 를 drift 로 보지 않으며 `DROP INDEX` 를 제안하지 않는다.
+- **충돌 시 재시도** (`inventory-balance-guard.ts`, `receiving.actions.ts`): 인덱스가 최후 방어선으로 충돌하면 PostgreSQL 은 트랜잭션을 계속할 수 없으므로 전체를 롤백하고 다시 실행(두 번째에는 기존 행을 update). 재시도는 **P2002 + 모델 InventoryBalance + target 이 정확히 (tenantId,itemId,warehouseId)** (또는 인덱스 이름)로 확인될 때만 허용한다(실측 오류 모양 기준). LOT 재고 4필드 충돌, 다른 모델의 P2002, target 불명, 결과 불명 오류는 재시도하지 않는다. 결과 불명 오류는 재시도 조건에서 명시적으로 제외된다.
+
+### 동시 입고 정합성 (3중)
+1. 입고 트랜잭션 안에서 **발주품목 행 잠금 → (tenant,날짜) advisory lock(거래번호)** 이 재고 행 조회·생성보다 먼저 걸려 같은 테넌트의 입고가 "재고 행 없으면 생성" 구간에서 직렬화된다.
+2. **DB partial unique index** 가 다른 경로·향후 코드 변경에서도 중복 행 생성을 막는다.
+3. 그래도 충돌이 나면 위의 확정 분류 + 재시도로 사용자 실패 없이 처리된다(실제 오류 객체 주입 테스트).
+
+### 재고에 영향을 주는 경로 (조사 결과)
+| 경로 | 재고 행 생성/변경 방식 | 이번 변경 영향 / 위험 |
+|---|---|---|
+| 자재입고 (`receiving.actions`) | 비LOT 포함 **생성(create)** + 증가(update) | 인덱스 + 잠금 + 재시도 적용. 유일한 비LOT 행 생성 경로 |
+| 완제품입고 (`finished-goods.actions`) | 항상 **새 LOT** 의 행을 create (`lotId` NOT NULL) | 비LOT 인덱스와 무관, LOT 4필드 unique 로 보호. 변경 없음 |
+| 재고조정 (`inventory.actions`) | 기존 행만 행 잠금 후 update(절대값). 행을 만들지 않음 | 변경 없음. 거래번호 `ADJ-` 는 트랜잭션 밖 max+1 방식(입고에서 고친 것과 같은 패턴) → 후속 권장 |
+| 자재출고 / 반품 / 출하 | 조건부 `updateMany` 로 decrement | 변경 없음. **중복 행이 이미 있으면 `count !== 1` 이 2행을 매치해 "재고 부족"으로 오판할 수 있어 운영 점검이 필수**. 인덱스 적용 후엔 불가능 |
+| 자재이동(TRANSFER) | 코드에 기능 없음 | 해당 없음 |
+| 재고 초기 이관(master-migration) | 재고 행을 만들지 않음(count 만) | 해당 없음 — 향후 기초재고 이관을 만들면 비LOT 행은 반드시 upsert 로 작성 |
+
+잠금 순서: 입고 = 발주품목 행 → 멱등 클레임 → advisory(거래번호) → LOT → 검사이력 → 발주품목 갱신 → 재고 행. 반품 = 발주품목 행 → 재고 행(같은 방향). 출고·출하·재고조정 = 재고 행만. 순환 대기 경로가 없고, 입고+출고+재고조정 혼합 동시 부하 31건에서 교착/직렬화 오류 0건이었다(반품·출하는 부하 테스트에 포함하지 못함 — 잠금 순서 분석만).
+
+### 운영 적용 절차 (운영 DB 는 이 작업에서 조회·변경하지 않았다)
+1. **읽기 전용 점검**(DB 담당자, 승인 후): `scripts/sql/inventory-balance-null-lot-duplicates.sql` — 중복 그룹 수(0 이어야 함), 그룹 상세, 같은 이름 인덱스 유무·정의·유효성, migration 이력.
+2. 중복이 **있으면** 배포하지 않는다. **자동 삭제·합산 금지** — 백업 후 수불 이력(InventoryTransaction)을 보존하는 병합(합산 수량 = 각 행 합계, 하나의 행으로 통합)을 별도 승인·수동으로 수행하고 재점검한다.
+3. `prisma migrate deploy` — 앞선 migration(`20261019000000_add_receiving_request_idempotency`)이 먼저 적용되고 이어 이 migration 이 적용된다. 올바른 인덱스가 이미 있으면 통과, 정의가 다르면 `NULL_LOT_INDEX_MISMATCH` 로 중단(수동 정리 필요).
+4. 실패 시(P3018): 데이터는 변하지 않는다(트랜잭션). 원인 해결 후 `prisma migrate resolve --rolled-back 20261019010000_add_inventory_balance_null_lot_unique` → `prisma migrate deploy`. 이 상태에서 다른 migration 은 P3009 로 차단된다.
+5. 애플리케이션 배포는 migration 성공 후. 롤백은 `DROP INDEX "InventoryBalance_tenantId_itemId_warehouseId_null_lot_key"`(코드는 인덱스 없이도 동작).
+- 인덱스 생성 시 `InventoryBalance` 에 순간적인 쓰기 대기가 있을 수 있다(작은 테이블). 업무 시간 외 적용 권장.
+
+### 실제 PostgreSQL 검증 결과 (WSL 로컬 테스트 DB, 운영 접근 없음)
+- **통합 하네스 75건 PASS / 0 FAIL** — 기존 입고·멱등성·발주·출고 시나리오 57건(T13c 임시 인덱스 실험 1건은 실제 인덱스가 생겨 제거) + **NB01~NB13, NB15, NB16** 18건. T13b(이전 마지막 FAIL)는 PASS 로 전환.
+  - NB01 최초 입고 / NB02 추가 입고(같은 행 증가) / NB03 동일 품목 10건 동시 / NB04 서로 다른 발주 100+200 동시 → 행 1건·300/300, 6건×8라운드 반복도 중복 0 / NB05 직접 INSERT 중복 거부(P2002 실제 모양 캡처) + 동시 INSERT 10건 중 1건만 성공 + LOT 행 공존 / NB06 창고 독립 / NB07 tenant 독립 / NB08 LOT 품목 회귀 / NB09·10 멱등성(순차·동시) / NB11 거래번호 중복 0·연속(9개 tenant) / NB12 최초 재고 생성 후 오류 → 행까지 롤백 후 같은 요청 ID 재시도 성공 / NB13 기초재고 25 + 입고 130 − 출고 35 ± 재고조정 = 100 (처리 못 한 거래 유형이 있으면 PASS 불가, 검증 범위 RECEIPT·ISSUE·ADJUST 와 **미검증 RETURN·SUPPLIER_RETURN·TRANSFER·SCRAP·출하** 를 결과에 명시) / NB15 혼합 31건 동시: 교착 0 / NB16 P2002 재시도 분류(실제 오류 객체).
+- **NB14 (임시 DB 에서 별도 수행)** — 기존 migration 6개만 적용한 임시 DB 들에서 신규 migration 을 배포:
+  | 시나리오 | 결과 |
+  |---|---|
+  | A. 중복 재고 행 2개 존재 | `P3018` / `NULL_LOT_DUPLICATES` 로 실패. **인덱스 없음, 재고 행 2개·합계 17 그대로(원자성)**, `_prisma_migrations` 에 실패 기록. 재배포는 `P3009` 로 차단. 중복을 수동 해소 + `migrate resolve --rolled-back` + 재배포 → 성공, 인덱스 생성 |
+  | B. 올바른 partial unique index 가 이미 있음 | **통과**(건너뜀), 인덱스 정의 변경 없음, 이력 applied |
+  | C. 같은 이름·WHERE 없는 unique | `NULL_LOT_INDEX_MISMATCH` 로 실패, 인덱스 **덮어쓰지 않음** |
+  | D. 같은 이름·컬럼이 다른 partial | `NULL_LOT_INDEX_MISMATCH`, 변경 없음 |
+  | E. 같은 이름·UNIQUE 아님 | `NULL_LOT_INDEX_MISMATCH`, 변경 없음 |
+  | F. 같은 이름·조건이 다른 partial(lotId IS NOT NULL) | `NULL_LOT_INDEX_MISMATCH`, 변경 없음 |
+  | G. 같은 이름의 인덱스가 아닌 객체(시퀀스) | `NULL_LOT_INDEX_MISMATCH` |
+  | H. 같은 이름의 INVALID 인덱스(실패한 CONCURRENTLY 잔재) | `NULL_LOT_INDEX_MISMATCH`(valid=f), 변경 없음 |
+  임시 DB 는 모두 삭제했다. 재현은 기존 migration 만 담은 `prisma/` 사본으로 `prisma migrate deploy --schema <사본>` 후 전체 `migrate deploy` 를 실행하는 방식이다.
+- 비-DB(Mock·정적) 단위 검증: 344 단언 — 재시도 분류 함수 16 케이스, migration 정적 검사, 구조 검사.
+
+### 남은 위험
+- **운영 DB 상태는 확인하지 못했다**(중복 재고 행 유무, 이미 존재하는 동명 인덱스). 위 점검 SQL 이 선행되어야 한다.
+- 반품·출하 경로의 동시성(잠금 순서 분석만 수행, 실부하 미실행), `ADJ-`/`SRT-` 거래번호 채번(트랜잭션 밖 max+1)은 입고에서 고친 패턴이 그대로 남아 있다.
+- baseline 에서 빠진 `TenantUser` partial unique 2건은 복구하지 않았다(범위 밖, 별도 검토).
+- 이전 화면(캐시된 구버전 JS)은 requestId 가 없어 입고가 거절되므로 배포 후 새로고침 안내가 필요하다.

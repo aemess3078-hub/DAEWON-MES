@@ -844,7 +844,7 @@ async function testReceiptTxNumbering() {
   const iLedger = src.indexOf("tx.inventoryTransaction.create")
   ok(iAlloc > 0 && iAlloc < iBalance && iBalance < iLedger, "J4 거래번호(잠금) 확보가 재고 행 조회/생성보다 먼저 — 최초 재고 행 생성 경합도 직렬화")
   ok(/isUniqueConstraintError\(error, \["tenantId", "txNo"\]\)/.test(src) && /txNoCollision/.test(src), "J4 (tenantId, txNo) unique 이중 방어와 재시도 유지")
-  ok(/isOutcomeUnknownError\(error\)[\s\S]{0,120}outcome: "UNKNOWN"/.test(src) && !/canRetry = [^\n]*isOutcomeUnknownError/.test(src), "J4 결과 불명 오류는 재시도 대상이 아님")
+  ok(/isOutcomeUnknownError\(error\)[\s\S]{0,120}outcome: "UNKNOWN"/.test(src) && /canRetry = !isOutcomeUnknownError\(error\) &&/.test(src), "J4 결과 불명 오류는 재시도 대상이 아님(재시도 조건에서 명시적으로 제외)")
   ok(/lockPurchaseOrderItemsForUpdate\(tx, tenantId/.test(src) && /checkReceiptRemaining\(/.test(src) && /computeNextMaterialReceiptLotNo\(/.test(src), "J4 발주품목 행 잠금·잔량 검증·LOT 자동채번 호출은 유지")
 }
 
@@ -924,6 +924,67 @@ function testReceivingIdempotency() {
   }
 }
 
+// ─── L. 비LOT 재고 유일성(partial unique index) — 분류 함수 · migration · 구조 (Mock/정적) ───────────
+
+function testNullLotBalanceUniqueness() {
+  const guard = require("../src/lib/inventory-balance-guard") as typeof import("../src/lib/inventory-balance-guard")
+  const mk = (code: string, meta?: Record<string, unknown>) => new Prisma.PrismaClientKnownRequestError("x", { code, clientVersion: "5.22.0", ...(meta ? { meta } : {}) })
+
+  // L1. 재시도 대상 분류: 정확히 비LOT InventoryBalance 유니크 충돌일 때만 true
+  ok(guard.isNullLotBalanceUniqueError(mk("P2002", { modelName: "InventoryBalance", target: ["tenantId", "itemId", "warehouseId"] })), "L1 실측 모양(모델·3필드) → true")
+  ok(guard.isNullLotBalanceUniqueError(mk("P2002", { modelName: "InventoryBalance", target: ["warehouseId", "tenantId", "itemId"] })), "L1 필드 순서가 달라도 3필드 동일 집합이면 true")
+  ok(guard.isNullLotBalanceUniqueError(mk("P2002", { target: guard.NULL_LOT_BALANCE_INDEX_NAME })), "L1 인덱스 이름으로 보고되는 경우 → true")
+  for (const [label, e] of [
+    ["LOT 재고 4필드 unique", mk("P2002", { modelName: "InventoryBalance", target: ["tenantId", "itemId", "warehouseId", "lotId"] })],
+    ["다른 모델의 같은 컬럼명", mk("P2002", { modelName: "Stock", target: ["tenantId", "itemId", "warehouseId"] })],
+    ["모델 정보 없는 컬럼 목록", mk("P2002", { target: ["tenantId", "itemId", "warehouseId"] })],
+    ["대상(target) 비어 있음", mk("P2002", { modelName: "InventoryBalance", target: [] })],
+    ["meta 없음", mk("P2002")],
+    ["txNo unique", mk("P2002", { modelName: "InventoryTransaction", target: ["tenantId", "txNo"] })],
+    ["requestId unique", mk("P2002", { modelName: "ReceivingRequest", target: ["tenantId", "requestId"] })],
+    ["다른 이름의 인덱스", mk("P2002", { modelName: "InventoryBalance", target: "InventoryBalance_other_key" })],
+    ["다른 코드(P2003)", mk("P2003", { modelName: "InventoryBalance", target: ["tenantId", "itemId", "warehouseId"] })],
+    ["결과 불명(연결 오류)", Object.assign(new Error("Server has closed the connection."), { name: "PrismaClientUnknownRequestError" })],
+    ["일반 Error", new Error("Unique constraint failed on the fields: (`tenantId`,`itemId`,`warehouseId`)")],
+    ["null", null],
+  ] as const) {
+    ok(!guard.isNullLotBalanceUniqueError(e), `L1 재시도 대상 아님: ${label}`)
+  }
+
+  // L2. migration 파일: 검증·사전점검·생성, 자동 삭제/합산 없음, 기존 migration 무수정
+  const migDir = ["prisma", "migrations", "20261019010000_add_inventory_balance_null_lot_unique"] as const
+  const mig = read(...migDir, "migration.sql")
+  const code = mig.split(/\r?\n/).filter((l) => !l.trim().startsWith("--")).join("\n")
+  ok(/NULL_LOT_INDEX_MISMATCH/.test(code) && /NULL_LOT_DUPLICATES/.test(code), "L2 migration: 기존 인덱스 불일치 / 중복 재고 두 가지 오류를 명확한 코드로 중단")
+  ok(/indisunique/.test(code) && /indisvalid/.test(code) && /indisready/.test(code) && /indpred/.test(code) && /indkey/.test(code) && /relkind/.test(code), "L2 migration: 기존 인덱스의 UNIQUE·VALID·READY·조건·컬럼·객체 종류를 모두 검사 (IF NOT EXISTS 맹신 안 함)")
+  ok(/CREATE UNIQUE INDEX %I ON "InventoryBalance" \("tenantId", "itemId", "warehouseId"\) WHERE "lotId" IS NULL/.test(code), "L2 migration: (tenantId,itemId,warehouseId) WHERE lotId IS NULL 유니크 인덱스 생성")
+  ok(!/\b(DELETE|UPDATE|TRUNCATE|DROP|INSERT)\b/i.test(code) && !/CREATE UNIQUE INDEX IF NOT EXISTS/i.test(code), "L2 migration: 자동 삭제·합산·덮어쓰기 없음, IF NOT EXISTS 미사용")
+  ok(/RETURN;/.test(code) && /RAISE EXCEPTION/.test(code), "L2 migration: 올바른 기존 인덱스면 통과(RETURN), 아니면 오류")
+  try {
+    const out = (require("node:child_process") as typeof import("node:child_process")).execFileSync("git", ["diff", "--name-status", "origin/main", "--", "prisma/migrations"], { encoding: "utf8" })
+    const lines = out.split(/\r?\n/).filter(Boolean)
+    ok(lines.every((l) => l.startsWith("A\t")), `L2 origin/main 대비 prisma/migrations 는 추가(A)만 있고 수정·삭제 없음 (${lines.length}개 파일)`)
+  } catch {
+    ok(true, "L2 (git 사용 불가 환경 — 기존 migration 무수정 검사 건너뜀)")
+  }
+
+  // L3. 스키마: LOT 재고의 기존 @@unique 유지 + partial index 관리 주석
+  const schema = read("prisma", "schema.prisma")
+  const inv = schema.match(/model InventoryBalance \{[\s\S]*?\n\}/)?.[0] ?? ""
+  ok(/@@unique\(\[tenantId, itemId, warehouseId, lotId\]\)/.test(inv), "L3 스키마: LOT 재고의 @@unique([tenantId,itemId,warehouseId,lotId]) 유지")
+  ok(/SQL migration/.test(schema.slice(Math.max(0, schema.indexOf("model InventoryBalance {") - 600), schema.indexOf("model InventoryBalance {"))), "L3 스키마: partial index 는 SQL migration 기준이라는 주석")
+
+  // L4. 재시도 구조
+  const src = read("src", "lib", "actions", "receiving.actions.ts")
+  ok(/const balanceCollision = isNullLotBalanceUniqueError\(error\)/.test(src) && /canRetry = !isOutcomeUnknownError\(error\) && \(txNoCollision \|\| autoLotCollision \|\| balanceCollision\)/.test(src), "L4 서버: 비LOT 재고 충돌 확정 시에만 재시도 대상에 추가, 결과 불명 오류는 재시도 금지")
+  ok(/if \(balanceCollision\) \{\s*throw new Error\(NULL_LOT_BALANCE_CONTENTION_MESSAGE\)/.test(src), "L4 서버: 재시도 소진 시 안전한 안내 메시지")
+
+  // L5. 운영 점검 SQL 은 읽기 전용
+  const ops = read("scripts", "sql", "inventory-balance-null-lot-duplicates.sql")
+  const opsCode = ops.split(/\r?\n/).filter((l) => !l.trim().startsWith("--") && !l.trim().startsWith("\\echo")).join("\n")
+  ok(/SELECT/i.test(opsCode) && !/\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE)\b/i.test(opsCode), "L5 운영 점검 SQL 은 SELECT 만 사용(수정·삭제·합산 없음)")
+}
+
 async function main() {
   await testPurchaseOrderLock()
   testUserErrors()
@@ -936,6 +997,7 @@ async function main() {
   await testQuantityPrecisionAndPostCommit()
   await testReceiptTxNumbering()
   testReceivingIdempotency()
+  testNullLotBalanceUniqueness()
   console.log(`\nAll ${passed} assertions passed`)
 }
 

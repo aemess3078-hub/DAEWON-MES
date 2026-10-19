@@ -370,19 +370,8 @@ async function main() {
     await mk()
     try { await mk() } catch { second = "거부됨" }
     record("T13b", "DB 제약: 같은 (테넌트·품목·창고) lotId=NULL 재고 행을 두 번 만들 수 있는가", second === "거부됨", `두 번째 INSERT ${second} (거부되어야 비LOT 재고 행 유일성 보장)`)
-    // 위 증명용으로 만든 중복 행을 지워야 인덱스를 만들 수 있다(운영에서는 중복 정리가 선행되어야 한다는 뜻이기도 함)
+    // 증명용으로 시도한 행 정리(인덱스가 있으므로 중복 행은 생기지 않았다 — 첫 INSERT 한 건만 삭제)
     await prisma.inventoryBalance.deleteMany({ where: { tenantId: Y.tenant.id } })
-    // 이전 실행에서 남은 같은 종류의 중복 행(테스트 데이터)도 정리 — 전역 인덱스는 모든 테넌트의 중복이 없어야 만들어진다
-    await prisma.$executeRawUnsafe(`DELETE FROM "InventoryBalance" a USING "InventoryBalance" b WHERE a."lotId" IS NULL AND b."lotId" IS NULL AND a."tenantId"=b."tenantId" AND a."itemId"=b."itemId" AND a."warehouseId"=b."warehouseId" AND a.id > b.id`)
-    // 실험(테스트 DB 한정): partial unique index 를 임시로 만들어 효과와 코드 영향 확인 후 즉시 제거
-    await prisma.$executeRawUnsafe(`CREATE UNIQUE INDEX "tmp_exp_balance_null_lot" ON "InventoryBalance" ("tenantId","itemId","warehouseId") WHERE "lotId" IS NULL`)
-    try {
-      const exp = await firstStockRace(10, 8)
-      record("T13c", "[실험·테스트 DB 한정] partial unique index 를 두면 재고 행 1개 유지 + 합계 일치", exp.dupRounds === 0 && exp.mismatch === 0,
-        `10라운드×동시 8건 → 성공 ${exp.succeeded}, 실패 ${exp.failed}, 중복 행 라운드 ${exp.dupRounds}, 합계 불일치 ${exp.mismatch}; 실패 사유: ${exp.msgs || "없음"}`)
-    } finally {
-      await prisma.$executeRawUnsafe(`DROP INDEX IF EXISTS "tmp_exp_balance_null_lot"`)
-    }
   }
 
   // ══ T14 작업지시 + 자재출고 / T15 LOT별 정합성 ══════════════════════════════
@@ -739,6 +728,235 @@ async function main() {
       if (savedBrand === undefined) delete process.env.NEXT_PUBLIC_BRAND
       else process.env.NEXT_PUBLIC_BRAND = savedBrand
     }
+  }
+
+  // ══ NB: 비LOT 재고 유일성(partial unique index) + 동시 입고 정합성 — 실제 PostgreSQL ═══════════════
+  // (NB14 migration 원자성·기존 인덱스 시나리오는 임시 DB 에서 별도 절차로 실행: docs/DAEWON-RECEIVING-INTEGRITY-REVIEW.md §15)
+  const { isNullLotBalanceUniqueError } = require("../src/lib/inventory-balance-guard") as typeof import("../src/lib/inventory-balance-guard")
+  const inv = require("../src/lib/actions/inventory.actions") as typeof import("../src/lib/actions/inventory.actions")
+  const nullRows = (tenantId: string, itemId: string, warehouseId?: string) =>
+    prisma.inventoryBalance.findMany({ where: { tenantId, itemId, lotId: null, ...(warehouseId ? { warehouseId } : {}) } })
+  const sumQ = (rows: Array<{ qtyOnHand: unknown; qtyAvailable: unknown }>) => ({ onHand: rows.reduce((s, r) => s + D(r.qtyOnHand), 0), avail: rows.reduce((s, r) => s + D(r.qtyAvailable), 0) })
+  const uniqueTxNos = async (tenantId: string) => {
+    const nos = (await prisma.inventoryTransaction.findMany({ where: { tenantId }, select: { txNo: true } })).map((x) => x.txNo)
+    return { total: nos.length, distinct: new Set(nos).size }
+  }
+
+  {
+    // NB01 최초 입고 / NB02 추가 입고
+    const N1 = await mkCtx("NB1")
+    const o1 = await newPO(N1, [{ itemId: N1.plainRaw.id, qty: 1000 }])
+    const a = await receive(N1, o1, o1.items[0], { r: 100, a: 100, j: 0 })
+    const r1 = await nullRows(N1.tenant.id, N1.plainRaw.id)
+    record("NB01", "비LOT 최초 입고: 재고 행 1건 생성(100/100/0)", a.success && r1.length === 1 && D(r1[0].qtyOnHand) === 100 && D(r1[0].qtyAvailable) === 100 && D(r1[0].qtyHold) === 0 && (await txCount(N1.tenant.id)) === 1, `행 ${r1.length}, 수량 ${D(r1[0]?.qtyOnHand)}/${D(r1[0]?.qtyAvailable)}`)
+    const b = await receive(N1, o1, o1.items[0], { r: 50, a: 50, j: 0 })
+    const r2 = await nullRows(N1.tenant.id, N1.plainRaw.id)
+    record("NB02", "동일 품목 추가 입고: 같은 행이 150 으로 증가(새 행 없음)", b.success && r2.length === 1 && r2[0].id === r1[0].id && D(r2[0].qtyOnHand) === 150, `행 ${r2.length}(동일 id=${r2[0]?.id === r1[0]?.id}), 수량 ${D(r2[0]?.qtyOnHand)}`)
+
+    // NB03 동일 품목 10건 동시 (같은 발주품목)
+    const N3 = await mkCtx("NB3")
+    const o3 = await newPO(N3, [{ itemId: N3.plainRaw.id, qty: 200 }])
+    const res3 = await Promise.all(Array.from({ length: 10 }, () => receive(N3, o3, o3.items[0], { r: 10, a: 10, j: 0 })))
+    const r3 = await nullRows(N3.tenant.id, N3.plainRaw.id)
+    record("NB03", "동일 품목 10건 동시 입고(같은 발주품목): 전부 성공, 재고 행 1건·100", res3.every((r) => r.success) && r3.length === 1 && D(r3[0].qtyOnHand) === 100,
+      `성공 ${res3.filter((r) => r.success).length}/10, 행 ${r3.length}, 수량 ${D(r3[0]?.qtyOnHand)}`)
+
+    // NB04 서로 다른 발주(100 + 200) 동시 → 300
+    const N4 = await mkCtx("NB4")
+    const oa = await newPO(N4, [{ itemId: N4.plainRaw.id, qty: 100 }])
+    const ob = await newPO(N4, [{ itemId: N4.plainRaw.id, qty: 200 }])
+    const res4 = await Promise.all([receive(N4, oa, oa.items[0], { r: 100, a: 100, j: 0 }), receive(N4, ob, ob.items[0], { r: 200, a: 200, j: 0 })])
+    const r4 = await nullRows(N4.tenant.id, N4.plainRaw.id)
+    record("NB04", "서로 다른 발주(100EA + 200EA) 동시 입고: 재고 행 1건, qtyOnHand=300, qtyAvailable=300", res4.every((r) => r.success) && r4.length === 1 && D(r4[0].qtyOnHand) === 300 && D(r4[0].qtyAvailable) === 300,
+      `성공 ${res4.filter((r) => r.success).length}/2, 행 ${r4.length}, ${D(r4[0]?.qtyOnHand)}/${D(r4[0]?.qtyAvailable)}`)
+    // 서로 다른 발주 12건 동시(반복) — 경쟁 반복 관찰
+    let dupRounds = 0, fails = 0, wrong = 0
+    for (let k = 0; k < 8; k++) {
+      const X = await mkCtx(`NB4x${k}`)
+      const os = []
+      for (let j = 0; j < 6; j++) os.push(await newPO(X, [{ itemId: X.plainRaw.id, qty: 10 * (j + 1) }]))
+      const rs = await Promise.all(os.map((x, j) => receive(X, x, x.items[0], { r: 10 * (j + 1), a: 10 * (j + 1), j: 0 })))
+      fails += rs.filter((r) => !r.success).length
+      const rows = await nullRows(X.tenant.id, X.plainRaw.id)
+      if (rows.length !== 1) dupRounds += 1
+      if (D(rows[0]?.qtyOnHand) !== 210) wrong += 1
+    }
+    record("NB04b", "서로 다른 발주 6건 동시 입고 × 8라운드: 매 라운드 재고 행 1건·합계 210, 실패 0", dupRounds === 0 && wrong === 0 && fails === 0, `중복 행 라운드 ${dupRounds}, 합계 오류 라운드 ${wrong}, 실패 ${fails}`)
+
+    // NB05 DB 유일성: 직접 INSERT 중복 거부 + 실제 P2002 오류 모양 + 동시 INSERT 1건만
+    const N5 = await mkCtx("NB5")
+    const mkRow = (c: Ctx, lotId: string | null, whId?: string) => prisma.inventoryBalance.create({ data: { tenantId: c.tenant.id, siteId: c.site.id, warehouseId: whId ?? c.warehouse.id, itemId: c.plainRaw.id, lotId, qtyOnHand: 1, qtyAvailable: 1, qtyHold: 0 } })
+    await mkRow(N5, null)
+    let realNullLotError: unknown = null
+    try { await mkRow(N5, null) } catch (e) { realNullLotError = e }
+    const lotX = await prisma.lot.create({ data: { tenantId: N5.tenant.id, itemId: N5.plainRaw.id, lotNo: "NB5-LOT", status: "ACTIVE" } })
+    await mkRow(N5, lotX.id)
+    let realLotError: unknown = null
+    try { await mkRow(N5, lotX.id) } catch (e) { realLotError = e }
+    const meta = (e: unknown) => JSON.stringify((e as { meta?: unknown })?.meta)
+    record("NB05a", "DB 제약: 같은 (테넌트·품목·창고) lotId=NULL 두 번째 INSERT 는 거부(P2002), 분류 함수가 '비LOT 재고 충돌'로 인식", !!realNullLotError && isNullLotBalanceUniqueError(realNullLotError) && !isNullLotBalanceUniqueError(realLotError) && !!realLotError,
+      `비LOT 오류 ${(realNullLotError as { code?: string })?.code} meta=${meta(realNullLotError)} → 분류 ${isNullLotBalanceUniqueError(realNullLotError)} | LOT 중복 meta=${meta(realLotError)} → 분류 ${isNullLotBalanceUniqueError(realLotError)}`)
+    const N5b = await mkCtx("NB5b")
+    const settled = await Promise.allSettled(Array.from({ length: 10 }, () => mkRow(N5b, null)))
+    record("NB05b", "동시 INSERT 10건(같은 비LOT 키): 정확히 1건만 성공, 나머지 9건은 P2002", settled.filter((s) => s.status === "fulfilled").length === 1 && settled.filter((s) => s.status === "rejected" && isNullLotBalanceUniqueError((s as PromiseRejectedResult).reason)).length === 9 && (await nullRows(N5b.tenant.id, N5b.plainRaw.id)).length === 1,
+      `성공 ${settled.filter((s) => s.status === "fulfilled").length}, 비LOT 충돌 ${settled.filter((s) => s.status === "rejected" && isNullLotBalanceUniqueError((s as PromiseRejectedResult).reason)).length}`)
+    // 서로 다른 lot / 서로 다른 품목은 영향 없음
+    const lotY = await prisma.lot.create({ data: { tenantId: N5.tenant.id, itemId: N5.plainRaw.id, lotNo: "NB5-LOT2", status: "ACTIVE" } })
+    const okLot = await mkRow(N5, lotY.id).then(() => true, () => false)
+    record("NB05c", "LOT 재고 행은 기존 4필드 unique 로 계속 독립(다른 LOT 는 추가 가능, 비LOT 행과 공존)", okLot && (await prisma.inventoryBalance.count({ where: { tenantId: N5.tenant.id, itemId: N5.plainRaw.id } })) === 3, `총 행 ${await prisma.inventoryBalance.count({ where: { tenantId: N5.tenant.id, itemId: N5.plainRaw.id } })}`)
+
+    // NB06 서로 다른 창고 독립
+    const N6 = await mkCtx("NB6")
+    const wh2 = await prisma.warehouse.create({ data: { tenantId: N6.tenant.id, siteId: N6.site.id, code: "WH2", name: "WH2" } })
+    const o6 = await newPO(N6, [{ itemId: N6.plainRaw.id, qty: 100 }])
+    const [w1r, w2r] = await Promise.all([receive(N6, o6, o6.items[0], { r: 30, a: 30, j: 0 }), receive(N6, o6, o6.items[0], { r: 20, a: 20, j: 0, wh: wh2.id })])
+    const rw1 = await nullRows(N6.tenant.id, N6.plainRaw.id, N6.warehouse.id), rw2 = await nullRows(N6.tenant.id, N6.plainRaw.id, wh2.id)
+    record("NB06", "서로 다른 창고 재고는 독립 관리(각 1건: 30 / 20)", w1r.success && w2r.success && rw1.length === 1 && rw2.length === 1 && D(rw1[0].qtyOnHand) === 30 && D(rw2[0].qtyOnHand) === 20, `창고1 ${rw1.length}행/${D(rw1[0]?.qtyOnHand)}, 창고2 ${rw2.length}행/${D(rw2[0]?.qtyOnHand)}`)
+
+    // NB07 서로 다른 tenant 독립 (동시)
+    const N7a = await mkCtx("NB7a"), N7b = await mkCtx("NB7b")
+    const o7a = await newPO(N7a, [{ itemId: N7a.plainRaw.id, qty: 100 }]), o7b = await newPO(N7b, [{ itemId: N7b.plainRaw.id, qty: 100 }])
+    const [t7a, t7b] = await Promise.all([receive(N7a, o7a, o7a.items[0], { r: 40, a: 40, j: 0 }), receive(N7b, o7b, o7b.items[0], { r: 60, a: 60, j: 0 })])
+    const ra = await nullRows(N7a.tenant.id, N7a.plainRaw.id), rb = await nullRows(N7b.tenant.id, N7b.plainRaw.id)
+    record("NB07", "서로 다른 tenant 재고는 독립(동일 코드의 품목·창고라도 각 tenant 1건: 40 / 60)", t7a.success && t7b.success && ra.length === 1 && rb.length === 1 && D(ra[0].qtyOnHand) === 40 && D(rb[0].qtyOnHand) === 60, `A ${ra.length}행/${D(ra[0]?.qtyOnHand)}, B ${rb.length}행/${D(rb[0]?.qtyOnHand)}`)
+
+    // NB08 LOT 품목 회귀
+    const N8 = await mkCtx("NB8")
+    const o8 = await newPO(N8, [{ itemId: N8.lotRaw.id, qty: 500 }])
+    const l1 = await receive(N8, o8, o8.items[0], { r: 10, a: 10, j: 0, lotNo: "NB8-A" })
+    const lc = await Promise.all(Array.from({ length: 6 }, () => receive(N8, o8, o8.items[0], { r: 5, a: 5, j: 0, lotNo: "NB8-A" })))
+    const l2 = await receive(N8, o8, o8.items[0], { r: 7, a: 7, j: 0, lotNo: "NB8-B" })
+    const lotRows = await prisma.inventoryBalance.findMany({ where: { tenantId: N8.tenant.id, itemId: N8.lotRaw.id }, include: { lot: true } })
+    const byLot = Object.fromEntries(lotRows.map((r) => [r.lot?.lotNo ?? "NULL", D(r.qtyOnHand)]))
+    record("NB08", "LOT 품목 입고 회귀: 같은 LOT 동시 입고는 한 행에 합산(NB8-A=40), 다른 LOT 는 분리(NB8-B=7), 비LOT 행 없음",
+      l1.success && lc.every((r) => r.success) && l2.success && lotRows.length === 2 && byLot["NB8-A"] === 40 && byLot["NB8-B"] === 7 && (await nullRows(N8.tenant.id, N8.lotRaw.id)).length === 0, `행 ${lotRows.length} ${JSON.stringify(byLot)}`)
+
+    // NB09/NB10 멱등성 (비LOT) — 행·수량
+    const N9 = await mkCtx("NB9")
+    const o9 = await newPO(N9, [{ itemId: N9.plainRaw.id, qty: 500 }])
+    const rid = ids.generateReceivingRequestId()
+    const s1 = await receive(N9, o9, o9.items[0], { r: 25, a: 25, j: 0, requestId: rid })
+    const s2 = await receive(N9, o9, o9.items[0], { r: 25, a: 25, j: 0, requestId: rid })
+    const r9 = await nullRows(N9.tenant.id, N9.plainRaw.id)
+    record("NB09", "동일 요청 반복(순차): 재고 행 1건·25 (두 번째는 replayed)", s1.success && s2.success && (s2 as { replayed?: boolean }).replayed === true && r9.length === 1 && D(r9[0].qtyOnHand) === 25, `행 ${r9.length}, 수량 ${D(r9[0]?.qtyOnHand)}`)
+    const N10 = await mkCtx("NB10")
+    const o10 = await newPO(N10, [{ itemId: N10.plainRaw.id, qty: 500 }])
+    const rid10 = ids.generateReceivingRequestId()
+    const c10 = await Promise.all(Array.from({ length: 10 }, () => receive(N10, o10, o10.items[0], { r: 25, a: 25, j: 0, requestId: rid10 })))
+    const r10 = await nullRows(N10.tenant.id, N10.plainRaw.id)
+    record("NB10", "동일 요청 10건 동시: 재고 행 1건·25, 입고검사 1건", c10.every((r) => r.success) && r10.length === 1 && D(r10[0].qtyOnHand) === 25 && (await inspCount(o10.items[0].id)) === 1, `성공 ${c10.filter((r) => r.success).length}/10, 행 ${r10.length}, 수량 ${D(r10[0]?.qtyOnHand)}, 검사이력 ${await inspCount(o10.items[0].id)}`)
+
+    // NB11 거래번호 중복 없음 (위 시나리오들의 테넌트 전부)
+    const tens = [N1, N3, N4, N6, N7a, N7b, N8, N9, N10]
+    const uq = await Promise.all(tens.map((c) => uniqueTxNos(c.tenant.id)))
+    const contig = await Promise.all(tens.map(async (c) => isContiguous((await receiptNos(c.tenant.id)))))
+    record("NB11", "입고거래번호: 위 시나리오 9개 tenant 모두 중복 없음·0001부터 연속", uq.every((u) => u.total === u.distinct) && contig.every(Boolean), `tenant별 (건수/고유) ${uq.map((u) => `${u.total}/${u.distinct}`).join(" ")}, 연속 ${contig.every(Boolean)}`)
+
+    // NB12 최초 재고 생성 후 오류 → 행 생성까지 롤백, 같은 요청 ID 로 재시도 성공
+    const N12 = await mkCtx("NB12")
+    const o12 = await newPO(N12, [{ itemId: N12.plainRaw.id, qty: 100 }])
+    const rid12 = ids.generateReceivingRequestId()
+    const real12 = testProfile.id
+    testProfile.id = "no-such-profile" // 재고 행 생성·수불 기록 이후 감사로그 FK 위반
+    const f12 = await receive(N12, o12, o12.items[0], { r: 40, a: 40, j: 0, requestId: rid12 })
+    testProfile.id = real12
+    const after12 = { rows: (await nullRows(N12.tenant.id, N12.plainRaw.id)).length, tx: await txCount(N12.tenant.id), rq: await rqCount(N12.tenant.id), insp: await inspCount(o12.items[0].id) }
+    const retry12 = await receive(N12, o12, o12.items[0], { r: 40, a: 40, j: 0, requestId: rid12 })
+    const fin12 = await nullRows(N12.tenant.id, N12.plainRaw.id)
+    record("NB12", "최초 재고 생성 후 오류: 재고 행·수불·요청원장·검사이력 전부 롤백 → 같은 요청 ID 재시도는 정상 처리(행 1건·40)",
+      !f12.success && after12.rows === 0 && after12.tx === 0 && after12.rq === 0 && after12.insp === 0 && retry12.success && fin12.length === 1 && D(fin12[0].qtyOnHand) === 40,
+      `실패 후 행=${after12.rows} 수불=${after12.tx} 요청원장=${after12.rq} 검사이력=${after12.insp} | 재시도 ${retry12.success} 행=${fin12.length} 수량=${D(fin12[0]?.qtyOnHand)}`)
+
+    // NB13 재고 ↔ 수불 원장 (초기 재고 + 거래 유형별 부호) — 입고 + 출고 + 재고조정 + 초기재고 시드
+    const N13 = await mkCtx("NB13")
+    const OPENING = 25 // 수불 없이 시드한 초기 재고 (원장에 없는 수량 → 기초재고로 반영해야 함)
+    const seed = await prisma.inventoryBalance.create({ data: { tenantId: N13.tenant.id, siteId: N13.site.id, warehouseId: N13.warehouse.id, itemId: N13.plainRaw.id, lotId: null, qtyOnHand: OPENING, qtyAvailable: OPENING, qtyHold: 0 } })
+    const o13 = await newPO(N13, [{ itemId: N13.plainRaw.id, qty: 500 }])
+    await receive(N13, o13, o13.items[0], { r: 100, a: 100, j: 0 }) // +100 (기존 시드 행에 합산돼야 함)
+    await receive(N13, o13, o13.items[0], { r: 40, a: 30, j: 10 })  // +30 (불합격 10 은 재고 제외)
+    use(N13)
+    const wo13 = await prisma.workOrder.create({ data: { tenantId: N13.tenant.id, siteId: N13.site.id, itemId: N13.fg.id, bomId: N13.bom.id, routingId: N13.routing.id, orderNo: uniq("WO13"), manufacturingNo: uniq("MFG13"), plannedQty: 50, status: "IN_PROGRESS", operations: { create: [{ routingOperationId: N13.routingOperation.id, seq: 10, plannedQty: 50, status: "IN_PROGRESS", startedAt: new Date() }] } } })
+    await prisma.bOMItem.create({ data: { bomId: N13.bom.id, componentItemId: N13.plainRaw.id, seq: 20, qtyPer: 1, scrapRate: 0 } })
+    const iss13 = await als.run({ tenantId: N13.tenant.id }, () => issue.issueMaterialsForWorkOrder({ workOrderId: wo13.id, siteId: N13.site.id, items: [{ itemId: N13.plainRaw.id, warehouseId: N13.warehouse.id, issueQty: 35, requiredQty: 50, reservationId: null }] }, N13.tenant.id))
+    const adj13 = await als.run({ tenantId: N13.tenant.id }, () => inv.adjustInventoryStock({ balanceId: seed.id, physicalQty: 100, reason: "NB13 실사 조정" }))
+    const rows13 = await nullRows(N13.tenant.id, N13.plainRaw.id)
+    const txs13 = await prisma.inventoryTransaction.findMany({ where: { tenantId: N13.tenant.id, itemId: N13.plainRaw.id } })
+    const SIGN: Record<string, number> = { RECEIPT: 1, ISSUE: -1, ADJUST: 1 /* 조정은 실사-현재고 차이를 부호 포함으로 저장 */ }
+    const unhandled = Array.from(new Set(txs13.map((t) => t.txType))).filter((t) => !(t in SIGN))
+    const ledger = txs13.reduce((s, t) => s + (SIGN[t.txType] ?? 0) * D(t.qty), 0)
+    const expected = OPENING + ledger
+    const types = Array.from(new Set(txs13.map((t) => t.txType))).sort().join(",")
+    record("NB13", "재고 ↔ 수불 원장(기초재고 25 + 입고 130 − 출고 35 ± 재고조정): 행 1건, 재고 = 기초 + 부호 합계. 처리하지 못한 거래 유형이 있으면 PASS 불가",
+      unhandled.length === 0 && iss13.ok && adj13.success && rows13.length === 1 && D(rows13[0].qtyOnHand) === expected && D(rows13[0].qtyOnHand) === 100,
+      `행 ${rows13.length}, 재고 ${D(rows13[0]?.qtyOnHand)}, 기초 ${OPENING} + 원장 ${ledger} = ${expected}, 거래유형 [${types}], 미처리 유형 [${unhandled.join(",") || "없음"}], 출고 ok=${iss13.ok}${iss13.error ? " " + iss13.error : ""}, 조정 ok=${adj13.success}${adj13.error ? " " + adj13.error : ""} | 검증 범위: RECEIPT·ISSUE·ADJUST(+기초재고). 미검증: RETURN·SUPPLIER_RETURN·TRANSFER·SCRAP·출하`)
+  }
+
+  {
+    // NB15 입고 + 출고 + 재고조정 혼합 동시 부하: 교착(deadlock)·직렬화 오류 없음
+    const N15 = await mkCtx("NB15")
+    await prisma.bOMItem.create({ data: { bomId: N15.bom.id, componentItemId: N15.plainRaw.id, seq: 20, qtyPer: 1, scrapRate: 0 } })
+    const base = await newPO(N15, [{ itemId: N15.plainRaw.id, qty: 100000 }])
+    await receive(N15, base, base.items[0], { r: 5000, a: 5000, j: 0 })
+    const wos = []
+    for (let k = 0; k < 5; k++) wos.push(await prisma.workOrder.create({ data: { tenantId: N15.tenant.id, siteId: N15.site.id, itemId: N15.fg.id, bomId: N15.bom.id, routingId: N15.routing.id, orderNo: uniq("WO15"), manufacturingNo: uniq("MFG15"), plannedQty: 100, status: "IN_PROGRESS", operations: { create: [{ routingOperationId: N15.routingOperation.id, seq: 10, plannedQty: 100, status: "IN_PROGRESS", startedAt: new Date() }] } } }))
+    const balance = await prisma.inventoryBalance.findFirstOrThrow({ where: { tenantId: N15.tenant.id, itemId: N15.plainRaw.id, lotId: null } })
+    const orders = []
+    for (let k = 0; k < 12; k++) orders.push(await newPO(N15, [{ itemId: N15.plainRaw.id, qty: 100 }]))
+    const errors: string[] = []
+    const origErr = console.error
+    console.error = (...a: unknown[]) => { errors.push(a.map((x) => (x instanceof Error ? `${x.name}: ${x.message}` : String(x))).join(" ")) }
+    let out: Array<{ kind: string; ok: boolean; msg: string }> = []
+    try {
+      const jobs: Array<Promise<{ kind: string; ok: boolean; msg: string }>> = []
+      orders.forEach((o) => jobs.push(receive(N15, o, o.items[0], { r: 20, a: 20, j: 0 }).then((r) => ({ kind: "RECEIVE", ok: r.success, msg: r.message ?? "" }))))
+      wos.forEach((w, k) => { for (let j = 0; j < 3; j++) jobs.push(als.run({ tenantId: N15.tenant.id }, () => issue.issueMaterialsForWorkOrder({ workOrderId: w.id, siteId: N15.site.id, items: [{ itemId: N15.plainRaw.id, warehouseId: N15.warehouse.id, issueQty: 5 + k, requiredQty: 100, reservationId: null }] }, N15.tenant.id)).then((r) => ({ kind: "ISSUE", ok: r.ok, msg: r.error ?? "" }))) })
+      for (let k = 0; k < 4; k++) jobs.push(als.run({ tenantId: N15.tenant.id }, () => inv.adjustInventoryStock({ balanceId: balance.id, physicalQty: 4000 + k * 10, reason: `NB15 조정 ${k}` })).then((r) => ({ kind: "ADJUST", ok: r.success, msg: r.error ?? "" })))
+      out = await Promise.all(jobs)
+    } finally { console.error = origErr }
+    const log = errors.join("\n") + "\n" + out.map((o) => o.msg).join("\n")
+    const deadlocks = (log.match(/deadlock detected|40P01|P2034|could not serialize/gi) ?? []).length
+    const failedKinds = out.filter((o) => !o.ok).reduce<Record<string, number>>((m, o) => { m[o.kind] = (m[o.kind] ?? 0) + 1; return m }, {})
+    const unexpected = out.filter((o) => !o.ok && !/중복이 반복|재고조정|동시|다른 작업으로/.test(o.msg))
+    const rows15 = await nullRows(N15.tenant.id, N15.plainRaw.id)
+    const txs15 = await prisma.inventoryTransaction.findMany({ where: { tenantId: N15.tenant.id, itemId: N15.plainRaw.id } })
+    const unhandled15 = Array.from(new Set(txs15.map((t) => t.txType))).filter((t) => !["RECEIPT", "ISSUE", "ADJUST"].includes(t))
+    const ledger15 = txs15.reduce((s, t) => s + ({ RECEIPT: 1, ISSUE: -1, ADJUST: 1 } as Record<string, number>)[t.txType] * D(t.qty), 0)
+    record("NB15", "입고+출고+재고조정 혼합 동시 부하(12+15+4건): 교착/직렬화 오류 0, 재고 행 1건, 재고 = 수불 원장 합계(초기재고 포함)",
+      deadlocks === 0 && unexpected.length === 0 && rows15.length === 1 && unhandled15.length === 0 && D(rows15[0].qtyOnHand) === ledger15,
+      `작업 ${out.length}건, 성공 ${out.filter((o) => o.ok).length}, 실패 ${JSON.stringify(failedKinds)}, 교착·직렬화 오류 ${deadlocks}건, 예상 밖 실패 ${unexpected.length}건${unexpected[0] ? ` (예: ${unexpected[0].kind} ${unexpected[0].msg.slice(0, 50)})` : ""}, 행 ${rows15.length}, 재고 ${D(rows15[0]?.qtyOnHand)} vs 원장 ${ledger15}`)
+  }
+
+  {
+    // NB16 실제 P2002 오류 객체 주입: 비LOT 재고 충돌로 확인된 경우에만 재시도
+    const N16 = await mkCtx("NB16")
+    const capture = await mkCtx("NB16cap")
+    await prisma.inventoryBalance.create({ data: { tenantId: capture.tenant.id, siteId: capture.site.id, warehouseId: capture.warehouse.id, itemId: capture.plainRaw.id, lotId: null, qtyOnHand: 1, qtyAvailable: 1, qtyHold: 0 } })
+    let realErr: unknown = null
+    try { await prisma.inventoryBalance.create({ data: { tenantId: capture.tenant.id, siteId: capture.site.id, warehouseId: capture.warehouse.id, itemId: capture.plainRaw.id, lotId: null, qtyOnHand: 1, qtyAvailable: 1, qtyHold: 0 } }) } catch (e) { realErr = e }
+    const lotCap = await prisma.lot.create({ data: { tenantId: capture.tenant.id, itemId: capture.plainRaw.id, lotNo: "NB16-LOT", status: "ACTIVE" } })
+    await prisma.inventoryBalance.create({ data: { tenantId: capture.tenant.id, siteId: capture.site.id, warehouseId: capture.warehouse.id, itemId: capture.plainRaw.id, lotId: lotCap.id, qtyOnHand: 1, qtyAvailable: 1, qtyHold: 0 } })
+    let realLotErr: unknown = null
+    try { await prisma.inventoryBalance.create({ data: { tenantId: capture.tenant.id, siteId: capture.site.id, warehouseId: capture.warehouse.id, itemId: capture.plainRaw.id, lotId: lotCap.id, qtyOnHand: 1, qtyAvailable: 1, qtyHold: 0 } }) } catch (e) { realLotErr = e }
+    const client = prisma as unknown as { $transaction: (...a: unknown[]) => Promise<unknown> }
+    const withFirstFailure = async (err: unknown, label: string) => {
+      const o = await newPO(N16, [{ itemId: N16.plainRaw.id, qty: 100 }])
+      const realTx = client.$transaction.bind(prisma)
+      let calls = 0
+      client.$transaction = (...a: unknown[]) => { calls += 1; return calls === 1 ? Promise.reject(err) : (realTx as (...x: unknown[]) => Promise<unknown>)(...a) }
+      const origErr = console.error; console.error = () => {}
+      let r: Awaited<ReturnType<typeof receive>>
+      try { r = await receive(N16, o, o.items[0], { r: 10, a: 10, j: 0 }) } finally { client.$transaction = realTx; console.error = origErr }
+      const stock16 = (await stock(N16.tenant.id, N16.plainRaw.id)).onHand
+      return { label, calls, success: r.success, outcome: r.outcome, insp: await inspCount(o.items[0].id), stock16 }
+    }
+    const before16 = (await stock(N16.tenant.id, N16.plainRaw.id)).onHand
+    const pos = await withFirstFailure(realErr, "비LOT 재고 P2002(실제 오류 객체)")
+    const negLot = await withFirstFailure(realLotErr, "LOT 재고 P2002(실제 오류 객체)")
+    const negOther = await withFirstFailure(new Prisma.PrismaClientKnownRequestError("Unique constraint failed on the fields: (`tenantId`,`code`)", { code: "P2002", clientVersion: "5.22.0", meta: { modelName: "Item", target: ["tenantId", "code"] } }), "다른 모델 P2002")
+    const negUnknown = await withFirstFailure(Object.assign(new Error("Server has closed the connection."), { name: "PrismaClientUnknownRequestError" }), "결과 불명 오류")
+    record("NB16", "P2002 재시도: 실제 비LOT 재고 충돌 오류만 재시도(2회 호출·입고 1회분), LOT 충돌·다른 모델 P2002·결과 불명은 재시도하지 않음(1회 호출)",
+      pos.calls === 2 && pos.success && pos.insp === 1 && pos.stock16 === before16 + 10 && negLot.calls === 1 && !negLot.success && negOther.calls === 1 && !negOther.success && negUnknown.calls === 1 && negUnknown.outcome === "UNKNOWN",
+      [pos, negLot, negOther, negUnknown].map((x) => `${x.label}: 호출 ${x.calls}회 ${x.success ? "성공" : "실패" + (x.outcome ? `(${x.outcome})` : "")}`).join(" | "))
   }
 
   // ── 요약 ──

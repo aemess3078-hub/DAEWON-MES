@@ -1560,6 +1560,10 @@ model LotNumberReservation {
   @@index([status, expiresAt])
 }
 
+// 비LOT(lotId IS NULL) 재고 행의 유일성은 PostgreSQL partial unique index 로 보장한다:
+//   InventoryBalance_tenantId_itemId_warehouseId_null_lot_key ON (tenantId, itemId, warehouseId) WHERE lotId IS NULL
+// Prisma 스키마로 표현할 수 없으므로 SQL migration(20261019010000_add_inventory_balance_null_lot_unique)이 기준이다.
+// 아래 @@unique 는 lotId 가 있는 LOT 재고 행에만 유효하다(NULL 은 서로 다른 값으로 취급됨).
 model InventoryBalance {
   id           String   @id @default(cuid())
   tenantId     String

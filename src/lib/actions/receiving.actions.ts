@@ -20,6 +20,7 @@ import {
   judgeExistingRequest,
 } from "@/lib/receiving-idempotency"
 import { isValidReceivingRequestId } from "@/lib/receiving-request-id"
+import { NULL_LOT_BALANCE_CONTENTION_MESSAGE, isNullLotBalanceUniqueError } from "@/lib/inventory-balance-guard"
 import { checkReceiptRemaining, validateReceiptQuantities } from "@/lib/receiving-quantity"
 import { safeRevalidate } from "@/lib/revalidate-safe"
 import { allocateReceiptTxNo } from "@/lib/services/receiving-tx-number.service"
@@ -548,7 +549,10 @@ async function createReceivingInspectionInternal(
       const autoLotCollision = lotResolutionMode === "AUTO" &&
         (isUniqueConstraintError(error) ||
           (error instanceof Error && error.message === AUTO_LOT_COLLISION))
-      const canRetry = txNoCollision || autoLotCollision
+      // 비LOT 재고 행(lotId IS NULL) partial unique 충돌로 **확인된** 경우에만 재시도 대상에 추가한다(다른 P2002 는 아님).
+      // 트랜잭션 전체가 롤백된 뒤 다시 실행하면 두 번째에는 기존 행을 update 한다. 결과 불명 오류는 어떤 경우에도 재시도하지 않는다.
+      const balanceCollision = isNullLotBalanceUniqueError(error)
+      const canRetry = !isOutcomeUnknownError(error) && (txNoCollision || autoLotCollision || balanceCollision)
 
       if (canRetry && attempt < maxAttempts - 1) {
         continue
@@ -559,6 +563,9 @@ async function createReceivingInspectionInternal(
       }
       if (txNoCollision) {
         throw new Error("입고거래번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요.")
+      }
+      if (balanceCollision) {
+        throw new Error(NULL_LOT_BALANCE_CONTENTION_MESSAGE)
       }
 
       throw error
