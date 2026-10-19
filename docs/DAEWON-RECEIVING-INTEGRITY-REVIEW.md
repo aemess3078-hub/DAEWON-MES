@@ -164,3 +164,53 @@ CREATE UNIQUE INDEX IF NOT EXISTS "InventoryBalance_tenantId_itemId_warehouseId_
 ## 9. 테스트 DB 현황 재확인 (이번 작업)
 - Docker 없음. 로컬/WSL(Ubuntu 26.04) 모두 PostgreSQL 미설치. WSL 일반 사용자(`aemess`)는 `sudo` 에 비밀번호가 필요해 **자동 설치 불가** — 사용자가 직접 설치해야 한다.
 - 따라서 실제 DB 검증(발주→입고→LOT→작업지시→출고→투입이력, 동시 입고, 중복 요청)은 **수행하지 못했다(미검증)**.
+
+---
+
+## 10. 입고거래번호(txNo) 동시성 수정 — 실제 PostgreSQL 18 검증 (WSL 로컬 테스트 DB)
+
+### 원인
+`generateTxNo()` 가 입고 트랜잭션 **밖에서** "그날 마지막 번호 + 1" 을 조회해 번호를 미리 만들었다. 같은 테넌트의 동시 입고는 같은 번호를 받아 `(tenantId, txNo)` unique 위반이 되고, 재시도(최대 5회)도 같은 시점에 다시 충돌했다. 수정 전 실측: 동시 10건 중 5건이 "입고거래번호 생성 중 중복이 반복되었습니다" 로 실패(unique 위반 195회). 실패는 모두 깨끗이 롤백되어 데이터 손상은 없었다.
+
+### 수정 (`receiving.actions.ts`, 신규 `services/receiving-tx-number.service.ts`)
+- 번호 확보를 트랜잭션 안으로 이동. `(tenant, KST 날짜)` 단위 `pg_advisory_xact_lock` 으로 직렬화하고, **잠금 안에서 최신 번호를 다시 조회**(숫자 최대값 + 1). 롤백되면 번호도 소모되지 않는다.
+- 형식 `RCV-YYYYMMDD-NNNN` 유지, 기존 번호/데이터 변경 없음, `(tenantId, txNo)` unique 제약과 충돌 재시도 유지, 결과 불명 오류는 재시도하지 않음, LOT 자동채번·예약·발주잔량 검증 유지. 스키마/migration 변경 없음.
+- **잠금 위치가 중요하다**: 처음에는 수불 INSERT 직전에 번호를 확보했더니, 이전에 거래번호 충돌이 우연히 하던 "직렬화" 역할이 사라져 **비LOT 품목의 최초 재고 행이 동시 입고마다 따로 생성**되는 문제가 드러났다(20라운드×8건 모두에서 중복 행, 최대 8행; 12건 동시 입고 → 재고 행 12개. 재고 합계는 맞지만 행이 갈라진다). 그래서 번호(=잠금) 확보를 **재고 행 조회/생성 이전**으로 옮겨, 같은 테넌트의 입고가 재고 행 "없으면 생성" 구간에서도 직렬화되도록 했다 → 중복 행 0.
+
+### 실제 DB 결과 (45건: 42 PASS / 3 FAIL, 모두 로컬 테스트 DB)
+| 구분 | 수정 전 | 수정 후 |
+|---|---|---|
+| T09b 동일 발주품목 동시 입고 10건 | 5/10 성공 (txNo 충돌) | **10/10**, 누적 100 = 재고 100 |
+| R1 동일 발주품목 10건 | — | 10/10, 거래번호 0001~0010 연속 |
+| R2 서로 다른 발주 12건(같은 품목) | — | 12/12, 재고 120, 비LOT 재고 행 **1개** |
+| R3 동일 tenant 다중 품목(LOT 1+비LOT 2) 15건 | — | 15/15, 품목별 재고 50, 번호 연속 |
+| R4 서로 다른 tenant 16건 | — | 16/16, tenant 별 0001~0008 독립 |
+| R5 같은 tenant 40건 | — | 40/40, 번호 40개 중복 없음·연속, 536ms |
+| R6 번호 확보 이후 DB 오류(감사로그 FK) | — | 입고검사·재고·수불·누적 전부 롤백, 번호 미소모(다음 입고가 0002) |
+| R7 연결 오류(결과 불명) | — | outcome=UNKNOWN, 트랜잭션 호출 1회(자동 재시도 없음), DB 변화 없음 |
+| R8 txNo unique 충돌 재시도 | — | 호출 2회, 입고검사·수불·재고 정확히 1회분 |
+| R9 LOT 자동채번 회귀 | — | 대원정밀 가드 유지 / NMES 브랜드에서 자동 LOT 발행·예약 CONSUMED·동시 6건 중복 없음 |
+| T13a 비LOT 최초 재고 생성 20라운드×8건 | 중복 행 0 (거래번호 충돌이 가려줌) | 중복 행 0 (잠금으로 보장) |
+| T13c (실험) 테스트 DB 에 partial unique index 를 두고 동일 부하 | 70/80 실패(generic 중복 오류) | **80/80 성공** — 잠금과 인덱스가 함께 있으면 충돌 없음 |
+
+테스트 후 정합성 SQL: 발주품목 누적 = 합격합계 불일치 0, 음수/불일치 재고 0, 수불 원장 대비 재고 불일치는 하네스가 수동 삽입한 T13b 시험용 행 1건뿐(앱 데이터 아님), 임시 인덱스 잔존 없음.
+
+## 11. 남은 FAIL 3건 (이번 수정 범위에 섞지 않음) — 운영 배포 전 해결 필요
+
+### A. 서버 멱등성 부재 (T10a 순차 재전송, T10b 동시 재전송)
+- 증상: 똑같은 입고 요청을 두 번 보내면 둘 다 성공해 재고가 2배(40 → 80). 상한은 발주 잔여수량.
+- 원인: `ReceivingInspection` 에 요청 식별자/unique 가 없어 서버가 "같은 요청"을 구분할 수 없다. 화면 잠금(품목별 상태)은 같은 창 안에서만 유효.
+- 해결 방향(§8-1): `ReceivingInspection.requestId`(nullable) + `@@unique([purchaseOrderItemId, requestId])` 추가, 다이얼로그가 (열림×품목) UUID 를 재시도에도 동일하게 전송, 서버는 발주품목 행 잠금 후 같은 키가 있으면 재처리 없이 성공 반환. 순서: ① migration(컬럼+인덱스, nullable 이라 기존 코드 호환) ② 서버 로직 ③ 화면 전송. 검증은 T10a/T10b 를 PASS 로 바꾸는 것.
+
+### B. 비LOT 재고 행 유일성 제약 누락 (T13b)
+- 증상: DB 가 같은 (테넌트·품목·창고) `lotId=NULL` 재고 행을 두 번 INSERT 하도록 허용.
+- 원인: baseline migration 이 `migrate diff --from-empty` 로 만들어져 레거시의 partial unique index 가 빠졌다(Prisma 스키마로 표현 불가).
+- 이번 수정과의 관계: 입고 경로는 txNo 잠금이 재고 조회 전에 걸려 보호되지만(T13a/R2b PASS), **다른 경로(완제품 입고 `finished-goods.actions`, 재고조정 등 `inventoryBalance.create`)는 보호되지 않는다**. 근본 해결은 DB 제약이다.
+- 해결 방향(§8-2): ① 운영 DB 에서 중복 행 점검(읽기 전용 SQL) → 있으면 수량 합산 병합 절차 별도 승인 ② `CREATE UNIQUE INDEX ... WHERE "lotId" IS NULL` migration ③ `inventoryBalance.create` 를 "P2002 이면 재조회 후 increment" 로 방어(없으면 인덱스 도입 후 사용자에게 generic 중복 오류가 보임 — T13c 실험에서 잠금 없을 때 70/80 실패로 확인). TenantUser partial unique 2건도 같이 복구 검토.
+
+### 같은 패턴의 후속 점검 대상 (이번 범위 밖)
+- `inventory.actions.ts` `generateTxNo`(ADJ-…), `material-return.actions.ts`(SRT-…) 도 "트랜잭션 밖 최대값+1" 방식이다. 입고와 같은 서비스 패턴(트랜잭션 안 + advisory lock)으로 옮기는 것을 권장.
+
+## 12. 테스트 DB 사용법 (로컬 WSL, 운영과 분리)
+- PostgreSQL 18.3 (Ubuntu 패키지를 sudo 없이 `~/daewon-pgtest` 에 풀어 사용), `127.0.0.1:54329`, DB `daewon_mes_test`, 별도 사용자/무작위 비밀번호(WSL `~/daewon-pgtest/.pw`, Git 제외). Docker 없음.
+- 실제 DB 테스트: `scripts/test-daewon-stabilization-db.ts` — `DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB` 와 `localhost/127.0.0.1 의 *_test` DB 가 아니면 실행을 거부한다. 서버 액션을 그대로 호출하고 인증/캐시만 대체한다.

@@ -745,6 +745,101 @@ async function testQuantityPrecisionAndPostCommit() {
   }
 }
 
+// ─── J. 입고 거래번호(txNo) 채번: 트랜잭션 내부 + (tenant, 날짜) advisory lock ──────────
+
+async function testReceiptTxNumbering() {
+  const svc = require("../src/lib/services/receiving-tx-number.service") as typeof import("../src/lib/services/receiving-tx-number.service")
+  const YMD = "20261019"
+
+  // J1. 순수 규칙
+  eq(svc.formatReceiptTxNo(YMD, 1), "RCV-20261019-0001", "J1 형식 유지 RCV-YYYYMMDD-NNNN")
+  eq(svc.formatReceiptTxNo(YMD, 10000), "RCV-20261019-10000", "J1 4자리를 넘으면 자릿수 확장")
+  eq(svc.parseReceiptTxSequence("RCV-20261019-0007", YMD), 7, "J1 기존 번호 파싱")
+  eq([svc.parseReceiptTxSequence("RCV-20261018-0007", YMD), svc.parseReceiptTxSequence("RCV-20261019-AB", YMD), svc.parseReceiptTxSequence("SRT-20261019-0001", YMD)], [null, null, null], "J1 다른 날짜/비숫자/다른 접두어는 무시")
+  ok(svc.receiptTxLockKey("T1", YMD) !== svc.receiptTxLockKey("T2", YMD) && svc.receiptTxLockKey("T1", YMD) !== svc.receiptTxLockKey("T1", "20261020"), "J1 잠금 키는 tenant·날짜별로 분리")
+
+  // J2. 다음 번호 = 숫자 최대값 + 1 (문자열 정렬 금지), 기존 번호는 그대로
+  class FakeLedgerDb {
+    rows: Array<{ tenantId: string; txNo: string }> = []
+    private holders = new Map<string, Promise<void>>()
+    lockCalls = 0
+    begin() {
+      const owner = this
+      const releases: Array<() => void> = []
+      const tx = {
+        async $executeRaw(sql: { values: unknown[] }) {
+          owner.lockCalls += 1
+          const key = String(sql.values[0])
+          while (owner.holders.has(key)) await owner.holders.get(key)
+          let release!: () => void
+          owner.holders.set(key, new Promise<void>((res) => (release = res)))
+          releases.push(() => { owner.holders.delete(key); release() })
+          return 1
+        },
+        inventoryTransaction: {
+          async findMany(args: any) {
+            const prefix: string = args.where.txNo.startsWith
+            return owner.rows.filter((r) => r.tenantId === args.where.tenantId && r.txNo.startsWith(prefix)).map((r) => ({ txNo: r.txNo }))
+          },
+        },
+      }
+      return { tx, commit: () => releases.splice(0).forEach((r) => r()) }
+    }
+  }
+  {
+    const db = new FakeLedgerDb()
+    db.rows.push({ tenantId: "T1", txNo: "RCV-20261019-9999" }, { tenantId: "T1", txNo: "RCV-20261019-10000" }, { tenantId: "T1", txNo: "RCV-20261018-0500" }, { tenantId: "T2", txNo: "RCV-20261019-0042" })
+    const { tx, commit } = db.begin()
+    eq(await svc.allocateReceiptTxNo(tx as any, "T1", { yyyymmdd: YMD }), "RCV-20261019-10001", "J2 9999 다음 10000 이후도 숫자 최대값 기준(문자열 정렬이면 중복)")
+    commit()
+    const b = db.begin()
+    eq(await svc.allocateReceiptTxNo(b.tx as any, "T2", { yyyymmdd: YMD }), "RCV-20261019-0043", "J2 다른 tenant 는 독립")
+    b.commit()
+    const c = db.begin()
+    eq(await svc.allocateReceiptTxNo(c.tx as any, "T3", { yyyymmdd: YMD }), "RCV-20261019-0001", "J2 첫 입고는 0001")
+    c.commit()
+  }
+
+  // J3. 동시 25건: 잠금 안에서 최신 번호를 재조회하므로 중복 없이 연속 (대조군: 잠금 없이는 중복)
+  async function burst(withLock: boolean) {
+    const db = new FakeLedgerDb()
+    const noLock = async () => {}
+    const nos = await Promise.all(Array.from({ length: 25 }, async () => {
+      const { tx, commit } = db.begin()
+      try {
+        const no = await svc.allocateReceiptTxNo(tx as any, "T1", { yyyymmdd: YMD, ...(withLock ? {} : { lock: noLock }) })
+        await sleep(Math.random() * 6) // 번호 확보~저장 사이의 경쟁 구간
+        db.rows.push({ tenantId: "T1", txNo: no })
+        return no
+      } finally {
+        commit()
+      }
+    }))
+    return { nos, db }
+  }
+  {
+    const locked = await burst(true)
+    eq(new Set(locked.nos).size, 25, "J3 동시 25건 거래번호 중복 없음(잠금)")
+    eq([...locked.nos].sort()[0], "RCV-20261019-0001", "J3 0001 부터 시작")
+    eq([...locked.nos].sort()[24], "RCV-20261019-0025", "J3 0025 까지 연속")
+    eq(locked.db.lockCalls, 25, "J3 모든 발급이 $executeRaw 잠금을 사용")
+    const unlocked = await burst(false)
+    ok(new Set(unlocked.nos).size < 25, "J3 대조군: 잠금 없이는 중복 발생(수정 전 증상 재현)")
+  }
+
+  // J4. 소스 구조
+  const src = read("src", "lib", "actions", "receiving.actions.ts")
+  ok(!/async function generateTxNo/.test(src) && !/generateTxNo\(/.test(src), "J4 트랜잭션 밖의 generateTxNo 제거")
+  ok((src.match(/allocateReceiptTxNo\(tx, tenantId/g) || []).length === 1, "J4 거래번호는 트랜잭션 안에서 한 번만 확보")
+  const iAlloc = src.indexOf("allocateReceiptTxNo(tx, tenantId")
+  const iBalance = src.indexOf("tx.inventoryBalance.findFirst")
+  const iLedger = src.indexOf("tx.inventoryTransaction.create")
+  ok(iAlloc > 0 && iAlloc < iBalance && iBalance < iLedger, "J4 거래번호(잠금) 확보가 재고 행 조회/생성보다 먼저 — 최초 재고 행 생성 경합도 직렬화")
+  ok(/isUniqueConstraintError\(error, \["tenantId", "txNo"\]\)/.test(src) && /txNoCollision/.test(src), "J4 (tenantId, txNo) unique 이중 방어와 재시도 유지")
+  ok(/isOutcomeUnknownError\(error\)[\s\S]{0,120}outcome: "UNKNOWN"/.test(src) && !/canRetry = [^\n]*isOutcomeUnknownError/.test(src), "J4 결과 불명 오류는 재시도 대상이 아님")
+  ok(/lockPurchaseOrderItemsForUpdate\(tx, tenantId/.test(src) && /checkReceiptRemaining\(/.test(src) && /computeNextMaterialReceiptLotNo\(/.test(src), "J4 발주품목 행 잠금·잔량 검증·LOT 자동채번 호출은 유지")
+}
+
 async function main() {
   await testPurchaseOrderLock()
   testUserErrors()
@@ -755,6 +850,7 @@ async function main() {
   testManufacturingPolicy()
   testReceivingHardening()
   await testQuantityPrecisionAndPostCommit()
+  await testReceiptTxNumbering()
   console.log(`\nAll ${passed} assertions passed`)
 }
 

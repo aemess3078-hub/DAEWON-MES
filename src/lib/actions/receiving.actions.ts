@@ -14,6 +14,7 @@ import { BUSINESS_NUMBER_MAX_ATTEMPTS, isUniqueConstraintError, kstDateParts } f
 import { OUTCOME_UNKNOWN_MESSAGE, isOutcomeUnknownError, toUserErrorMessage } from "@/lib/errors/user-error"
 import { checkReceiptRemaining, validateReceiptQuantities } from "@/lib/receiving-quantity"
 import { safeRevalidate } from "@/lib/revalidate-safe"
+import { allocateReceiptTxNo } from "@/lib/services/receiving-tx-number.service"
 
 export type CreateReceivingInspectionInput = {
   purchaseOrderItemId: string
@@ -55,18 +56,6 @@ export async function generateReceivingLotNo(
 }
 
 const AUTO_LOT_COLLISION = "AUTO_LOT_COLLISION"
-
-async function generateTxNo(tenantId: string): Promise<string> {
-  const { yyyymmdd: ymd } = kstDateParts()
-  const prefix = `RCV-${ymd}-`
-  const last = await prisma.inventoryTransaction.findFirst({
-    where: { tenantId, txNo: { startsWith: prefix } },
-    orderBy: { txNo: "desc" },
-    select: { txNo: true },
-  })
-  const seq = last ? (parseInt(last.txNo.split("-")[2] ?? "0", 10) || 0) + 1 : 1
-  return `${prefix}${String(seq).padStart(4, "0")}`
-}
 
 /**
  * outcome: 실패 시 "FAILED"(롤백이 확실한 업무/검증 오류, 수정 후 재시도 가능) 또는
@@ -208,7 +197,7 @@ async function createReceivingInspectionInternal(
     lotPrefix: purchaseOrderItem.item.lotPrefix,
     manualLotPolicy,
   }
-  // txNo 사전 생성 (트랜잭션 외부 - 기존 패턴 유지)
+  // 입고 수불 거래번호(txNo)는 트랜잭션 안에서 (tenant, 날짜) advisory lock 으로 직렬화해 확보한다 (4-5 단계)
   // ── 4. 트랜잭션 처리 ───────────────────────────────────────────────────────
   // AUTO만 충돌 시 재시도(최대 5회). RESERVED/MANUAL/NONE은 재시도 없이 그대로 확정하거나 실패시킨다.
   //
@@ -219,10 +208,10 @@ async function createReceivingInspectionInternal(
   // 번호를 "소유"할 수 있으므로 Lot 테이블과 예약 테이블 사이의 경합이 사라진다.
   const maxAttempts = qty.accepted > 0 || lotResolutionMode === "AUTO" ? BUSINESS_NUMBER_MAX_ATTEMPTS : 1
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const txNo = qty.accepted > 0 ? await generateTxNo(tenantId) : null
     try {
       await prisma.$transaction(async (tx) => {
         await lockPurchaseOrderItemsForUpdate(tx, tenantId, [data.purchaseOrderItemId])
+        let txNo: string | null = null
         const lockedPurchaseOrderItem = await tx.purchaseOrderItem.findFirst({
           where: {
             id: data.purchaseOrderItemId,
@@ -253,6 +242,15 @@ async function createReceivingInspectionInternal(
           lockedPurchaseOrderItem.item.uom
         )
         if (!lockedRemainingCheck.ok) throw new Error(lockedRemainingCheck.message)
+
+        // 입고 거래번호 확보 — 재고(InventoryBalance) 조회/생성보다 **먼저** 한다.
+        // (tenant, 날짜) advisory lock 이 여기서부터 커밋/롤백까지 유지되므로,
+        //  1) 같은 날짜의 거래번호가 중복되지 않고(최신 번호를 잠금 안에서 재조회),
+        //  2) 같은 테넌트의 입고끼리 "재고 행이 없으면 만든다" 구간이 직렬화되어 비LOT 품목의 최초 재고 행이 둘로 갈라지지 않는다.
+        // 롤백되면 번호도 소모되지 않는다. 합격수량이 0 이면 수불/재고를 건드리지 않으므로 번호도 잠금도 필요 없다.
+        if (qty.accepted > 0) {
+          txNo = await allocateReceiptTxNo(tx, tenantId, { yyyymmdd: kstDateParts().yyyymmdd })
+        }
 
         let consumedReservationId: string | null = null
         let resolvedLotNo: string | null = null
@@ -421,13 +419,15 @@ async function createReceivingInspectionInternal(
       }
 
       // 4-5. InventoryTransaction 생성
+      //      거래번호(txNo)는 위 "재고 반영 이전" 단계에서 이미 확보했다.
+      if (!txNo) throw new Error("입고 거래번호가 확보되지 않았습니다.") // 합격수량 > 0 이면 위에서 항상 확보됨(방어)
       await tx.inventoryTransaction.create({
         data: {
           tenantId,
           itemId: purchaseOrderItem.itemId,
           lotId,
           toLocationId: warehouse.id,
-          txNo: txNo!,
+          txNo,
           txType: "RECEIPT",
           qty: qty.accepted,
           refType: "PURCHASE_ORDER",
