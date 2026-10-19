@@ -25,6 +25,7 @@ import { createReceivingInspection, getWarehousesForSite } from "@/lib/actions/r
 import { ReceivingInspectionResult } from "@prisma/client"
 import type { PurchaseOrderRow } from "./columns"
 import { formatQuantity } from "@/lib/utils"
+import { subtractQuantities } from "@/lib/quantity-scale"
 import {
   applyReceiptToQuantities,
   describeBatchFailure,
@@ -371,7 +372,7 @@ export function ReceivingDialog({
                       const received = parseFloat(ins.thisReceivedQty) || 0
                       updateInspection(index, {
                         thisAcceptedQty: e.target.value,
-                        thisRejectedQty: String(Math.max(0, received - accepted)),
+                        thisRejectedQty: String(Math.max(0, subtractQuantities(received, accepted) ?? 0)),
                       })
                     }}
                     className="h-8 text-[13px]"

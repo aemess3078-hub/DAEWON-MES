@@ -31,6 +31,7 @@ import { ReceivingInspectionResult } from "@prisma/client"
 import type { MaterialReceiptOrderRow } from "./material-receipt-data-table"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
 import { formatQuantity } from "@/lib/utils"
+import { compareQuantities, isQuantityBalanced, subtractQuantities, toScaledQuantity } from "@/lib/quantity-scale"
 import {
   applyReceiptToQuantities,
   describeBatchFailure,
@@ -263,7 +264,14 @@ export function ReceivingFormDialog({
       const received = parseFloat(ins.thisReceivedQty) || 0
       if (received <= 0) continue
 
-      if (received > ins.pendingQty) {
+      const accepted0 = parseFloat(ins.thisAcceptedQty) || 0
+      const rejected0 = parseFloat(ins.thisRejectedQty) || 0
+      if (toScaledQuantity(received) === null || toScaledQuantity(accepted0) === null || toScaledQuantity(rejected0) === null) {
+        alert(`[${ins.itemCode}] ${ins.itemName}\n수량은 숫자이며 소수점 6자리까지만 입력할 수 있습니다.`)
+        return
+      }
+
+      if (compareQuantities(received, ins.pendingQty) === 1) {
         alert(
           `[${ins.itemCode}] ${ins.itemName}\n` +
           `입고수량(${formatQuantity(received)})이 잔여수량(${formatQuantity(ins.pendingQty)} ${ins.uom})을 초과합니다.`
@@ -273,7 +281,7 @@ export function ReceivingFormDialog({
 
       const accepted = parseFloat(ins.thisAcceptedQty) || 0
       const rejected = parseFloat(ins.thisRejectedQty) || 0
-      if (Math.abs(accepted + rejected - received) > 0.001) {
+      if (!isQuantityBalanced(received, accepted, rejected)) {
         alert(
           `[${ins.itemCode}] ${ins.itemName}\n` +
           `합격수량과 불합격수량의 합은 금회 입고수량과 같아야 합니다.`
@@ -627,9 +635,9 @@ export function ReceivingFormDialog({
                       }
                       updateInspection(index, patch)
                     }}
-                    className={`h-8 text-[13px] ${(parseFloat(ins.thisReceivedQty) || 0) > ins.pendingQty ? "border-red-400 focus-visible:ring-red-400" : ""}`}
+                    className={`h-8 text-[13px] ${compareQuantities(parseFloat(ins.thisReceivedQty) || 0, ins.pendingQty) === 1 ? "border-red-400 focus-visible:ring-red-400" : ""}`}
                   />
-                  {(parseFloat(ins.thisReceivedQty) || 0) > ins.pendingQty && (
+                  {compareQuantities(parseFloat(ins.thisReceivedQty) || 0, ins.pendingQty) === 1 && (
                     <p className="text-[12px] text-red-600">
                       잔여수량 {formatQuantity(ins.pendingQty)} {ins.uom} 초과
                     </p>
@@ -647,7 +655,7 @@ export function ReceivingFormDialog({
                       const received = parseFloat(ins.thisReceivedQty) || 0
                       updateInspection(index, {
                         thisAcceptedQty: e.target.value,
-                        thisRejectedQty: String(Math.max(0, received - accepted)),
+                        thisRejectedQty: String(Math.max(0, subtractQuantities(received, accepted) ?? 0)),
                       })
                     }}
                     className="h-8 text-[13px]"
@@ -730,7 +738,7 @@ export function ReceivingFormDialog({
               inspections.some(
                 (ins) =>
                   !isRowLocked(rowStatus[ins.purchaseOrderItemId]) &&
-                  ((parseFloat(ins.thisReceivedQty) || 0) > ins.pendingQty ||
+                  (compareQuantities(parseFloat(ins.thisReceivedQty) || 0, ins.pendingQty) === 1 ||
                     ((parseFloat(ins.thisReceivedQty) || 0) > 0 && !ins.warehouseId)),
               )
             }

@@ -12,7 +12,8 @@
  * 서버 입고 트랜잭션과 재고 계산은 변경하지 않는다. 이 모듈은 순수 함수만 가진다(React/DB 의존 없음).
  */
 
-import { toUserErrorMessage } from "@/lib/errors/user-error"
+import { OUTCOME_UNKNOWN_MESSAGE, toUserErrorMessage } from "@/lib/errors/user-error"
+import { addQuantities, subtractQuantities } from "@/lib/quantity-scale"
 
 export type RowReceiptStatus =
   | { state: "done" }
@@ -34,8 +35,11 @@ export function applyReceiptToQuantities(
   row: { orderedQty: number; receivedQty: number },
   acceptedQty: number
 ): { receivedQty: number; pendingQty: number } {
-  const receivedQty = row.receivedQty + (Number.isFinite(acceptedQty) && acceptedQty > 0 ? acceptedQty : 0)
-  return { receivedQty, pendingQty: Math.max(0, row.orderedQty - receivedQty) }
+  // 소수점 6자리 정수로 정확히 계산한다 (0.1 + 0.2 같은 부동소수점 오차가 화면 수량에 섞이지 않도록)
+  const add = Number.isFinite(acceptedQty) && acceptedQty > 0 ? acceptedQty : 0
+  const receivedQty = addQuantities(row.receivedQty, add) ?? row.receivedQty
+  const pending = subtractQuantities(row.orderedQty, receivedQty)
+  return { receivedQty, pendingQty: pending === null ? 0 : Math.max(0, pending) }
 }
 
 export type BatchRow = { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number }
@@ -59,7 +63,7 @@ export type BatchOutcome = {
 export async function runReceivingBatch(
   rows: BatchRow[],
   prev: RowStatusMap,
-  submit: (row: BatchRow) => Promise<{ success: boolean; message?: string }>
+  submit: (row: BatchRow) => Promise<{ success: boolean; message?: string; outcome?: "FAILED" | "UNKNOWN" }>
 ): Promise<BatchOutcome> {
   const statuses: RowStatusMap = { ...prev }
   const newlyDone: string[] = []
@@ -73,6 +77,11 @@ export async function runReceivingBatch(
       if (result.success) {
         statuses[row.purchaseOrderItemId] = { state: "done" }
         newlyDone.push(row.purchaseOrderItemId)
+      } else if (result.outcome === "UNKNOWN") {
+        // 서버가 "DB 반영 여부를 알 수 없음"으로 응답 — 성공/실패로 단정하지 않고 재전송을 막는다
+        statuses[row.purchaseOrderItemId] = { state: "unknown", message: result.message ?? OUTCOME_UNKNOWN_MESSAGE }
+        stoppedAt = row.purchaseOrderItemId
+        break
       } else {
         statuses[row.purchaseOrderItemId] = {
           state: "failed",

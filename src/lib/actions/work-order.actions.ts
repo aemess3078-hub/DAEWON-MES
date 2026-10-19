@@ -5,6 +5,7 @@ import { getTenantId, requireRole } from "@/lib/auth"
 import { generateCnsManufacturingNo } from "@/lib/lot-numbering/lot-number-generator"
 import type { CnsItemRuleContext } from "@/lib/lot-numbering/lot-rule-resolver"
 import { failureResult, UserFacingError, type ActionResult } from "@/lib/errors/user-error"
+import { safeRevalidate } from "@/lib/revalidate-safe"
 import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
 import { decideManufacturingNo } from "@/lib/lot-numbering/manufacturing-no-policy"
 import { WorkOrderStatus, OperationStatus, Prisma } from "@prisma/client"
@@ -1003,8 +1004,8 @@ export async function createWorkOrder(data: CreateWorkOrderInput, tenantId: stri
       throw error
     }
 
-    revalidatePath("/app/mes/work-orders")
-    revalidatePath("/app/mes/production-plan")
+    // 커밋 이후 캐시 재검증 오류가 등록 결과를 실패로 뒤집어 중복 등록을 유발하지 않도록 분리
+    safeRevalidate(revalidatePath, ["/app/mes/work-orders", "/app/mes/production-plan"], "createWorkOrder")
     return { success: true }
   } catch (error) {
     return failureResult("createWorkOrder", error, { duplicateMessage: "작업지시번호 또는 제조번호가 중복되었습니다. 다시 시도해 주세요." })

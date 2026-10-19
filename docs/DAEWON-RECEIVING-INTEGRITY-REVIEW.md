@@ -39,7 +39,7 @@
 1. **불합격 누적 집계가 없다.** 불합격수량은 입고검사 이력 행에만 남고 발주 품목에는 합계가 없다. 전량 불합격이면 발주 상태가 바뀌지 않는다(대체 납품 전제). 불합격 총량 제한이 필요하면 정책 결정이 필요하다.
 2. **서버 잔량 검증은 `금회 입고수량(합격+불합격)` 기준**인데 잔여는 합격 기준이다. 잔여 50 에 입고 60(합격 40·불합격 20)은 합격분이 잔여 이내여도 거절된다(보수적).
 3. `result`(합격/불합격/조건부)와 합격수량의 일관성은 서버가 검증하지 않는다 (예: 판정=불합격인데 합격수량>0 이면 재고가 증가).
-4. 합격+불합격 ≈ 입고수량 검증의 허용오차(0.001)만큼 수량이 어긋날 수 있다.
+4. ~~합격+불합격 ≈ 입고수량 검증의 허용오차(0.001)~~ → **수정됨(§7)**: 소수점 6자리 정수로 정확히 비교한다(입고 100 · 합격 100.0005 는 거부, 0.3-0.1 잔량에 0.2 입고는 허용).
 5. `inspectorId` 는 클라이언트 값이다(FK 만 존재 검증).
 
 ### 이번에 발견·수정한 추가 결함
@@ -121,3 +121,46 @@
 - 실제 PostgreSQL 에서 동시성(행 잠금, 최초 재고행 생성 경합, `$executeRaw` advisory lock)을 실행하지 못했다.
 - 운영 DB 의 인덱스 상태(§2)는 확인하지 못했다.
 - 브라우저 렌더링은 확인하지 못했다.
+
+---
+
+## 7. 후속 수정: 수량 정밀도 · 커밋 이후 오류 · 결과 불명 (이번 커밋)
+
+| 항목 | 이전 | 수정 |
+|---|---|---|
+| 수량 정밀도 | 합격+불합격 ≈ 입고수량에 **0.001 허용오차** → 입고 100 · 합격 100.0005 · 불합격 0 통과. 화면은 `received - accepted` 등 float 연산 (0.3-0.1 = 0.19999999999999998) | `src/lib/quantity-scale.ts`(Decimal(18,6) 정책, 소수점 6자리 정수 환산, 기존 자재출고 헬퍼를 공통화)와 `src/lib/receiving-quantity.ts`. 서버 사전 검증과 **트랜잭션 내부 재검증이 같은 함수**를 사용. NaN/Infinity/음수/6자리 초과 거부, 합계 정확 비교, 잔량 정확 비교, 쓰기에는 6자리로 정규화한 값 사용. 화면(불합격 자동계산·초과 판정·합계 검증·기입고/잔여 갱신)도 같은 정확 연산 |
+| 커밋 이후 오류 | 입고 트랜잭션 커밋 후 `revalidatePath` 가 throw 하면 바깥 catch 가 "실패" 반환 → 사용자가 재시도하면 중복 입고 | `safeRevalidate`: 후처리 오류는 서버 로그(`post-commit revalidate failed`)에만 남기고 **성공 반환**. 입고·발주 등록·작업지시 등록·자재출고에 적용 |
+| 커밋 결과 불명 | DB 연결/응답 오류도 "실패(재시도 가능)"로 안내 | 연결·타임아웃·트랜잭션 통신 오류(`P1001/P1002/P1008/P1017/P2024/P2028`, 연결 끊김 등)는 `outcome: "UNKNOWN"` + 확인 요청 메시지. **성공으로 단정하지 않고, 화면은 해당 품목을 잠가 자동 재전송을 막는다.** 롤백이 확실한 업무/제약 오류는 기존대로 실패(재시도 가능) |
+
+한계: "결과 불명"은 사용자에게 알리고 재전송을 막을 뿐, 서버가 실제 반영 여부를 판정하지는 못한다(§3 멱등 키가 필요).
+
+## 8. 스키마 변경이 필요한 보완안 (설계만 — 적용하지 않음, 승인 필요)
+
+### 8-1. 서버 멱등 키 (`ReceivingInspection.requestId`)
+```sql
+-- 초안 (migration 으로 만들 경우; 지금은 실행하지 않는다)
+ALTER TABLE "ReceivingInspection" ADD COLUMN "requestId" TEXT;
+CREATE UNIQUE INDEX "ReceivingInspection_purchaseOrderItemId_requestId_key"
+  ON "ReceivingInspection" ("purchaseOrderItemId", "requestId");   -- NULL 은 여러 건 허용(기존 행 영향 없음)
+```
+- 코드: 다이얼로그가 (열림 × 품목) 별 UUID 를 만들어 재시도에도 동일하게 전송 → 서버는 발주 품목 행 잠금 후 같은 키가 있으면 재처리 없이 성공 반환. `schema.prisma` 에 `requestId String?` + `@@unique([purchaseOrderItemId, requestId])` 추가.
+- 운영 영향: nullable 컬럼 추가 + 인덱스 생성(테이블이 작아 짧은 잠금). 기존 코드/데이터와 호환, 롤백은 인덱스·컬럼 DROP. **기존 서버 코드를 먼저 배포해도 안전(키 미전송 = NULL).**
+- 해소되는 위험: 응답 유실 후 재전송, 이중 클릭/이중 탭. 해소되지 않는 것: 새 창에서 같은 수량을 의도적으로 다시 입력.
+
+### 8-2. 비LOT 재고 행 유일성 (`InventoryBalance`, `lotId IS NULL`)
+```sql
+-- 0) 사전 점검(중복이 있으면 인덱스 생성이 실패한다) — 읽기 전용
+SELECT "tenantId","itemId","warehouseId", count(*) FROM "InventoryBalance"
+ WHERE "lotId" IS NULL GROUP BY 1,2,3 HAVING count(*) > 1;
+-- 1) 중복이 없을 때만
+CREATE UNIQUE INDEX IF NOT EXISTS "InventoryBalance_tenantId_itemId_warehouseId_null_lot_key"
+  ON "InventoryBalance" ("tenantId","itemId","warehouseId") WHERE "lotId" IS NULL;
+```
+- 코드: 인덱스가 생기면 최초 생성 경합이 `P2002` 로 실패하므로, 입고/완제품입고의 `inventoryBalance.create` 를 "P2002 이면 다시 조회 후 increment" 로 바꿔야 한다(그렇지 않으면 사용자에게 중복 오류로 보임).
+- 중복이 이미 있으면: 수량 합산 병합 절차(트랜잭션, 수불 이력 보존)를 별도 승인 후 수행해야 한다. 인덱스 생성 전 반드시 중복 0 확인.
+- 운영 영향: 인덱스 생성 중 `InventoryBalance` 쓰기가 잠깐 대기. baseline 에 빠진 `TenantUser` partial unique 2건도 같은 방식으로 복구 검토.
+- 이 두 변경은 서로 독립이며 이번 PR 에는 포함하지 않았다(`prisma/migrations` 변경 없음).
+
+## 9. 테스트 DB 현황 재확인 (이번 작업)
+- Docker 없음. 로컬/WSL(Ubuntu 26.04) 모두 PostgreSQL 미설치. WSL 일반 사용자(`aemess`)는 `sudo` 에 비밀번호가 필요해 **자동 설치 불가** — 사용자가 직접 설치해야 한다.
+- 따라서 실제 DB 검증(발주→입고→LOT→작업지시→출고→투입이력, 동시 입고, 중복 요청)은 **수행하지 못했다(미검증)**.

@@ -10,6 +10,7 @@ import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numb
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
 import { allocatePurchaseOrderNumbers } from "@/lib/services/purchase-order-number.service"
 import { failureResult, type ActionResult } from "@/lib/errors/user-error"
+import { safeRevalidate } from "@/lib/revalidate-safe"
 import {
   closePurchaseOrderRemainder as closePurchaseOrderRemainderCore,
   type PurchaseOrderCloseResult,
@@ -275,7 +276,8 @@ export async function createPurchaseOrder(
     })
     }, { fields: ["tenantId", "orderNo"], message: "발주번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요." })
 
-    revalidatePath("/app/mes/purchase-orders")
+    // 커밋 이후 캐시 재검증 오류가 등록 결과를 실패로 뒤집어 중복 등록을 유발하지 않도록 분리
+    safeRevalidate(revalidatePath, ["/app/mes/purchase-orders"], "createPurchaseOrder")
     return { success: true }
   } catch (error) {
     return failureResult("createPurchaseOrder", error, { duplicateMessage: "발주번호가 중복되었습니다. 다시 시도해 주세요." })

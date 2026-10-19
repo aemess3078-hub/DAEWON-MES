@@ -48,6 +48,10 @@ const receivingBatchModule = require("../src/lib/receiving-batch") as typeof imp
 const userErrorModule = require("../src/lib/errors/user-error") as typeof import("../src/lib/errors/user-error")
 const policyModule = require("../src/lib/lot-numbering/manufacturing-no-policy") as typeof import("../src/lib/lot-numbering/manufacturing-no-policy")
 
+const quantityModule = require("../src/lib/quantity-scale") as typeof import("../src/lib/quantity-scale")
+const receivingQuantityModule = require("../src/lib/receiving-quantity") as typeof import("../src/lib/receiving-quantity")
+const revalidateModule = require("../src/lib/revalidate-safe") as typeof import("../src/lib/revalidate-safe")
+
 let passed = 0
 function ok(value: unknown, label: string) {
   assert.ok(value, label)
@@ -510,7 +514,7 @@ async function testReceivingBatch() {
     ok(!/error instanceof Error \? error\.message/.test(src), `F7 ${label}: 예외 메시지 원문을 그대로 alert 하지 않음`)
   }
   const server = read("src", "lib", "actions", "receiving.actions.ts")
-  ok(/data\.receivedQty > lockedRemainingQty/.test(server) && /lockPurchaseOrderItemsForUpdate/.test(server), "F8 서버 입고 트랜잭션의 행 잠금 + 잔량 재검증은 변경되지 않음")
+  ok(/lockPurchaseOrderItemsForUpdate/.test(server) && /lockedRemainingCheck/.test(server), "F8 서버 입고 트랜잭션의 행 잠금 + 잔량 재검증은 유지됨(정확 비교로 교체)")
 }
 
 // ─── G. 제조번호 수동 입력 정책 조합 ───────────────────────────────────────────────
@@ -570,7 +574,7 @@ function testManufacturingPolicy() {
 
 function testReceivingHardening() {
   const server = read("src", "lib", "actions", "receiving.actions.ts")
-  ok(/Number\.isFinite\(data\.receivedQty\)[\s\S]*Number\.isFinite\(data\.acceptedQty\)[\s\S]*Number\.isFinite\(data\.rejectedQty\)/.test(server), "H1 서버: 수량이 유한한 숫자인지 검증(NaN/Infinity 차단)")
+  ok(/validateReceiptQuantities\(data\)/.test(server), "H1 서버: 수량 검증(NaN/Infinity/음수/6자리 초과 차단)을 공통 정책 함수로 수행")
   ok(/purchaseOrderItem\.purchaseOrderId !== data\.purchaseOrderId/.test(server), "H2 서버: 클라이언트가 보낸 purchaseOrderId 가 발주 품목의 실제 발주와 같은지 검증")
   const idxCheck = server.indexOf("purchaseOrderItem.purchaseOrderId !== data.purchaseOrderId")
   const idxTx = server.indexOf("prisma.$transaction")
@@ -582,7 +586,7 @@ function testReceivingHardening() {
   const schema = read("prisma", "schema.prisma")
   const model = schema.match(/model ReceivingInspection \{[\s\S]*?\n\}/)?.[0] ?? ""
   ok(model.length > 0 && !/@@unique/.test(model) && !/requestId|idempotenc/i.test(model), "H3 현황 기록: 서버 입고는 멱등 키가 없다(중복 방지는 클라이언트 + 잔량 검증 수준)")
-  ok(/lockPurchaseOrderItemsForUpdate\(tx, tenantId, \[data\.purchaseOrderItemId\]\)/.test(server) && /lockedRemainingQty/.test(server), "H4 서버: 같은 발주 품목 동시 입고는 행 잠금 후 잔량을 재검증")
+  ok(/lockPurchaseOrderItemsForUpdate\(tx, tenantId, \[data\.purchaseOrderItemId\]\)/.test(server) && /lockedRemainingCheck/.test(server), "H4 서버: 같은 발주 품목 동시 입고는 행 잠금 후 잔량을 재검증")
   const table = read("src", "app", "app", "mes", "material-receipt", "material-receipt-data-table.tsx")
   ok(/<ReceivingFormDialog\s+key=\{receivingOrder\.id\}/.test(table), "H5 입고 창: 발주가 바뀌면 상태가 남지 않도록 key 로 재마운트")
   for (const p of [
@@ -590,6 +594,154 @@ function testReceivingHardening() {
     ["src", "app", "app", "mes", "purchase-orders", "receiving-dialog.tsx"],
   ]) {
     ok(/outcome\.newlyDone\.length > 0 \|\| outcome\.stoppedAt\) router\.refresh\(\)/.test(read(...p)), `H6 ${p[p.length - 2]}: 실패/결과 불명으로 중단돼도 서버의 최신 수량을 다시 읽음`)
+  }
+}
+
+// ─── I. 수량 정밀도 · 커밋 이후 오류 · 결과 불명 처리 ────────────────────────────
+
+async function testQuantityPrecisionAndPostCommit() {
+  const q = quantityModule
+  const rq = receivingQuantityModule
+  const { safeRevalidate } = revalidateModule
+  const { isOutcomeUnknownError, OUTCOME_UNKNOWN_MESSAGE } = userErrorModule
+
+  // I1. 기본 환산
+  eq(q.toScaledQuantity(0.3 - 0.1), BigInt(200000), "I1 0.3-0.1(0.19999999999999998) 은 0.2 로 환산")
+  eq(q.toScaledQuantity(100.0005), BigInt(100000500), "I1 100.0005 는 소수점 4자리 값으로 환산")
+  eq(q.toScaledQuantity("0.200000"), BigInt(200000), "I1 문자열/Decimal 문자열 환산")
+  eq(q.toScaledQuantity({ toString: () => "12.5" }), BigInt(12500000), "I1 Decimal 유사 객체 환산")
+  for (const bad of [NaN, Infinity, -Infinity, 1.0000001, "1.0000001", "abc", "", null, undefined, "1e-7"]) {
+    eq(q.toScaledQuantity(bad as unknown), null, `I1 잘못된 수량 거부: ${String(bad)}`)
+  }
+  eq(q.subtractQuantities(0.3, 0.1), 0.2, "I1 정확한 뺄셈 0.3-0.1 = 0.2 (float 은 0.19999999999999998)")
+  eq(q.addQuantities(0.1, 0.2), 0.3, "I1 정확한 덧셈 0.1+0.2 = 0.3 (float 은 0.30000000000000004)")
+  ok(0.3 - 0.1 !== 0.2 && 0.1 + 0.2 !== 0.3, "I1 근거: JS float 연산은 실제로 어긋난다")
+  eq(q.formatScaledQuantity(BigInt(200000)), "0.2", "I1 표시용 문자열은 float 없이 0.2")
+  eq(q.formatScaledQuantity(BigInt(-1500000)), "-1.5", "I1 음수 표시")
+
+  // I2. 입고 수량 검증 (요청서 시나리오)
+  const V = (r: unknown, a: unknown, j: unknown) => rq.validateReceiptQuantities({ receivedQty: r, acceptedQty: a, rejectedQty: j })
+  ok(!V(100, 100.0005, 0).ok, "I2 입고 100 · 합격 100.0005 · 불합격 0 → 거부")
+  const over = V(100, 100.0005, 0)
+  ok(!over.ok && over.message.includes("합"), "I2 합계 불일치 안내")
+  ok(V(100, 100, 0).ok, "I2 입고 100 · 합격 100 → 허용")
+  ok(V(100, 99.9995, 0.0005).ok, "I2 합격 99.9995 + 불합격 0.0005 = 100 → 허용(소수 4자리, 정확 비교)")
+  ok(V(0.3 - 0.1, 0.2, 0).ok, "I2 입고수량 0.3-0.1(0.19999999999999998) · 합격 0.2 → 허용")
+  const r2 = V(0.3 - 0.1, 0.1, 0.1)
+  ok(r2.ok && r2.value.received === 0.2 && r2.value.accepted === 0.1, "I2 입고 0.2 = 합격 0.1 + 불합격 0.1 → 허용, 값은 6자리로 정규화")
+  ok(V(0.1 + 0.2, 0.3, 0).ok, "I2 입고 0.30000000000000004 · 합격 0.3 → 허용")
+  for (const [label, args] of [
+    ["NaN 입고", [NaN, 1, 0]], ["Infinity 입고", [Infinity, 1, 0]], ["NaN 합격", [1, NaN, 0]], ["Infinity 불합격", [1, 1, Infinity]],
+    ["입고 0", [0, 0, 0]], ["입고 음수", [-1, -1, 0]], ["합격 음수", [1, -1, 2]], ["불합격 음수", [1, 2, -1]],
+    ["6자리 초과", [1.0000001, 1.0000001, 0]], ["합계 부족", [10, 4, 5]], ["합계 초과", [10, 6, 5]],
+  ] as const) {
+    ok(!V(args[0], args[1], args[2]).ok, `I2 거부: ${label}`)
+  }
+
+  // I3. 잔량 검증 (서버 사전 검증 + 트랜잭션 내부가 같은 함수)
+  const rem = (received: number, ordered: string, already: string) => {
+    const v = V(received, received, 0)
+    if (!v.ok) throw new Error("setup")
+    return rq.checkReceiptRemaining(v.value.receivedScaled, ordered, already, "EA")
+  }
+  ok(rem(0.3 - 0.1, "100", "99.8").ok, "I3 잔량 0.2 에 0.3-0.1 입고 → 허용(부동소수점 오차로 거부되지 않음)")
+  ok(rem(0.2, "100", "99.8").ok && rem(0.2, "100.000000", "99.800000").ok, "I3 Decimal 문자열 6자리 표기도 동일")
+  const tooMuch = rem(0.200001, "100", "99.8")
+  ok(!tooMuch.ok && tooMuch.message.includes("잔여수량: 0.2 EA"), "I3 0.200001 은 잔량 초과로 거부, 잔여수량은 0.2 로 표시")
+  ok(rem(100, "100", "0").ok && !rem(100.000001, "100", "0").ok, "I3 경계: 정확히 잔량까지 허용, 1e-6 초과는 거부")
+  ok(!rq.checkReceiptRemaining(BigInt(1), "abc", "0", "EA").ok, "I3 발주 수량 데이터 이상 시 거부")
+
+  // I4. 소스 구조: 사전 검증과 트랜잭션 내부가 같은 정책을 사용
+  const server = read("src", "lib", "actions", "receiving.actions.ts")
+  ok((server.match(/checkReceiptRemaining\(/g) || []).length === 2 && /validateReceiptQuantities\(data\)/.test(server), "I4 서버: 사전 검증 + 트랜잭션 내부 재검증이 같은 정책 함수 사용")
+  ok(!/Math\.abs\(data\.acceptedQty/.test(server) && !/> 0\.001/.test(server) && !/toLocaleString\("ko-KR"\)/.test(server), "I4 서버: 허용오차(0.001)·float 표시 제거")
+  ok(!/data\.(received|accepted|rejected)Qty/.test(server.replace(/validateReceiptQuantities\(data\)/g, "")) , "I4 서버: 쓰기에는 정규화된 qty.* 만 사용")
+  for (const p of [
+    ["src", "app", "app", "mes", "material-receipt", "receiving-form-dialog.tsx"],
+    ["src", "app", "app", "mes", "purchase-orders", "receiving-dialog.tsx"],
+  ]) {
+    const src = read(...p)
+    ok(/subtractQuantities\(received, accepted\)/.test(src) && !/Math\.max\(0, received - accepted\)/.test(src), `I4 ${p[p.length - 2]}: 불합격수량 계산에 float 뺄셈을 쓰지 않음`)
+  }
+  const mr = read("src", "app", "app", "mes", "material-receipt", "receiving-form-dialog.tsx")
+  ok(/isQuantityBalanced\(received, accepted, rejected\)/.test(mr) && !/> 0\.001/.test(mr), "I4 자재입고 화면: 합격+불합격 정합성을 정확 비교(허용오차 제거)")
+  const view = receivingBatchModule.applyReceiptToQuantities({ orderedQty: 1, receivedQty: 0.1 }, 0.2)
+  eq([view.receivedQty, view.pendingQty], [0.3, 0.7], "I4 화면 기입고/잔여 갱신이 소수점 오차 없이 계산됨")
+
+  // I5. DB 커밋 이후 후처리 오류 — 입고 결과를 뒤집지 않는다 (모델)
+  class Store { received = 0; commits = 0 }
+  /** 서버 액션 모델: 커밋 → 후처리(revalidate). guarded=true 이면 safeRevalidate (수정 후), false 이면 후처리 오류가 그대로 던져짐 (수정 전) */
+  async function receiveModel(store: Store, qty: number, revalidate: (p: string) => void, guarded: boolean) {
+    try {
+      store.received += qty // 트랜잭션 커밋 (되돌릴 수 없음)
+      store.commits += 1
+      if (guarded) safeRevalidate(revalidate, ["/a", "/b"], "test")
+      else for (const p of ["/a", "/b"]) revalidate(p)
+      return { success: true as const }
+    } catch {
+      return { success: false as const }
+    }
+  }
+  const failing = () => { throw new Error("Invariant: static generation store missing") }
+  const origErr = console.error
+  const logged: unknown[][] = []
+  console.error = (...a: unknown[]) => { logged.push(a) }
+  try {
+    const before = new Store()
+    const naive = await receiveModel(before, 40, failing, false)
+    eq([naive.success, before.received], [false, 40], "I5 대조군(수정 전): 커밋은 됐는데 실패로 안내 → 사용자가 재시도하면 중복 입고 가능")
+    const after = new Store()
+    const fixed = await receiveModel(after, 40, failing, true)
+    eq([fixed.success, after.received, after.commits], [true, 40, 1], "I5 수정 후: 후처리 오류에도 성공 반환, 입고는 1회만 반영")
+    ok(logged.length === 2 && logged.every((a) => String(a[0]).includes("post-commit revalidate failed")), "I5 후처리 오류는 경로별로 서버 로그에 기록")
+    const failedPaths = safeRevalidate(failing, ["/x", "/y"], "t")
+    eq(failedPaths, ["/x", "/y"], "I5 실패한 경로 목록 반환, 모든 경로를 시도(첫 오류에서 중단하지 않음)")
+  } finally {
+    console.error = origErr
+  }
+  ok(/safeRevalidate\(\s*revalidatePath,/.test(server) && !/^\s*revalidatePath\(/m.test(server), "I5 서버(입고): revalidatePath 직접 호출 없음 — safeRevalidate 로만 후처리")
+  const afterBreak = server.slice(server.indexOf("      break\n") >= 0 ? server.indexOf("      break\n") : server.indexOf("      break\r\n"))
+  ok(afterBreak.includes("safeRevalidate(") && afterBreak.indexOf("safeRevalidate(") > 0, "I5 서버(입고): 후처리는 트랜잭션 성공(break) 이후에만 실행")
+  for (const [label, p, name] of [
+    ["발주 등록", ["src", "lib", "actions", "purchase-order.actions.ts"], "createPurchaseOrder"],
+    ["작업지시 등록", ["src", "lib", "actions", "work-order.actions.ts"], "createWorkOrder"],
+    ["자재출고", ["src", "lib", "actions", "material-issue.actions.ts"], "issueMaterialsForWorkOrder"],
+  ] as const) {
+    const src = read(...p)
+    ok(new RegExp(`safeRevalidate\\([\\s\\S]{0,400}"${name}"`).test(src), `I5 ${label}: 커밋 이후 재검증 오류를 분리(safeRevalidate)`)
+  }
+
+  // I6. 커밋 결과 불명 — 성공으로 단정하지 않고 재전송을 막는다
+  const mk = (name: string, code?: string) => Object.assign(new Error("x"), { name, ...(code ? { code } : {}) })
+  for (const e of [mk("PrismaClientInitializationError"), mk("PrismaClientUnknownRequestError"), mk("PrismaClientKnownRequestError", "P1001"), mk("PrismaClientKnownRequestError", "P2028"), new Error("Server has closed the connection."), new Error("read ECONNRESET")]) {
+    ok(isOutcomeUnknownError(e), `I6 결과 불명으로 분류: ${e.name}/${(e as { code?: string }).code ?? e.message.slice(0, 24)}`)
+  }
+  for (const e of [mk("PrismaClientKnownRequestError", "P2002"), mk("PrismaClientKnownRequestError", "P2034"), new Error("입고수량은 잔여수량을 초과할 수 없습니다."), new Error("FORBIDDEN")]) {
+    ok(!isOutcomeUnknownError(e), `I6 롤백이 확실한 오류는 불명 아님: ${(e as { code?: string }).code ?? e.message.slice(0, 16)}`)
+  }
+  ok(/isOutcomeUnknownError\(error\)[\s\S]{0,120}outcome: "UNKNOWN"/.test(server), "I6 서버(입고): 결과 불명 오류를 outcome=UNKNOWN 으로 반환")
+  ok(/isOutcomeUnknownError\(e\)\) return \{ ok: false, error: OUTCOME_UNKNOWN_MESSAGE \}/.test(read("src", "lib", "actions", "material-issue.actions.ts")), "I6 서버(출고): 결과 불명 시 확인 요청 메시지")
+  {
+    const srv = new FakeReceivingServer({ A: { ordered: 100 }, B: { ordered: 50 } })
+    const rows2 = [
+      { purchaseOrderItemId: "A", receivedInput: 40, acceptedInput: 40 },
+      { purchaseOrderItemId: "B", receivedInput: 10, acceptedInput: 10 },
+    ]
+    let first = true
+    const submit = async (r: { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number }) => {
+      if (r.purchaseOrderItemId === "A" && first) {
+        first = false
+        // 서버는 커밋했지만 응답이 "결과 불명"으로 돌아온 상황
+        await srv.receive("A", r.receivedInput, r.acceptedInput)
+        return { success: false, outcome: "UNKNOWN" as const, message: OUTCOME_UNKNOWN_MESSAGE }
+      }
+      return srv.receive(r.purchaseOrderItemId, r.receivedInput, r.acceptedInput)
+    }
+    const o1 = await receivingBatchModule.runReceivingBatch(rows2, {}, submit)
+    eq(o1.statuses.A?.state, "unknown", "I6 outcome=UNKNOWN 응답은 실패가 아니라 결과 불명으로 기록")
+    const o2 = await receivingBatchModule.runReceivingBatch(rows2, o1.statuses, submit)
+    eq(srv.items.get("A")!.received, 40, "I6 결과 불명 품목은 재시도해도 다시 전송되지 않아 중복 입고 없음")
+    eq(o2.allDone, false, "I6 결과 불명이 남아 있으면 성공으로 단정하지 않음")
   }
 }
 
@@ -602,6 +754,7 @@ async function main() {
   await testReceivingBatch()
   testManufacturingPolicy()
   testReceivingHardening()
+  await testQuantityPrecisionAndPostCommit()
   console.log(`\nAll ${passed} assertions passed`)
 }
 

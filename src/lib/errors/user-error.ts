@@ -164,3 +164,25 @@ export function failureResult(scope: string, error: unknown, options: UserErrorO
   console.error(`[${scope}] error:`, error)
   return { success: false, message: toUserErrorMessage(error, options) }
 }
+
+export const OUTCOME_UNKNOWN_MESSAGE =
+  "처리 결과를 확인하지 못했습니다. 데이터베이스 응답이 확인되지 않아 실제로 처리되었는지 알 수 없습니다. 중복 처리를 막기 위해 자동으로 다시 시도하지 않습니다. 목록에서 처리 내역을 확인한 뒤 필요하면 다시 진행해 주세요."
+
+/** 연결/타임아웃/트랜잭션 통신 오류처럼 "DB 에 반영되었는지 알 수 없는" 오류인가 (롤백이 확실한 업무·제약 오류는 false) */
+const UNKNOWN_OUTCOME_PRISMA_CODES = new Set(["P1001", "P1002", "P1008", "P1017", "P2024", "P2028"])
+const UNKNOWN_OUTCOME_NAMES = new Set([
+  "PrismaClientInitializationError",
+  "PrismaClientUnknownRequestError",
+  "PrismaClientRustPanicError",
+])
+
+export function isOutcomeUnknownError(error: unknown): boolean {
+  const name = errorName(error)
+  if (UNKNOWN_OUTCOME_NAMES.has(name)) return true
+  const code = errorCode(error)
+  if (code && UNKNOWN_OUTCOME_PRISMA_CODES.has(code)) return true
+  const message = error instanceof Error ? error.message : ""
+  return /\b(ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE)\b|connection (terminated|closed|reset)|server has closed the connection|Transaction already closed|Can't reach database/i.test(
+    message
+  )
+}
