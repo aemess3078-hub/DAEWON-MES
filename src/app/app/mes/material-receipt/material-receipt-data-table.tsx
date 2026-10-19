@@ -218,6 +218,7 @@ export function MaterialReceiptDataTable({
       {/* ReceivingFormDialog */}
       {receivingOrder && (
         <ReceivingFormDialog
+          key={receivingOrder.id}
           purchaseOrder={receivingOrder}
           tenantId={tenantId}
           siteId={siteId}

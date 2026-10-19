@@ -47,6 +47,7 @@
     "test:mrp-run-history-ui": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-mrp-run-history-ui.tsx",
     "test:ncwatch-phase12": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-ncwatch-phase12.ts",
     "ncwatch:ops": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/ncwatch-ops.ts",
+    "test:daewon-stabilization-phase1": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-daewon-stabilization-phase1.ts",
     "test:monitor-latest-snapshot": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-monitor-latest-snapshot.ts",
     "test:master-migration": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-master-migration.ts",
     "master:analyze": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/master-migration.ts analyze",

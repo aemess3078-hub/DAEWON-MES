@@ -9,6 +9,8 @@ import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/au
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
 import { allocatePurchaseOrderNumbers } from "@/lib/services/purchase-order-number.service"
+import { failureResult, type ActionResult } from "@/lib/errors/user-error"
+import { safeRevalidate } from "@/lib/revalidate-safe"
 import {
   closePurchaseOrderRemainder as closePurchaseOrderRemainderCore,
   type PurchaseOrderCloseResult,
@@ -216,64 +218,70 @@ export async function createPurchaseOrder(
   tenantId: string,
   siteId: string,
   data: CreatePurchaseOrderInput
-) {
-  await requireResourcePermission("PURCHASE_ORDER", "CREATE")
-  const actor = await requireRole("OPERATOR")
-  if (actor.tenantId !== tenantId) throw new Error("FORBIDDEN")
-  const itemsWithStock = await Promise.all(
-    data.items.map(async (item) => {
-      const stock = await getItemCurrentStock(item.itemId, tenantId)
-      return { ...item, stockAtOrder: stock.qtyOnHand }
-    })
-  )
+): Promise<ActionResult> {
+  try {
+    await requireResourcePermission("PURCHASE_ORDER", "CREATE")
+    const actor = await requireRole("OPERATOR")
+    if (actor.tenantId !== tenantId) throw new Error("FORBIDDEN")
+    const itemsWithStock = await Promise.all(
+      data.items.map(async (item) => {
+        const stock = await getItemCurrentStock(item.itemId, tenantId)
+        return { ...item, stockAtOrder: stock.qtyOnHand }
+      })
+    )
 
-  await withUniqueBusinessNumberRetry(async () => {
-    await prisma.$transaction(async (tx) => {
-    // 번호 확보와 생성을 같은 트랜잭션에서 수행한다(채번 잠금이 생성까지 유지된다)
-    const [orderNo] = await allocatePurchaseOrderNumbers(tx, tenantId, 1, { year: kstDateParts().year })
-    const created = await tx.purchaseOrder.create({
-      data: {
-        tenantId,
-        siteId,
-        supplierId: data.supplierId,
-        orderNo,
-        orderDate: data.orderDate,
-        expectedDate: data.expectedDate,
-        status: data.status,
-        totalAmount: data.totalAmount,
-        currency: data.currency ?? "KRW",
-        note: data.note,
-        items: {
-          create: itemsWithStock.map((item) => ({
-            itemId: item.itemId,
-            qty: item.qty,
-            unitPrice: item.unitPrice,
-            stockAtOrder: item.stockAtOrder,
-            note: item.note,
-          })),
+    await withUniqueBusinessNumberRetry(async () => {
+      await prisma.$transaction(async (tx) => {
+      // 번호 확보와 생성을 같은 트랜잭션에서 수행한다(채번 잠금이 생성까지 유지된다)
+      const [orderNo] = await allocatePurchaseOrderNumbers(tx, tenantId, 1, { year: kstDateParts().year })
+      const created = await tx.purchaseOrder.create({
+        data: {
+          tenantId,
+          siteId,
+          supplierId: data.supplierId,
+          orderNo,
+          orderDate: data.orderDate,
+          expectedDate: data.expectedDate,
+          status: data.status,
+          totalAmount: data.totalAmount,
+          currency: data.currency ?? "KRW",
+          note: data.note,
+          items: {
+            create: itemsWithStock.map((item) => ({
+              itemId: item.itemId,
+              qty: item.qty,
+              unitPrice: item.unitPrice,
+              stockAtOrder: item.stockAtOrder,
+              note: item.note,
+            })),
+          },
         },
-      },
+      })
+      await recordAuditLog(tx, {
+        tenantId,
+        actor,
+        entityType: "PurchaseOrder",
+        entityId: created.id,
+        action: "CREATE",
+        afterData: {
+          orderNo,
+          siteId,
+          supplierId: data.supplierId,
+          status: data.status,
+          itemCount: itemsWithStock.length,
+          items: summarizeAuditItems(itemsWithStock, ["itemId", "qty", "unitPrice", "stockAtOrder"]),
+        },
+        menuName: "발주관리",
+      })
     })
-    await recordAuditLog(tx, {
-      tenantId,
-      actor,
-      entityType: "PurchaseOrder",
-      entityId: created.id,
-      action: "CREATE",
-      afterData: {
-        orderNo,
-        siteId,
-        supplierId: data.supplierId,
-        status: data.status,
-        itemCount: itemsWithStock.length,
-        items: summarizeAuditItems(itemsWithStock, ["itemId", "qty", "unitPrice", "stockAtOrder"]),
-      },
-      menuName: "발주관리",
-    })
-  })
-  }, { fields: ["tenantId", "orderNo"], message: "발주번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요." })
+    }, { fields: ["tenantId", "orderNo"], message: "발주번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요." })
 
-  revalidatePath("/app/mes/purchase-orders")
+    // 커밋 이후 캐시 재검증 오류가 등록 결과를 실패로 뒤집어 중복 등록을 유발하지 않도록 분리
+    safeRevalidate(revalidatePath, ["/app/mes/purchase-orders"], "createPurchaseOrder")
+    return { success: true }
+  } catch (error) {
+    return failureResult("createPurchaseOrder", error, { duplicateMessage: "발주번호가 중복되었습니다. 다시 시도해 주세요." })
+  }
 }
 
 export type UpdatePurchaseOrderInput = {

@@ -4,6 +4,10 @@ import { prisma } from "@/lib/db/prisma"
 import { getTenantId, requireRole } from "@/lib/auth"
 import { generateCnsManufacturingNo } from "@/lib/lot-numbering/lot-number-generator"
 import type { CnsItemRuleContext } from "@/lib/lot-numbering/lot-rule-resolver"
+import { failureResult, UserFacingError, type ActionResult } from "@/lib/errors/user-error"
+import { safeRevalidate } from "@/lib/revalidate-safe"
+import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
+import { decideManufacturingNo } from "@/lib/lot-numbering/manufacturing-no-policy"
 import { WorkOrderStatus, OperationStatus, Prisma } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { computeWipReceiptStatus } from "./wip-receipt.helpers"
@@ -824,15 +828,23 @@ async function validateManualManufacturingNoPolicy(
   tenantId: string,
   itemId: string,
   manufacturingNo: string | null,
+  options: { blankMeansAuto: boolean },
 ) {
   const item = await prisma.item.findFirst({
     where: { id: itemId, tenantId },
     select: { lotNumberingType: true, manualLotPolicy: true },
   })
   if (!item) throw new Error("INVALID_ITEM")
-  if ((item.lotNumberingType === "MANUAL" || item.manualLotPolicy === "REQUIRED") && !manufacturingNo) {
-    throw new Error("제조번호를 직접 입력해야 하는 품목입니다.")
-  }
+  // 품목 정책(lotNumberingType x manualLotPolicy) 조합 판정. 대원정밀은 자동 채번이 불가능하므로
+  // 처리할 수 없는 조합은 명확한 안내 메시지로 거절한다(채번 규칙/품목 정책은 변경하지 않는다).
+  const decision = decideManufacturingNo({
+    lotNumberingType: item.lotNumberingType,
+    manualLotPolicy: item.manualLotPolicy,
+    input: manufacturingNo,
+    autoAllowed: isCnsLotRuleAllowed(),
+    blankMeansAuto: options.blankMeansAuto,
+  })
+  if (decision.kind === "ERROR") throw new UserFacingError(decision.message)
   return item.manualLotPolicy === "DISABLED"
 }
 
@@ -897,101 +909,107 @@ async function validateProductionPlanItemForWorkOrder(
 
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
 
-export async function createWorkOrder(data: CreateWorkOrderInput, tenantId: string) {
-  await requireResourcePermission("WORK_ORDER", "CREATE")
-  const user = await requireRole("OPERATOR")
-  if (tenantId !== user.tenantId) throw new Error("FORBIDDEN")
-  const { operations, dueDate, manufacturingNo, ...headerFields } = data
-  await validateRoutingForItem({ tenantId, itemId: headerFields.itemId, routingId: headerFields.routingId })
-  const validatedOperations = await validateWorkOrderOperationAssignments(operations, tenantId)
-
-  // 제조번호: 수동 입력 우선, 미입력 시 자동 생성 (MFG-YYYYMMDD-NNN)
-  const trimmed = manufacturingNo?.trim()
-  const manualDisabled = await validateManualManufacturingNoPolicy(
-    tenantId,
-    headerFields.itemId,
-    trimmed && trimmed.length > 0 ? trimmed : null,
-  )
-  const useManualManufacturingNo = !!trimmed && trimmed.length > 0 && !manualDisabled
-
-  const retryTargets = useManualManufacturingNo
-    ? [["tenantId", "orderNo"]]
-    : [["tenantId", "orderNo"], ["tenantId", "manufacturingNo"]]
-
+export async function createWorkOrder(data: CreateWorkOrderInput, tenantId: string): Promise<ActionResult> {
   try {
-    await withUniqueBusinessNumberRetry(async (attempt) => {
-      const orderNo = await generateOrderNo(tenantId)
-      const finalManufacturingNo = useManualManufacturingNo
-        ? trimmed!
-        : await generateManufacturingNo(tenantId, headerFields.itemId, attempt)
+    await requireResourcePermission("WORK_ORDER", "CREATE")
+    const user = await requireRole("OPERATOR")
+    if (tenantId !== user.tenantId) throw new Error("FORBIDDEN")
+    const { operations, dueDate, manufacturingNo, ...headerFields } = data
+    await validateRoutingForItem({ tenantId, itemId: headerFields.itemId, routingId: headerFields.routingId })
+    const validatedOperations = await validateWorkOrderOperationAssignments(operations, tenantId)
 
-      await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {
-        await lockProductionPlanItemsForUpdate(tx, tenantId, [headerFields.productionPlanItemId])
-        await validateProductionPlanItemForWorkOrder(
-          tx,
-          headerFields.productionPlanItemId,
-          headerFields,
-          tenantId
-        )
+    // 제조번호: 수동 입력 우선, 미입력 시 자동 생성 (MFG-YYYYMMDD-NNN)
+    const trimmed = manufacturingNo?.trim()
+    const manualDisabled = await validateManualManufacturingNoPolicy(
+      tenantId,
+      headerFields.itemId,
+      trimmed && trimmed.length > 0 ? trimmed : null,
+      { blankMeansAuto: true },
+    )
+    const useManualManufacturingNo = !!trimmed && trimmed.length > 0 && !manualDisabled
 
-        const workOrder = await tx.workOrder.create({
-          data: {
-            ...headerFields,
-            orderNo,
-            tenantId,
-            manufacturingNo: finalManufacturingNo,
-            dueDate: dueDate ? new Date(dueDate) : null,
-            operations: {
-              create: validatedOperations.map((op) => ({
-                routingOperationId: op.routingOperationId,
-                equipmentId: op.equipmentId ?? null,
-                seq: op.seq,
-                plannedQty: op.plannedQty,
-                assignments:
-                  op.assignments.length > 0
-                    ? {
-                        create: op.assignments.map((assignment) => ({
-                          tenantId,
-                          equipmentId: assignment.equipmentId,
-                          assignedQty: assignment.assignedQty,
-                          seq: assignment.seq,
-                        })),
-                      }
-                    : undefined,
-              })),
+    const retryTargets = useManualManufacturingNo
+      ? [["tenantId", "orderNo"]]
+      : [["tenantId", "orderNo"], ["tenantId", "manufacturingNo"]]
+
+    try {
+      await withUniqueBusinessNumberRetry(async (attempt) => {
+        const orderNo = await generateOrderNo(tenantId)
+        const finalManufacturingNo = useManualManufacturingNo
+          ? trimmed!
+          : await generateManufacturingNo(tenantId, headerFields.itemId, attempt)
+
+        await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {
+          await lockProductionPlanItemsForUpdate(tx, tenantId, [headerFields.productionPlanItemId])
+          await validateProductionPlanItemForWorkOrder(
+            tx,
+            headerFields.productionPlanItemId,
+            headerFields,
+            tenantId
+          )
+
+          const workOrder = await tx.workOrder.create({
+            data: {
+              ...headerFields,
+              orderNo,
+              tenantId,
+              manufacturingNo: finalManufacturingNo,
+              dueDate: dueDate ? new Date(dueDate) : null,
+              operations: {
+                create: validatedOperations.map((op) => ({
+                  routingOperationId: op.routingOperationId,
+                  equipmentId: op.equipmentId ?? null,
+                  seq: op.seq,
+                  plannedQty: op.plannedQty,
+                  assignments:
+                    op.assignments.length > 0
+                      ? {
+                          create: op.assignments.map((assignment) => ({
+                            tenantId,
+                            equipmentId: assignment.equipmentId,
+                            assignedQty: assignment.assignedQty,
+                            seq: assignment.seq,
+                          })),
+                        }
+                      : undefined,
+                })),
+              },
             },
-          },
-          select: { id: true },
-        })
+            select: { id: true },
+          })
 
-        await syncProductionPlanStatusForWorkOrder(tx, workOrder.id, tenantId)
-        await recordAuditLog(tx, {
-          tenantId,
-          actor: user,
-          entityType: "WorkOrder",
-          entityId: workOrder.id,
-          action: "CREATE",
-          afterData: {
-            orderNo,
-            manufacturingNo: finalManufacturingNo,
-            itemId: headerFields.itemId,
-            plannedQty: headerFields.plannedQty,
-            productionPlanItemId: headerFields.productionPlanItemId,
-            operations: summarizeAuditItems(validatedOperations, ["routingOperationId", "equipmentId", "seq", "plannedQty"]),
-          },
-          menuName: "작업지시",
-        })
-      }))
-    }, { fields: retryTargets, message: "작업지시번호 또는 제조번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요." })
-  } catch (error) {
-    if (useManualManufacturingNo && isUniqueConstraintError(error, ["tenantId", "manufacturingNo"])) {
-      throw new Error("이미 사용 중인 제조번호입니다.")
+          await syncProductionPlanStatusForWorkOrder(tx, workOrder.id, tenantId)
+          await recordAuditLog(tx, {
+            tenantId,
+            actor: user,
+            entityType: "WorkOrder",
+            entityId: workOrder.id,
+            action: "CREATE",
+            afterData: {
+              orderNo,
+              manufacturingNo: finalManufacturingNo,
+              itemId: headerFields.itemId,
+              plannedQty: headerFields.plannedQty,
+              productionPlanItemId: headerFields.productionPlanItemId,
+              operations: summarizeAuditItems(validatedOperations, ["routingOperationId", "equipmentId", "seq", "plannedQty"]),
+            },
+            menuName: "작업지시",
+          })
+        }))
+      }, { fields: retryTargets, message: "작업지시번호 또는 제조번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요." })
+    } catch (error) {
+      if (useManualManufacturingNo && isUniqueConstraintError(error, ["tenantId", "manufacturingNo"])) {
+        throw new Error("이미 사용 중인 제조번호입니다.")
+      }
+      throw error
     }
-    throw error
-  }
 
-  revalidatePath("/app/mes/work-orders")
-  revalidatePath("/app/mes/production-plan")
+    // 커밋 이후 캐시 재검증 오류가 등록 결과를 실패로 뒤집어 중복 등록을 유발하지 않도록 분리
+    safeRevalidate(revalidatePath, ["/app/mes/work-orders", "/app/mes/production-plan"], "createWorkOrder")
+    return { success: true }
+  } catch (error) {
+    return failureResult("createWorkOrder", error, { duplicateMessage: "작업지시번호 또는 제조번호가 중복되었습니다. 다시 시도해 주세요." })
+  }
 }
 
 export async function updateWorkOrder(id: string, data: CreateWorkOrderInput) {
@@ -1031,6 +1049,7 @@ export async function updateWorkOrder(id: string, data: CreateWorkOrderInput) {
     existing.tenantId,
     headerFields.itemId,
     trimmed && trimmed.length > 0 ? trimmed : null,
+    { blankMeansAuto: false },
   )
   const nextManufacturingNo = trimmed && trimmed.length > 0
     ? (manualDisabled ? await generateManufacturingNo(existing.tenantId, headerFields.itemId) : trimmed)

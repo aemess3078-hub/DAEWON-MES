@@ -10,6 +10,9 @@ import {
   withQuantityTransactionRetry,
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
+import { OUTCOME_UNKNOWN_MESSAGE, isOutcomeUnknownError, toUserErrorMessage } from "@/lib/errors/user-error"
+import { safeRevalidate } from "@/lib/revalidate-safe"
+import { toScaledQuantity, QUANTITY_SCALE } from "@/lib/quantity-scale"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -76,16 +79,7 @@ export type IssueMaterialInput = {
   }[]
 }
 
-const QUANTITY_SCALE = 1_000_000
-
-function toScaledQuantity(value: number): bigint | null {
-  if (!Number.isFinite(value)) return null
-
-  const scaled = Math.round(value * QUANTITY_SCALE)
-  if (Math.abs(value - scaled / QUANTITY_SCALE) > 1e-9) return null
-
-  return BigInt(scaled)
-}
+// 수량 정밀도(소수점 6자리) 환산은 공통 유틸 @/lib/quantity-scale 사용
 
 // ─── 자재출고 대상 WorkOrder 조회 ─────────────────────────────────────────────
 
@@ -249,9 +243,15 @@ export async function issueMaterialsForWorkOrder(
   data: IssueMaterialInput,
   tenantId: string
 ): Promise<{ ok: boolean; error?: string }> {
-  await requireResourcePermission("PURCHASE_ORDER", "CREATE")
-  const actor = await requireRole("OPERATOR")
-  if (actor.tenantId !== tenantId) return { ok: false, error: "FORBIDDEN" }
+  let actor: Awaited<ReturnType<typeof requireRole>>
+  try {
+    await requireResourcePermission("PURCHASE_ORDER", "CREATE")
+    actor = await requireRole("OPERATOR")
+  } catch (e) {
+    // 서버 액션이 throw 한 메시지는 프로덕션에서 지워지므로 반환값으로 권한 안내를 전달한다
+    return { ok: false, error: toUserErrorMessage(e) }
+  }
+  if (actor.tenantId !== tenantId) return { ok: false, error: toUserErrorMessage("FORBIDDEN") }
   const activeItems = data.items.filter((i) => i.issueQty > 0)
   if (activeItems.length === 0)
     return { ok: false, error: "출고 수량을 입력하세요." }
@@ -679,14 +679,27 @@ export async function issueMaterialsForWorkOrder(
       })
     }))
 
-    revalidatePath("/app/mes/material-issue")
-    revalidatePath("/app/mes/inventory")
-    revalidatePath("/app/mes/material/stock")
-    revalidatePath("/app/mes/inventory-transactions")
-    revalidatePath("/app/mes/manufacturing-traceability")
-    revalidatePath("/app/mes/production/wip-inventory")
+    // 커밋 이후 캐시 재검증 오류가 출고 결과를 실패로 뒤집어 중복 출고를 유발하지 않도록 분리
+    safeRevalidate(
+      revalidatePath,
+      [
+        "/app/mes/material-issue",
+        "/app/mes/inventory",
+        "/app/mes/material/stock",
+        "/app/mes/inventory-transactions",
+        "/app/mes/manufacturing-traceability",
+        "/app/mes/production/wip-inventory",
+      ],
+      "issueMaterialsForWorkOrder"
+    )
     return { ok: true }
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : "오류가 발생했습니다." }
+    console.error("[issueMaterialsForWorkOrder] error:", e)
+    // DB 연결/응답 오류는 커밋 여부를 알 수 없다 — 실패로 단정하지 않고 확인을 요청한다
+    if (isOutcomeUnknownError(e)) return { ok: false, error: OUTCOME_UNKNOWN_MESSAGE }
+    return {
+      ok: false,
+      error: toUserErrorMessage(e, { fallback: "자재출고 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." }),
+    }
   }
 }

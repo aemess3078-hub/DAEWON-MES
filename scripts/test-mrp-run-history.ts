@@ -871,7 +871,9 @@ async function main() {
     ok(/@@unique\(\[purchaseOrderId\]\)/.test(schema), "schema: PO 당 연결 1건")
     ok(/onDelete: SetNull/.test(/model MrpRunPurchase \{[\s\S]*?\n\}/.exec(schema)?.[0] ?? ""), "schema: PO 삭제 시 연결 보존(SetNull)")
     const migs = readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n)).sort()
-    eq(migs[migs.length - 1], "20261014020000_add_mrp_run_history", "최신 migration = Phase 6")
+    // 이후 migration(예: 자재입고 멱등성)이 추가되어도 Phase 6 migration 이 그대로 존재하면 된다 — "최신" 고정은 새 migration 마다 깨진다
+    ok(migs.includes("20261014020000_add_mrp_run_history"), "Phase 6 migration 존재")
+    ok(migs.filter((n) => n > "20261014020000_add_mrp_run_history").every((n) => !/mrp/i.test(read("prisma", "migrations", n, "migration.sql").split("\n").filter((l) => !l.trim().startsWith("--")).join("\n"))), "이후 migration 은 MRP 테이블을 건드리지 않음")
     const sql = read("prisma", "migrations", "20261014020000_add_mrp_run_history", "migration.sql")
       .split("\n")
       .filter((l) => !l.trim().startsWith("--"))

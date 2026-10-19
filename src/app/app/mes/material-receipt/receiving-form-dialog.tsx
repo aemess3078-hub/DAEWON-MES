@@ -31,6 +31,17 @@ import { ReceivingInspectionResult } from "@prisma/client"
 import type { MaterialReceiptOrderRow } from "./material-receipt-data-table"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
 import { formatQuantity } from "@/lib/utils"
+import { compareQuantities, isQuantityBalanced, subtractQuantities, toScaledQuantity } from "@/lib/quantity-scale"
+import {
+  applyReceiptToQuantities,
+  describeBatchFailure,
+  isRowDone,
+  isRowLocked,
+  runReceivingBatch,
+  type RowStatusMap,
+} from "@/lib/receiving-batch"
+import { toUserErrorMessage } from "@/lib/errors/user-error"
+import { generateReceivingRequestId } from "@/lib/receiving-request-id"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -101,6 +112,16 @@ export function ReceivingFormDialog({
 }: ReceivingFormDialogProps) {
   const router = useRouter()
   const [isLoading, setIsLoading] = useState(false)
+  // 품목별 처리 결과(부분 성공 후 재시도 때 이미 입고된 품목을 다시 보내지 않기 위해 기억한다)
+  const [rowStatus, setRowStatus] = useState<RowStatusMap>({})
+  // state 갱신 전에 들어오는 더블클릭/중복 호출 방어
+  const savingRef = useRef(false)
+  // 하나의 입고 작업(품목)마다 재시도에도 같은 요청 ID 를 유지한다 — 서버 멱등 키. 새 입고(창을 새로 열기)에서만 새로 만든다.
+  const requestIdsRef = useRef<Record<string, string>>({})
+  function requestIdFor(purchaseOrderItemId: string): string {
+    if (!requestIdsRef.current[purchaseOrderItemId]) requestIdsRef.current[purchaseOrderItemId] = generateReceivingRequestId()
+    return requestIdsRef.current[purchaseOrderItemId]
+  }
   const [printOpen, setPrintOpen] = useState(false)
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
 
@@ -235,18 +256,30 @@ export function ReceivingFormDialog({
   }
 
   async function handleConfirm() {
-    const hasAny = inspections.some((ins) => (parseFloat(ins.thisReceivedQty) || 0) > 0)
+    if (savingRef.current) return // 저장 중 중복 호출 방어
+    const isLocked = (id: string) => isRowDone(rowStatus[id])
+    const hasAny = inspections.some(
+      (ins) => !isLocked(ins.purchaseOrderItemId) && (parseFloat(ins.thisReceivedQty) || 0) > 0
+    )
     if (!hasAny) {
-      alert("입고수량을 1 이상 입력해주세요.")
+      alert("입고수량을 1 이상 입력해주세요. 이미 처리된 품목은 다시 저장되지 않습니다.")
       return
     }
 
     // 클라이언트 검증
     for (const ins of inspections) {
+      if (isLocked(ins.purchaseOrderItemId)) continue
       const received = parseFloat(ins.thisReceivedQty) || 0
       if (received <= 0) continue
 
-      if (received > ins.pendingQty) {
+      const accepted0 = parseFloat(ins.thisAcceptedQty) || 0
+      const rejected0 = parseFloat(ins.thisRejectedQty) || 0
+      if (toScaledQuantity(received) === null || toScaledQuantity(accepted0) === null || toScaledQuantity(rejected0) === null) {
+        alert(`[${ins.itemCode}] ${ins.itemName}\n수량은 숫자이며 소수점 6자리까지만 입력할 수 있습니다.`)
+        return
+      }
+
+      if (compareQuantities(received, ins.pendingQty) === 1) {
         alert(
           `[${ins.itemCode}] ${ins.itemName}\n` +
           `입고수량(${formatQuantity(received)})이 잔여수량(${formatQuantity(ins.pendingQty)} ${ins.uom})을 초과합니다.`
@@ -256,7 +289,7 @@ export function ReceivingFormDialog({
 
       const accepted = parseFloat(ins.thisAcceptedQty) || 0
       const rejected = parseFloat(ins.thisRejectedQty) || 0
-      if (Math.abs(accepted + rejected - received) > 0.001) {
+      if (!isQuantityBalanced(received, accepted, rejected)) {
         alert(
           `[${ins.itemCode}] ${ins.itemName}\n` +
           `합격수량과 불합격수량의 합은 금회 입고수량과 같아야 합니다.`
@@ -279,40 +312,71 @@ export function ReceivingFormDialog({
       }
     }
 
+    savingRef.current = true
     setIsLoading(true)
     try {
-      for (const ins of inspections) {
-        const received = parseFloat(ins.thisReceivedQty) || 0
-        if (received <= 0) continue
-
-        const result = await createReceivingInspection({
+      const outcome = await runReceivingBatch(
+        inspections.map((ins) => ({
           purchaseOrderItemId: ins.purchaseOrderItemId,
-          purchaseOrderId: purchaseOrder.id,
-          warehouseId: ins.warehouseId,
-          siteId,
-          receivedQty: received,
-          acceptedQty: parseFloat(ins.thisAcceptedQty) || 0,
-          rejectedQty: parseFloat(ins.thisRejectedQty) || 0,
-          result: ins.result,
-          note: ins.note || undefined,
-          lotNo: ins.lotNo.trim() || undefined,
-          lotReservationId: ins.isAutoNumbered ? ins.lotReservationId ?? undefined : undefined,
-        })
-        if (!result.success) {
-          alert(
-            `[${ins.itemCode}] ${ins.itemName}\n` +
-            (result.message ?? "저장 중 오류가 발생했습니다.")
-          )
-          return
+          receivedInput: parseFloat(ins.thisReceivedQty) || 0,
+          acceptedInput: parseFloat(ins.thisAcceptedQty) || 0,
+          requestId: requestIdFor(ins.purchaseOrderItemId),
+        })),
+        rowStatus,
+        async (row) => {
+          const ins = inspections.find((i) => i.purchaseOrderItemId === row.purchaseOrderItemId)!
+          return createReceivingInspection({
+            purchaseOrderItemId: ins.purchaseOrderItemId,
+            purchaseOrderId: purchaseOrder.id,
+            warehouseId: ins.warehouseId,
+            siteId,
+            receivedQty: row.receivedInput,
+            acceptedQty: row.acceptedInput,
+            rejectedQty: parseFloat(ins.thisRejectedQty) || 0,
+            requestId: row.requestId,
+            result: ins.result,
+            note: ins.note || undefined,
+            lotNo: ins.lotNo.trim() || undefined,
+            lotReservationId: ins.isAutoNumbered ? ins.lotReservationId ?? undefined : undefined,
+          })
         }
+      )
+      setRowStatus(outcome.statuses)
+      // 이번에 성공한 품목은 기입고/잔여 표시를 서버와 같은 규칙으로 즉시 반영한다
+      if (outcome.newlyDone.length > 0) {
+        setInspections((prev) =>
+          prev.map((ins) =>
+            outcome.newlyDone.includes(ins.purchaseOrderItemId)
+              ? { ...ins, ...applyReceiptToQuantities(ins, parseFloat(ins.thisAcceptedQty) || 0) }
+              : ins
+          )
+        )
       }
-      releaseAllTrackedReservations()
-      onClose()
-      router.refresh()
+      // 성공했거나, 실패/결과 불명으로 중단된 경우에도 서버의 최신 기입고 수량을 다시 읽는다
+      // (응답을 못 받았지만 서버에서는 처리됐을 수 있다 — 다시 열었을 때 낡은 잔여수량이 보이지 않도록)
+      if (outcome.newlyDone.length > 0 || outcome.stoppedAt) router.refresh()
+      if (outcome.allDone) {
+        releaseAllTrackedReservations()
+        onClose()
+        return
+      }
+      if (outcome.stoppedAt) {
+        const failed = inspections.find((i) => i.purchaseOrderItemId === outcome.stoppedAt)
+        alert(
+          (outcome.newlyDone.length > 0 || Object.values(rowStatus).some((st) => st.state === "done")
+            ? "일부 품목은 이미 입고 처리되었습니다. 처리되지 않은 품목만 다시 확정할 수 있습니다.\n\n"
+            : "") +
+            describeBatchFailure(
+              failed ? `[${failed.itemCode}] ${failed.itemName}` : "",
+              outcome.statuses[outcome.stoppedAt]
+            )
+        )
+      }
     } catch (error) {
       console.error("입고 처리 실패:", error)
-      alert(error instanceof Error ? error.message : "저장 중 오류가 발생했습니다.")
+      alert(toUserErrorMessage(error, { fallback: "저장 중 오류가 발생했습니다." }))
     } finally {
+      savingRef.current = false
       setIsLoading(false)
     }
   }
@@ -395,9 +459,27 @@ export function ReceivingFormDialog({
                       </span> {ins.uom}
                     </span>
                   </div>
+                  {rowStatus[ins.purchaseOrderItemId]?.state === "done" && (
+                    <p className="mt-1 text-[13px] font-medium text-green-700">입고 완료 — 다시 저장되지 않습니다.</p>
+                  )}
+                  {rowStatus[ins.purchaseOrderItemId]?.state === "failed" && (
+                    <p className="mt-1 text-[13px] text-red-600">
+                      입고 실패: {toUserErrorMessage((rowStatus[ins.purchaseOrderItemId] as { message: string }).message)}
+                    </p>
+                  )}
+                  {rowStatus[ins.purchaseOrderItemId]?.state === "unknown" && (
+                    <p className="mt-1 text-[13px] text-amber-700">
+                      {(rowStatus[ins.purchaseOrderItemId] as { message: string }).message}
+                    </p>
+                  )}
                 </div>
               </div>
 
+              {/* 처리 완료/결과 불명 품목은 입력을 잠가 중복 입고를 막는다 */}
+              <fieldset
+                disabled={isRowLocked(rowStatus[ins.purchaseOrderItemId])}
+                className="min-w-0 space-y-4 border-0 p-0"
+              >
               {/* LOT 번호 입력 — LOT 관리 품목만 표시, 품목별 LOT 정책에 따라 안내/필수여부/자동채번 버튼이 달라짐 */}
               {ins.isLotTracked && (() => {
                 const policy = getLotPolicyState(ins.lotNumberingType, ins.manualLotPolicy)
@@ -563,9 +645,9 @@ export function ReceivingFormDialog({
                       }
                       updateInspection(index, patch)
                     }}
-                    className={`h-8 text-[13px] ${(parseFloat(ins.thisReceivedQty) || 0) > ins.pendingQty ? "border-red-400 focus-visible:ring-red-400" : ""}`}
+                    className={`h-8 text-[13px] ${compareQuantities(parseFloat(ins.thisReceivedQty) || 0, ins.pendingQty) === 1 ? "border-red-400 focus-visible:ring-red-400" : ""}`}
                   />
-                  {(parseFloat(ins.thisReceivedQty) || 0) > ins.pendingQty && (
+                  {compareQuantities(parseFloat(ins.thisReceivedQty) || 0, ins.pendingQty) === 1 && (
                     <p className="text-[12px] text-red-600">
                       잔여수량 {formatQuantity(ins.pendingQty)} {ins.uom} 초과
                     </p>
@@ -583,7 +665,7 @@ export function ReceivingFormDialog({
                       const received = parseFloat(ins.thisReceivedQty) || 0
                       updateInspection(index, {
                         thisAcceptedQty: e.target.value,
-                        thisRejectedQty: String(Math.max(0, received - accepted)),
+                        thisRejectedQty: String(Math.max(0, subtractQuantities(received, accepted) ?? 0)),
                       })
                     }}
                     className="h-8 text-[13px]"
@@ -634,6 +716,7 @@ export function ReceivingFormDialog({
                   />
                 </div>
               </div>
+              </fieldset>
             </div>
           ))}
         </div>
@@ -664,8 +747,9 @@ export function ReceivingFormDialog({
               warehouses.length === 0 ||
               inspections.some(
                 (ins) =>
-                  (parseFloat(ins.thisReceivedQty) || 0) > ins.pendingQty ||
-                  ((parseFloat(ins.thisReceivedQty) || 0) > 0 && !ins.warehouseId),
+                  !isRowDone(rowStatus[ins.purchaseOrderItemId]) &&
+                  (compareQuantities(parseFloat(ins.thisReceivedQty) || 0, ins.pendingQty) === 1 ||
+                    ((parseFloat(ins.thisReceivedQty) || 0) > 0 && !ins.warehouseId)),
               )
             }
           >

@@ -195,7 +195,11 @@ export function PurchaseOrderFormSheet({
       }
 
       if (mode === "create") {
-        await createPurchaseOrder(tenantId, siteId, payload)
+        const result = await createPurchaseOrder(tenantId, siteId, payload)
+        if (!result.success) {
+          alert(result.message)
+          return
+        }
       } else if (purchaseOrder) {
         await updatePurchaseOrder(purchaseOrder.id, payload)
       }

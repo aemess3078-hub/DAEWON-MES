@@ -11,6 +11,19 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
 import { recordAuditLog } from "@/lib/audit-log"
 import { BUSINESS_NUMBER_MAX_ATTEMPTS, isUniqueConstraintError, kstDateParts } from "@/lib/business-numbering"
+import { isOutcomeUnknownError, toUserErrorMessage } from "@/lib/errors/user-error"
+import {
+  RECEIVING_REQUEST_CONFLICT_MESSAGE,
+  RECEIVING_REQUEST_ID_INVALID_MESSAGE,
+  RECEIVING_UNKNOWN_MESSAGE,
+  hashReceivingRequest,
+  judgeExistingRequest,
+} from "@/lib/receiving-idempotency"
+import { isValidReceivingRequestId } from "@/lib/receiving-request-id"
+import { NULL_LOT_BALANCE_CONTENTION_MESSAGE, isNullLotBalanceUniqueError } from "@/lib/inventory-balance-guard"
+import { checkReceiptRemaining, validateReceiptQuantities } from "@/lib/receiving-quantity"
+import { safeRevalidate } from "@/lib/revalidate-safe"
+import { allocateReceiptTxNo } from "@/lib/services/receiving-tx-number.service"
 
 export type CreateReceivingInspectionInput = {
   purchaseOrderItemId: string
@@ -25,6 +38,11 @@ export type CreateReceivingInspectionInput = {
   note?: string
   lotNo?: string               // 입력 시 해당 LOT 사용, 미입력 + isLotTracked 시 자동생성
   lotReservationId?: string    // 자동채번 미리보기(reserveReceivingLotNumber)로 발급받은 예약 id
+  /**
+   * 멱등 키(필수). 하나의 입고 작업은 재시도에도 같은 값을 보낸다. 같은 (tenant, requestId) 는 한 번만 처리되고,
+   * 재전송은 새 입고/LOT/거래번호 없이 기존 결과를 돌려준다. 같은 발주품목의 분할 입고는 requestId 가 달라야 한다.
+   */
+  requestId: string
   // 하위 호환용 (무시됨)
   tenantId?: string
 }
@@ -53,41 +71,75 @@ export async function generateReceivingLotNo(
 
 const AUTO_LOT_COLLISION = "AUTO_LOT_COLLISION"
 
-async function generateTxNo(tenantId: string): Promise<string> {
-  const { yyyymmdd: ymd } = kstDateParts()
-  const prefix = `RCV-${ymd}-`
-  const last = await prisma.inventoryTransaction.findFirst({
-    where: { tenantId, txNo: { startsWith: prefix } },
-    orderBy: { txNo: "desc" },
-    select: { txNo: true },
-  })
-  const seq = last ? (parseInt(last.txNo.split("-")[2] ?? "0", 10) || 0) + 1 : 1
-  return `${prefix}${String(seq).padStart(4, "0")}`
-}
+/**
+ * outcome: 실패 시 "FAILED"(롤백이 확실한 업무/검증 오류, 수정 후 재시도 가능) 또는
+ *          "UNKNOWN"(DB 연결/응답 오류로 커밋 여부를 알 수 없음 — 성공으로 단정하지 않고 자동 재시도도 금지)
+ */
+// replayed: 같은 requestId 의 재전송이라 새로 처리하지 않고 기존 결과(성공)를 돌려준 경우
+type ReceivingResult = { success: boolean; message?: string; outcome?: "FAILED" | "UNKNOWN"; replayed?: boolean }
 
 export async function createReceivingInspection(
   data: CreateReceivingInspectionInput,
-): Promise<{ success: boolean; message?: string }> {
-  await requireResourcePermission("PURCHASE_ORDER", "CREATE")
+): Promise<ReceivingResult> {
   try {
+    await requireResourcePermission("PURCHASE_ORDER", "CREATE")
     return await createReceivingInspectionInternal(data)
   } catch (error) {
     // Next.js는 프로덕션에서 Server Action이 throw한 에러 메시지를 자동으로
-    // 지우므로(보안상 기본 동작), 여기서 잡아 메시지를 그대로 반환값에 담아
+    // 지우므로(보안상 기본 동작), 여기서 잡아 메시지를 반환값에 담아
     // 클라이언트가 실제 원인을 표시할 수 있게 한다.
+    // 업무 규칙 메시지는 그대로, Prisma/DB 내부 오류는 안전한 안내문으로 바꾼다(원본은 서버 로그에만 남긴다).
     console.error("[createReceivingInspection] error:", error)
+    if (isOutcomeUnknownError(error)) {
+      return { success: false, outcome: "UNKNOWN", message: RECEIVING_UNKNOWN_MESSAGE }
+    }
     return {
       success: false,
-      message: error instanceof Error ? error.message : "입고 처리 중 오류가 발생했습니다.",
+      outcome: "FAILED",
+      message: toUserErrorMessage(error, { fallback: "입고 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요." }),
     }
   }
 }
 
 async function createReceivingInspectionInternal(
   data: CreateReceivingInspectionInput,
-): Promise<{ success: boolean; message?: string }> {
+): Promise<ReceivingResult> {
   const user = await requireRole("OPERATOR")
   const tenantId = user.tenantId
+
+  // ── 0. 수량 검증 (소수점 6자리 정수로 환산해 정확히 비교 — 부동소수점 오차/허용오차 없음) ──
+  // Decimal(18,6) 정책: NaN/Infinity/음수/6자리 초과 소수는 거부, 합격 + 불합격 = 입고수량이 정확히 성립해야 한다.
+  // 이후 모든 쓰기는 6자리로 정규화한 값(qty)을 사용한다 (예: 0.19999999999999998 → 0.2).
+  const quantityCheck = validateReceiptQuantities(data)
+  if (!quantityCheck.ok) throw new Error(quantityCheck.message)
+  const qty = quantityCheck.value
+  const receivedScaled = qty.receivedScaled
+
+  // ── 0-A. 멱등 키 검증 + 요청 내용 해시 ──────────────────────────────────────
+  if (!isValidReceivingRequestId(data.requestId)) throw new Error(RECEIVING_REQUEST_ID_INVALID_MESSAGE)
+  const requestId = data.requestId
+  const requestHash = hashReceivingRequest({
+    purchaseOrderId: data.purchaseOrderId,
+    purchaseOrderItemId: data.purchaseOrderItemId,
+    warehouseId: data.warehouseId,
+    receivedScaled: String(qty.receivedScaled),
+    acceptedScaled: String(qty.acceptedScaled),
+    rejectedScaled: String(qty.rejectedScaled),
+    result: data.result,
+    lotNo: data.lotNo,
+    lotReservationId: data.lotReservationId,
+    inspectorId: data.inspectorId,
+    note: data.note,
+  })
+  // 이미 처리된 요청의 재전송이면 현재 잔량·발주 상태와 무관하게 기존 결과를 돌려준다(재검증하면 "잔여수량 초과" 로 거절됨).
+  const prior = await prisma.receivingRequest.findUnique({
+    where: { tenantId_requestId: { tenantId, requestId } },
+    select: { requestHash: true },
+  })
+  if (prior) {
+    if (judgeExistingRequest(prior.requestHash, requestHash) === "REPLAY") return { success: true, replayed: true }
+    throw new Error(RECEIVING_REQUEST_CONFLICT_MESSAGE)
+  }
 
   // ── 1. 창고 존재 및 테넌트 소속 확인 ──────────────────────────────────────
   const warehouse = await prisma.warehouse.findFirst({
@@ -118,6 +170,12 @@ async function createReceivingInspectionInternal(
     },
   })
 
+  // 클라이언트가 보낸 purchaseOrderId 는 입고 후 발주 상태 갱신(purchaseOrder.update)에 쓰인다.
+  // 발주 품목이 실제로 속한 발주와 다르면 다른 발주(타 테넌트 포함)의 상태를 바꿀 수 있으므로 거절한다.
+  if (purchaseOrderItem.purchaseOrderId !== data.purchaseOrderId) {
+    throw new Error("발주 정보가 일치하지 않습니다. 화면을 새로고침한 후 다시 시도해 주세요.")
+  }
+
   const poStatus = purchaseOrderItem.purchaseOrder.status
   if (poStatus === "CLOSED" || poStatus === "CANCELLED") {
     throw new Error("종결되었거나 취소된 발주에는 입고할 수 없습니다.")
@@ -131,26 +189,10 @@ async function createReceivingInspectionInternal(
     )
   }
 
-  // ── 2-A. 수량 검증 (DB 기준 재계산) ──────────────────────────────────────
-  const orderedQty = Number(purchaseOrderItem.qty)
-  const alreadyReceivedQty = Number(purchaseOrderItem.receivedQty)
-  const remainingQty = orderedQty - alreadyReceivedQty
+  // ── 2-A. 잔여수량 검증 (DB 기준 재계산, 정확한 소수 비교) ─────────────────
   const uom = purchaseOrderItem.item.uom
-
-  if (data.receivedQty <= 0) {
-    throw new Error("입고수량은 0보다 커야 합니다.")
-  }
-  if (data.receivedQty > remainingQty) {
-    throw new Error(
-      `입고수량은 잔여수량을 초과할 수 없습니다. 잔여수량: ${remainingQty.toLocaleString("ko-KR")} ${uom}`
-    )
-  }
-  if (data.acceptedQty < 0 || data.rejectedQty < 0) {
-    throw new Error("합격수량과 불합격수량은 0 이상이어야 합니다.")
-  }
-  if (Math.abs(data.acceptedQty + data.rejectedQty - data.receivedQty) > 0.001) {
-    throw new Error("합격수량과 불합격수량의 합은 금회 입고수량과 같아야 합니다.")
-  }
+  const remainingCheck = checkReceiptRemaining(receivedScaled, purchaseOrderItem.qty, purchaseOrderItem.receivedQty, uom)
+  if (!remainingCheck.ok) throw new Error(remainingCheck.message)
 
   const isLotTracked = purchaseOrderItem.item.isLotTracked ?? false
 
@@ -196,7 +238,7 @@ async function createReceivingInspectionInternal(
     lotPrefix: purchaseOrderItem.item.lotPrefix,
     manualLotPolicy,
   }
-  // txNo 사전 생성 (트랜잭션 외부 - 기존 패턴 유지)
+  // 입고 수불 거래번호(txNo)는 트랜잭션 안에서 (tenant, 날짜) advisory lock 으로 직렬화해 확보한다 (4-5 단계)
   // ── 4. 트랜잭션 처리 ───────────────────────────────────────────────────────
   // AUTO만 충돌 시 재시도(최대 5회). RESERVED/MANUAL/NONE은 재시도 없이 그대로 확정하거나 실패시킨다.
   //
@@ -205,12 +247,30 @@ async function createReceivingInspectionInternal(
   // 이렇게 하면 자동채번 미리보기(RESERVED)와 버튼 미사용 AUTO 확정이 서로 다른 트랜잭션에서
   // 동시에 실행되어도, 두 경로 모두 같은 테이블의 (tenantId, lotNo) unique 제약을 통해서만
   // 번호를 "소유"할 수 있으므로 Lot 테이블과 예약 테이블 사이의 경합이 사라진다.
-  const maxAttempts = data.acceptedQty > 0 || lotResolutionMode === "AUTO" ? BUSINESS_NUMBER_MAX_ATTEMPTS : 1
+  const maxAttempts = qty.accepted > 0 || lotResolutionMode === "AUTO" ? BUSINESS_NUMBER_MAX_ATTEMPTS : 1
+  let replayed = false
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const txNo = data.acceptedQty > 0 ? await generateTxNo(tenantId) : null
     try {
       await prisma.$transaction(async (tx) => {
         await lockPurchaseOrderItemsForUpdate(tx, tenantId, [data.purchaseOrderItemId])
+        let txNo: string | null = null
+
+        // 멱등 클레임 — 입고검사/재고/수불/거래번호/LOT 와 같은 트랜잭션. 롤백되면 클레임도 사라져 정상 재시도를 막지 않는다.
+        // 같은 발주품목의 동시 재전송은 위 행 잠금으로 직렬화되어, 먼저 커밋된 요청을 여기서 보고 그대로 돌려준다.
+        // (다른 발주품목에서 같은 requestId 가 동시에 오면 아래 INSERT 가 unique 로 하나만 통과시킨다.)
+        const priorInTx = await tx.receivingRequest.findUnique({
+          where: { tenantId_requestId: { tenantId, requestId } },
+          select: { requestHash: true },
+        })
+        if (priorInTx) {
+          if (judgeExistingRequest(priorInTx.requestHash, requestHash) !== "REPLAY") throw new Error(RECEIVING_REQUEST_CONFLICT_MESSAGE)
+          replayed = true
+          return // 새 입고·LOT 번호·거래번호를 만들지 않는다
+        }
+        const claim = await tx.receivingRequest.create({
+          data: { tenantId, requestId, requestHash, purchaseOrderItemId: data.purchaseOrderItemId },
+          select: { id: true },
+        })
         const lockedPurchaseOrderItem = await tx.purchaseOrderItem.findFirst({
           where: {
             id: data.purchaseOrderItemId,
@@ -233,12 +293,22 @@ async function createReceivingInspectionInternal(
         ) {
           throw new Error("종결되었거나 취소된 발주에는 입고할 수 없습니다.")
         }
-        const lockedRemainingQty =
-          Number(lockedPurchaseOrderItem.qty) - Number(lockedPurchaseOrderItem.receivedQty)
-        if (data.receivedQty > lockedRemainingQty) {
-          throw new Error(
-            `입고수량은 잔여수량을 초과할 수 없습니다. 잔여수량: ${lockedRemainingQty.toLocaleString("ko-KR")} ${lockedPurchaseOrderItem.item.uom}`
-          )
+        // 잠금 이후 같은 정책(checkReceiptRemaining)으로 잔량을 다시 검증한다
+        const lockedRemainingCheck = checkReceiptRemaining(
+          receivedScaled,
+          lockedPurchaseOrderItem.qty,
+          lockedPurchaseOrderItem.receivedQty,
+          lockedPurchaseOrderItem.item.uom
+        )
+        if (!lockedRemainingCheck.ok) throw new Error(lockedRemainingCheck.message)
+
+        // 입고 거래번호 확보 — 재고(InventoryBalance) 조회/생성보다 **먼저** 한다.
+        // (tenant, 날짜) advisory lock 이 여기서부터 커밋/롤백까지 유지되므로,
+        //  1) 같은 날짜의 거래번호가 중복되지 않고(최신 번호를 잠금 안에서 재조회),
+        //  2) 같은 테넌트의 입고끼리 "재고 행이 없으면 만든다" 구간이 직렬화되어 비LOT 품목의 최초 재고 행이 둘로 갈라지지 않는다.
+        // 롤백되면 번호도 소모되지 않는다. 합격수량이 0 이면 수불/재고를 건드리지 않으므로 번호도 잠금도 필요 없다.
+        if (qty.accepted > 0) {
+          txNo = await allocateReceiptTxNo(tx, tenantId, { yyyymmdd: kstDateParts().yyyymmdd })
         }
 
         let consumedReservationId: string | null = null
@@ -360,22 +430,23 @@ async function createReceivingInspectionInternal(
       data: {
         purchaseOrderItemId: data.purchaseOrderItemId,
         inspectorId: data.inspectorId ?? null,
-        receivedQty: data.receivedQty,
-        acceptedQty: data.acceptedQty,
-        rejectedQty: data.rejectedQty,
+        receivedQty: qty.received,
+        acceptedQty: qty.accepted,
+        rejectedQty: qty.rejected,
         result: data.result,
         note: data.note,
       },
     })
+    await tx.receivingRequest.update({ where: { id: claim.id }, data: { receivingInspectionId: inspection.id } })
 
     // 4-3. PurchaseOrderItem.receivedQty 갱신
     await tx.purchaseOrderItem.update({
       where: { id: data.purchaseOrderItemId },
-      data: { receivedQty: { increment: data.acceptedQty } },
+      data: { receivedQty: { increment: qty.accepted } },
     })
 
     // 4-4. InventoryBalance 갱신 (합격 수량만)
-    if (data.acceptedQty > 0) {
+    if (qty.accepted > 0) {
       const existingBalance = await tx.inventoryBalance.findFirst({
         where: {
           tenantId,
@@ -388,8 +459,8 @@ async function createReceivingInspectionInternal(
         await tx.inventoryBalance.update({
           where: { id: existingBalance.id },
           data: {
-            qtyOnHand: { increment: data.acceptedQty },
-            qtyAvailable: { increment: data.acceptedQty },
+            qtyOnHand: { increment: qty.accepted },
+            qtyAvailable: { increment: qty.accepted },
           },
         })
       } else {
@@ -400,23 +471,25 @@ async function createReceivingInspectionInternal(
             itemId: purchaseOrderItem.itemId,
             warehouseId: warehouse.id,
             lotId,
-            qtyOnHand: data.acceptedQty,
-            qtyAvailable: data.acceptedQty,
+            qtyOnHand: qty.accepted,
+            qtyAvailable: qty.accepted,
             qtyHold: 0,
           },
         })
       }
 
       // 4-5. InventoryTransaction 생성
+      //      거래번호(txNo)는 위 "재고 반영 이전" 단계에서 이미 확보했다.
+      if (!txNo) throw new Error("입고 거래번호가 확보되지 않았습니다.") // 합격수량 > 0 이면 위에서 항상 확보됨(방어)
       await tx.inventoryTransaction.create({
         data: {
           tenantId,
           itemId: purchaseOrderItem.itemId,
           lotId,
           toLocationId: warehouse.id,
-          txNo: txNo!,
+          txNo,
           txType: "RECEIPT",
-          qty: data.acceptedQty,
+          qty: qty.accepted,
           refType: "PURCHASE_ORDER",
           refId: data.purchaseOrderId,
           note: resolvedLotNo ? `LOT 입고: ${resolvedLotNo}` : (data.note ?? null),
@@ -451,9 +524,9 @@ async function createReceivingInspectionInternal(
         purchaseOrderItemId: data.purchaseOrderItemId,
         itemId: purchaseOrderItem.itemId,
         warehouseId: warehouse.id,
-        receivedQty: data.receivedQty,
-        acceptedQty: data.acceptedQty,
-        rejectedQty: data.rejectedQty,
+        receivedQty: qty.received,
+        acceptedQty: qty.accepted,
+        rejectedQty: qty.rejected,
         result: data.result,
         lotNo: resolvedLotNo,
         txNo,
@@ -463,11 +536,23 @@ async function createReceivingInspectionInternal(
       })
       break
     } catch (error) {
+      // 같은 (tenant, requestId) 가 다른 트랜잭션에서 먼저 커밋됨 → 내용이 같으면 기존 결과를 돌려주고, 다르면 오류
+      if (isUniqueConstraintError(error, ["tenantId", "requestId"])) {
+        const existing = await prisma.receivingRequest.findUnique({
+          where: { tenantId_requestId: { tenantId, requestId } },
+          select: { requestHash: true },
+        })
+        if (existing && judgeExistingRequest(existing.requestHash, requestHash) === "REPLAY") return { success: true, replayed: true }
+        throw new Error(RECEIVING_REQUEST_CONFLICT_MESSAGE)
+      }
       const txNoCollision = isUniqueConstraintError(error, ["tenantId", "txNo"])
       const autoLotCollision = lotResolutionMode === "AUTO" &&
         (isUniqueConstraintError(error) ||
           (error instanceof Error && error.message === AUTO_LOT_COLLISION))
-      const canRetry = txNoCollision || autoLotCollision
+      // 비LOT 재고 행(lotId IS NULL) partial unique 충돌로 **확인된** 경우에만 재시도 대상에 추가한다(다른 P2002 는 아님).
+      // 트랜잭션 전체가 롤백된 뒤 다시 실행하면 두 번째에는 기존 행을 update 한다. 결과 불명 오류는 어떤 경우에도 재시도하지 않는다.
+      const balanceCollision = isNullLotBalanceUniqueError(error)
+      const canRetry = !isOutcomeUnknownError(error) && (txNoCollision || autoLotCollision || balanceCollision)
 
       if (canRetry && attempt < maxAttempts - 1) {
         continue
@@ -479,15 +564,29 @@ async function createReceivingInspectionInternal(
       if (txNoCollision) {
         throw new Error("입고거래번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요.")
       }
+      if (balanceCollision) {
+        throw new Error(NULL_LOT_BALANCE_CONTENTION_MESSAGE)
+      }
 
       throw error
     }
   }
 
-  revalidatePath("/app/mes/purchase-orders")
-  revalidatePath("/app/mes/material-receipt")
-  revalidatePath("/app/mes/material/stock")
-  revalidatePath("/app/mes/inventory-transactions")
+  if (replayed) return { success: true, replayed: true } // 재전송 — 이번 호출에서는 아무것도 쓰지 않았다
+
+  // ── DB 커밋 완료 이후 ──────────────────────────────────────────────────────
+  // 여기서부터의 오류(캐시 재검증 등)는 입고 결과를 뒤집으면 안 된다. 실패로 반환하면 사용자가 다시 저장해
+  // 같은 입고가 중복 처리된다. 서버 로그에만 남기고 성공으로 반환한다.
+  safeRevalidate(
+    revalidatePath,
+    [
+      "/app/mes/purchase-orders",
+      "/app/mes/material-receipt",
+      "/app/mes/material/stock",
+      "/app/mes/inventory-transactions",
+    ],
+    "createReceivingInspection"
+  )
 
   return { success: true }
 }
