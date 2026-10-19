@@ -35,11 +35,13 @@ import { compareQuantities, isQuantityBalanced, subtractQuantities, toScaledQuan
 import {
   applyReceiptToQuantities,
   describeBatchFailure,
+  isRowDone,
   isRowLocked,
   runReceivingBatch,
   type RowStatusMap,
 } from "@/lib/receiving-batch"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
+import { generateReceivingRequestId } from "@/lib/receiving-request-id"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -114,6 +116,12 @@ export function ReceivingFormDialog({
   const [rowStatus, setRowStatus] = useState<RowStatusMap>({})
   // state 갱신 전에 들어오는 더블클릭/중복 호출 방어
   const savingRef = useRef(false)
+  // 하나의 입고 작업(품목)마다 재시도에도 같은 요청 ID 를 유지한다 — 서버 멱등 키. 새 입고(창을 새로 열기)에서만 새로 만든다.
+  const requestIdsRef = useRef<Record<string, string>>({})
+  function requestIdFor(purchaseOrderItemId: string): string {
+    if (!requestIdsRef.current[purchaseOrderItemId]) requestIdsRef.current[purchaseOrderItemId] = generateReceivingRequestId()
+    return requestIdsRef.current[purchaseOrderItemId]
+  }
   const [printOpen, setPrintOpen] = useState(false)
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
 
@@ -249,7 +257,7 @@ export function ReceivingFormDialog({
 
   async function handleConfirm() {
     if (savingRef.current) return // 저장 중 중복 호출 방어
-    const isLocked = (id: string) => isRowLocked(rowStatus[id])
+    const isLocked = (id: string) => isRowDone(rowStatus[id])
     const hasAny = inspections.some(
       (ins) => !isLocked(ins.purchaseOrderItemId) && (parseFloat(ins.thisReceivedQty) || 0) > 0
     )
@@ -312,6 +320,7 @@ export function ReceivingFormDialog({
           purchaseOrderItemId: ins.purchaseOrderItemId,
           receivedInput: parseFloat(ins.thisReceivedQty) || 0,
           acceptedInput: parseFloat(ins.thisAcceptedQty) || 0,
+          requestId: requestIdFor(ins.purchaseOrderItemId),
         })),
         rowStatus,
         async (row) => {
@@ -324,6 +333,7 @@ export function ReceivingFormDialog({
             receivedQty: row.receivedInput,
             acceptedQty: row.acceptedInput,
             rejectedQty: parseFloat(ins.thisRejectedQty) || 0,
+            requestId: row.requestId,
             result: ins.result,
             note: ins.note || undefined,
             lotNo: ins.lotNo.trim() || undefined,
@@ -737,7 +747,7 @@ export function ReceivingFormDialog({
               warehouses.length === 0 ||
               inspections.some(
                 (ins) =>
-                  !isRowLocked(rowStatus[ins.purchaseOrderItemId]) &&
+                  !isRowDone(rowStatus[ins.purchaseOrderItemId]) &&
                   (compareQuantities(parseFloat(ins.thisReceivedQty) || 0, ins.pendingQty) === 1 ||
                     ((parseFloat(ins.thisReceivedQty) || 0) > 0 && !ins.warehouseId)),
               )

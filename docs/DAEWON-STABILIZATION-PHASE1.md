@@ -104,7 +104,7 @@ DB 가 없으므로 Fake/Mock 과 소스 구조 검사로만 검증했다.
 | 구분 | 결과 |
 |---|---|
 | `npm run type-check` | 통과 (오류 0) |
-| 신규 `npm run test:daewon-stabilization-phase1` | **279개 단언 통과** (Fake PG 동시성, 오류 변환·allowlist, LOT 가드, 다품목 입고 부분 성공/재시도, 제조번호 정책 96조합, 소스 구조). 1차 커밋 시점은 79개. 입고 중복·정합성 최종 검증은 `docs/DAEWON-RECEIVING-INTEGRITY-REVIEW.md` 참고 |
+| 신규 `npm run test:daewon-stabilization-phase1` | **318개 단언 통과** (Fake PG 동시성, 오류 변환·allowlist, LOT 가드, 다품목 입고 부분 성공/재시도, 제조번호 정책 96조합, 소스 구조). 1차 커밋 시점은 79개. 입고 중복·정합성 최종 검증은 `docs/DAEWON-RECEIVING-INTEGRITY-REVIEW.md` 참고 |
 | 기존 테스트 49개(DB 불필요) 실행 | 42 통과 / 7 실패 → **7개 모두 기존 실패** (아래) |
 | `npm run build` | 통과 (`prisma generate` + `next build`, 더미 DB URL 로 실행 — DB 미접속. 린트/타입 검사 포함) |
 | `npm run check:server-actions` | 통과 (82개 "use server" 파일 export 검사) |

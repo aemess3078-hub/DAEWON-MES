@@ -29,11 +29,13 @@ import { subtractQuantities } from "@/lib/quantity-scale"
 import {
   applyReceiptToQuantities,
   describeBatchFailure,
+  isRowDone,
   isRowLocked,
   runReceivingBatch,
   type RowStatusMap,
 } from "@/lib/receiving-batch"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
+import { generateReceivingRequestId } from "@/lib/receiving-request-id"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,6 +90,12 @@ export function ReceivingDialog({
   const [rowStatus, setRowStatus] = useState<RowStatusMap>({})
   // state 갱신 전에 들어오는 더블클릭/중복 호출 방어
   const savingRef = useRef(false)
+  // 하나의 입고 작업(품목)마다 재시도에도 같은 요청 ID 를 유지한다 — 서버 멱등 키. 새 입고(창을 새로 열기)에서만 새로 만든다.
+  const requestIdsRef = useRef<Record<string, string>>({})
+  function requestIdFor(purchaseOrderItemId: string): string {
+    if (!requestIdsRef.current[purchaseOrderItemId]) requestIdsRef.current[purchaseOrderItemId] = generateReceivingRequestId()
+    return requestIdsRef.current[purchaseOrderItemId]
+  }
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
 
   const [inspections, setInspections] = useState<ItemInspection[]>(() =>
@@ -145,7 +153,7 @@ export function ReceivingDialog({
   async function handleSave() {
     if (savingRef.current) return // 저장 중 중복 호출 방어
     const hasPending = inspections.some(
-      (ins) => !isRowLocked(rowStatus[ins.purchaseOrderItemId]) && (parseFloat(ins.thisReceivedQty) || 0) > 0
+      (ins) => !isRowDone(rowStatus[ins.purchaseOrderItemId]) && (parseFloat(ins.thisReceivedQty) || 0) > 0
     )
     if (!hasPending) {
       alert("입고수량을 1 이상 입력해 주세요. 이미 처리된 품목은 다시 저장되지 않습니다.")
@@ -153,7 +161,7 @@ export function ReceivingDialog({
     }
     // 요청을 보내기 전에 전체를 먼저 검증한다(일부만 처리된 뒤 검증 오류가 나는 상황 방지)
     for (const ins of inspections) {
-      if (isRowLocked(rowStatus[ins.purchaseOrderItemId])) continue
+      if (isRowDone(rowStatus[ins.purchaseOrderItemId])) continue
       if ((parseFloat(ins.thisReceivedQty) || 0) <= 0) continue
       if (!ins.warehouseId) {
         alert(`[${ins.itemCode}] ${ins.itemName}\n입고 창고를 선택해 주세요.`)
@@ -169,6 +177,7 @@ export function ReceivingDialog({
           purchaseOrderItemId: ins.purchaseOrderItemId,
           receivedInput: parseFloat(ins.thisReceivedQty) || 0,
           acceptedInput: parseFloat(ins.thisAcceptedQty) || 0,
+          requestId: requestIdFor(ins.purchaseOrderItemId),
         })),
         rowStatus,
         async (row) => {
@@ -181,6 +190,7 @@ export function ReceivingDialog({
             receivedQty: row.receivedInput,
             acceptedQty: row.acceptedInput,
             rejectedQty: parseFloat(ins.thisRejectedQty) || 0,
+            requestId: row.requestId,
             result: ins.result,
             note: ins.note || undefined,
             lotNo: ins.lotNo.trim() || undefined,

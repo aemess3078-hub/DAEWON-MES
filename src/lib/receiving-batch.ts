@@ -12,7 +12,8 @@
  * 서버 입고 트랜잭션과 재고 계산은 변경하지 않는다. 이 모듈은 순수 함수만 가진다(React/DB 의존 없음).
  */
 
-import { OUTCOME_UNKNOWN_MESSAGE, toUserErrorMessage } from "@/lib/errors/user-error"
+import { toUserErrorMessage } from "@/lib/errors/user-error"
+import { RECEIVING_UNKNOWN_MESSAGE } from "@/lib/receiving-request-id"
 import { addQuantities, subtractQuantities } from "@/lib/quantity-scale"
 
 export type RowReceiptStatus =
@@ -22,10 +23,15 @@ export type RowReceiptStatus =
 
 export type RowStatusMap = Record<string, RowReceiptStatus>
 
-export const UNKNOWN_RECEIPT_MESSAGE =
-  "처리 결과를 확인하지 못했습니다. 중복 입고를 막기 위해 이 품목은 다시 저장되지 않습니다. 창을 닫고 입고 내역(기입고 수량)을 확인한 뒤 필요하면 다시 입고해 주세요."
+// 서버 멱등성(requestId)이 있으므로 결과 불명 품목은 같은 요청 ID 로 다시 저장해도 중복 입고되지 않는다
+export const UNKNOWN_RECEIPT_MESSAGE = RECEIVING_UNKNOWN_MESSAGE
 
-/** 이미 처리가 확정되었거나 결과를 알 수 없어 다시 보내면 안 되는 품목 */
+/** 서버에서 처리가 확정된 품목 — 다시 보내지 않는다 */
+export function isRowDone(status: RowReceiptStatus | undefined): boolean {
+  return status?.state === "done"
+}
+
+/** 입력을 잠그는 품목(완료 + 결과 불명). 결과 불명 품목은 같은 내용·같은 요청 ID 로만 다시 저장할 수 있다. */
 export function isRowLocked(status: RowReceiptStatus | undefined): boolean {
   return status?.state === "done" || status?.state === "unknown"
 }
@@ -42,7 +48,8 @@ export function applyReceiptToQuantities(
   return { receivedQty, pendingQty: pending === null ? 0 : Math.max(0, pending) }
 }
 
-export type BatchRow = { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number }
+/** requestId: 하나의 입고 작업에 대해 재시도에도 유지되는 서버 멱등 키 */
+export type BatchRow = { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number; requestId: string }
 
 export type BatchOutcome = {
   statuses: RowStatusMap
@@ -71,15 +78,16 @@ export async function runReceivingBatch(
 
   for (const row of rows) {
     if (row.receivedInput <= 0) continue
-    if (isRowLocked(statuses[row.purchaseOrderItemId])) continue // 이미 성공/불명 → 재전송 금지
+    // 이미 성공한 품목만 건너뛴다. 결과 불명 품목은 같은 requestId 로 다시 보내도 서버가 중복 없이 처리한다.
+    if (isRowDone(statuses[row.purchaseOrderItemId])) continue
     try {
       const result = await submit(row)
       if (result.success) {
         statuses[row.purchaseOrderItemId] = { state: "done" }
         newlyDone.push(row.purchaseOrderItemId)
       } else if (result.outcome === "UNKNOWN") {
-        // 서버가 "DB 반영 여부를 알 수 없음"으로 응답 — 성공/실패로 단정하지 않고 재전송을 막는다
-        statuses[row.purchaseOrderItemId] = { state: "unknown", message: result.message ?? OUTCOME_UNKNOWN_MESSAGE }
+        // 서버가 "DB 반영 여부를 알 수 없음"으로 응답 — 성공/실패로 단정하지 않는다(같은 요청 ID 로 재전송하면 서버가 판별)
+        statuses[row.purchaseOrderItemId] = { state: "unknown", message: result.message ?? RECEIVING_UNKNOWN_MESSAGE }
         stoppedAt = row.purchaseOrderItemId
         break
       } else {

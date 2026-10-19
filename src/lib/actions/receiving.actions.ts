@@ -11,7 +11,15 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
 import { recordAuditLog } from "@/lib/audit-log"
 import { BUSINESS_NUMBER_MAX_ATTEMPTS, isUniqueConstraintError, kstDateParts } from "@/lib/business-numbering"
-import { OUTCOME_UNKNOWN_MESSAGE, isOutcomeUnknownError, toUserErrorMessage } from "@/lib/errors/user-error"
+import { isOutcomeUnknownError, toUserErrorMessage } from "@/lib/errors/user-error"
+import {
+  RECEIVING_REQUEST_CONFLICT_MESSAGE,
+  RECEIVING_REQUEST_ID_INVALID_MESSAGE,
+  RECEIVING_UNKNOWN_MESSAGE,
+  hashReceivingRequest,
+  judgeExistingRequest,
+} from "@/lib/receiving-idempotency"
+import { isValidReceivingRequestId } from "@/lib/receiving-request-id"
 import { checkReceiptRemaining, validateReceiptQuantities } from "@/lib/receiving-quantity"
 import { safeRevalidate } from "@/lib/revalidate-safe"
 import { allocateReceiptTxNo } from "@/lib/services/receiving-tx-number.service"
@@ -29,6 +37,11 @@ export type CreateReceivingInspectionInput = {
   note?: string
   lotNo?: string               // 입력 시 해당 LOT 사용, 미입력 + isLotTracked 시 자동생성
   lotReservationId?: string    // 자동채번 미리보기(reserveReceivingLotNumber)로 발급받은 예약 id
+  /**
+   * 멱등 키(필수). 하나의 입고 작업은 재시도에도 같은 값을 보낸다. 같은 (tenant, requestId) 는 한 번만 처리되고,
+   * 재전송은 새 입고/LOT/거래번호 없이 기존 결과를 돌려준다. 같은 발주품목의 분할 입고는 requestId 가 달라야 한다.
+   */
+  requestId: string
   // 하위 호환용 (무시됨)
   tenantId?: string
 }
@@ -61,7 +74,8 @@ const AUTO_LOT_COLLISION = "AUTO_LOT_COLLISION"
  * outcome: 실패 시 "FAILED"(롤백이 확실한 업무/검증 오류, 수정 후 재시도 가능) 또는
  *          "UNKNOWN"(DB 연결/응답 오류로 커밋 여부를 알 수 없음 — 성공으로 단정하지 않고 자동 재시도도 금지)
  */
-type ReceivingResult = { success: boolean; message?: string; outcome?: "FAILED" | "UNKNOWN" }
+// replayed: 같은 requestId 의 재전송이라 새로 처리하지 않고 기존 결과(성공)를 돌려준 경우
+type ReceivingResult = { success: boolean; message?: string; outcome?: "FAILED" | "UNKNOWN"; replayed?: boolean }
 
 export async function createReceivingInspection(
   data: CreateReceivingInspectionInput,
@@ -76,7 +90,7 @@ export async function createReceivingInspection(
     // 업무 규칙 메시지는 그대로, Prisma/DB 내부 오류는 안전한 안내문으로 바꾼다(원본은 서버 로그에만 남긴다).
     console.error("[createReceivingInspection] error:", error)
     if (isOutcomeUnknownError(error)) {
-      return { success: false, outcome: "UNKNOWN", message: OUTCOME_UNKNOWN_MESSAGE }
+      return { success: false, outcome: "UNKNOWN", message: RECEIVING_UNKNOWN_MESSAGE }
     }
     return {
       success: false,
@@ -99,6 +113,32 @@ async function createReceivingInspectionInternal(
   if (!quantityCheck.ok) throw new Error(quantityCheck.message)
   const qty = quantityCheck.value
   const receivedScaled = qty.receivedScaled
+
+  // ── 0-A. 멱등 키 검증 + 요청 내용 해시 ──────────────────────────────────────
+  if (!isValidReceivingRequestId(data.requestId)) throw new Error(RECEIVING_REQUEST_ID_INVALID_MESSAGE)
+  const requestId = data.requestId
+  const requestHash = hashReceivingRequest({
+    purchaseOrderId: data.purchaseOrderId,
+    purchaseOrderItemId: data.purchaseOrderItemId,
+    warehouseId: data.warehouseId,
+    receivedScaled: String(qty.receivedScaled),
+    acceptedScaled: String(qty.acceptedScaled),
+    rejectedScaled: String(qty.rejectedScaled),
+    result: data.result,
+    lotNo: data.lotNo,
+    lotReservationId: data.lotReservationId,
+    inspectorId: data.inspectorId,
+    note: data.note,
+  })
+  // 이미 처리된 요청의 재전송이면 현재 잔량·발주 상태와 무관하게 기존 결과를 돌려준다(재검증하면 "잔여수량 초과" 로 거절됨).
+  const prior = await prisma.receivingRequest.findUnique({
+    where: { tenantId_requestId: { tenantId, requestId } },
+    select: { requestHash: true },
+  })
+  if (prior) {
+    if (judgeExistingRequest(prior.requestHash, requestHash) === "REPLAY") return { success: true, replayed: true }
+    throw new Error(RECEIVING_REQUEST_CONFLICT_MESSAGE)
+  }
 
   // ── 1. 창고 존재 및 테넌트 소속 확인 ──────────────────────────────────────
   const warehouse = await prisma.warehouse.findFirst({
@@ -207,11 +247,29 @@ async function createReceivingInspectionInternal(
   // 동시에 실행되어도, 두 경로 모두 같은 테이블의 (tenantId, lotNo) unique 제약을 통해서만
   // 번호를 "소유"할 수 있으므로 Lot 테이블과 예약 테이블 사이의 경합이 사라진다.
   const maxAttempts = qty.accepted > 0 || lotResolutionMode === "AUTO" ? BUSINESS_NUMBER_MAX_ATTEMPTS : 1
+  let replayed = false
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
       await prisma.$transaction(async (tx) => {
         await lockPurchaseOrderItemsForUpdate(tx, tenantId, [data.purchaseOrderItemId])
         let txNo: string | null = null
+
+        // 멱등 클레임 — 입고검사/재고/수불/거래번호/LOT 와 같은 트랜잭션. 롤백되면 클레임도 사라져 정상 재시도를 막지 않는다.
+        // 같은 발주품목의 동시 재전송은 위 행 잠금으로 직렬화되어, 먼저 커밋된 요청을 여기서 보고 그대로 돌려준다.
+        // (다른 발주품목에서 같은 requestId 가 동시에 오면 아래 INSERT 가 unique 로 하나만 통과시킨다.)
+        const priorInTx = await tx.receivingRequest.findUnique({
+          where: { tenantId_requestId: { tenantId, requestId } },
+          select: { requestHash: true },
+        })
+        if (priorInTx) {
+          if (judgeExistingRequest(priorInTx.requestHash, requestHash) !== "REPLAY") throw new Error(RECEIVING_REQUEST_CONFLICT_MESSAGE)
+          replayed = true
+          return // 새 입고·LOT 번호·거래번호를 만들지 않는다
+        }
+        const claim = await tx.receivingRequest.create({
+          data: { tenantId, requestId, requestHash, purchaseOrderItemId: data.purchaseOrderItemId },
+          select: { id: true },
+        })
         const lockedPurchaseOrderItem = await tx.purchaseOrderItem.findFirst({
           where: {
             id: data.purchaseOrderItemId,
@@ -378,6 +436,7 @@ async function createReceivingInspectionInternal(
         note: data.note,
       },
     })
+    await tx.receivingRequest.update({ where: { id: claim.id }, data: { receivingInspectionId: inspection.id } })
 
     // 4-3. PurchaseOrderItem.receivedQty 갱신
     await tx.purchaseOrderItem.update({
@@ -476,6 +535,15 @@ async function createReceivingInspectionInternal(
       })
       break
     } catch (error) {
+      // 같은 (tenant, requestId) 가 다른 트랜잭션에서 먼저 커밋됨 → 내용이 같으면 기존 결과를 돌려주고, 다르면 오류
+      if (isUniqueConstraintError(error, ["tenantId", "requestId"])) {
+        const existing = await prisma.receivingRequest.findUnique({
+          where: { tenantId_requestId: { tenantId, requestId } },
+          select: { requestHash: true },
+        })
+        if (existing && judgeExistingRequest(existing.requestHash, requestHash) === "REPLAY") return { success: true, replayed: true }
+        throw new Error(RECEIVING_REQUEST_CONFLICT_MESSAGE)
+      }
       const txNoCollision = isUniqueConstraintError(error, ["tenantId", "txNo"])
       const autoLotCollision = lotResolutionMode === "AUTO" &&
         (isUniqueConstraintError(error) ||
@@ -496,6 +564,8 @@ async function createReceivingInspectionInternal(
       throw error
     }
   }
+
+  if (replayed) return { success: true, replayed: true } // 재전송 — 이번 호출에서는 아무것도 쓰지 않았다
 
   // ── DB 커밋 완료 이후 ──────────────────────────────────────────────────────
   // 여기서부터의 오류(캐시 재검증 등)는 입고 결과를 뒤집으면 안 된다. 실패로 반환하면 사용자가 다시 저장해

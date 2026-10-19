@@ -15,6 +15,8 @@ export type ReceiptQuantities = {
   accepted: number
   rejected: number
   receivedScaled: bigint
+  acceptedScaled: bigint
+  rejectedScaled: bigint
 }
 
 export type ReceiptQuantityResult<T> = { ok: true; value: T } | { ok: false; message: string }
@@ -46,6 +48,8 @@ export function validateReceiptQuantities(input: {
       accepted: fromScaledQuantity(accepted),
       rejected: fromScaledQuantity(rejected),
       receivedScaled: received,
+      acceptedScaled: accepted,
+      rejectedScaled: rejected,
     },
   }
 }

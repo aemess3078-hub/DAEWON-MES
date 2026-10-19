@@ -395,31 +395,36 @@ class FakeReceivingServer {
   calls: string[] = []
   failOnce = new Set<string>()
   throwOnce = new Set<string>()
+  loseResponseOnce = new Set<string>() // 서버는 처리했지만 응답이 유실되는 경우
+  seen = new Set<string>() // 처리된 requestId (서버 멱등 원장 모델)
   constructor(init: Record<string, { ordered: number; received?: number }>) {
     for (const [id, v] of Object.entries(init)) this.items.set(id, { ordered: v.ordered, received: v.received ?? 0 })
   }
-  async receive(id: string, receivedQty: number, acceptedQty: number): Promise<{ success: boolean; message?: string }> {
+  async receive(id: string, receivedQty: number, acceptedQty: number, requestId?: string): Promise<{ success: boolean; message?: string }> {
     this.calls.push(id)
-    if (this.throwOnce.delete(id)) throw new Error("fetch failed") // 응답 없음(처리 여부 불명)
+    if (this.throwOnce.delete(id)) throw new Error("fetch failed") // 요청이 서버에 도달하지 못함
+    if (requestId && this.seen.has(requestId)) return { success: true } // 같은 requestId 재전송: 새로 처리하지 않고 기존 결과 반환
     if (this.failOnce.delete(id)) return { success: false, message: "선택한 창고를 찾을 수 없습니다." }
     const it = this.items.get(id)!
     const remaining = it.ordered - it.received
     if (receivedQty > remaining) return { success: false, message: `입고수량은 잔여수량을 초과할 수 없습니다. 잔여수량: ${remaining}` }
     it.received += acceptedQty
+    if (requestId) this.seen.add(requestId)
+    if (this.loseResponseOnce.delete(id)) throw new Error("fetch failed") // 처리는 끝났는데 응답이 유실됨
     return { success: true }
   }
 }
 
 async function testReceivingBatch() {
-  const { runReceivingBatch, applyReceiptToQuantities, isRowLocked } = receivingBatchModule
+  const { runReceivingBatch, applyReceiptToQuantities, isRowLocked, isRowDone } = receivingBatchModule
   const rows = [
-    { purchaseOrderItemId: "A", receivedInput: 40, acceptedInput: 40 },
-    { purchaseOrderItemId: "B", receivedInput: 10, acceptedInput: 10 },
-    { purchaseOrderItemId: "C", receivedInput: 0, acceptedInput: 0 },
+    { purchaseOrderItemId: "A", receivedInput: 40, acceptedInput: 40, requestId: "req-A-00000000000001" },
+    { purchaseOrderItemId: "B", receivedInput: 10, acceptedInput: 10, requestId: "req-B-00000000000001" },
+    { purchaseOrderItemId: "C", receivedInput: 0, acceptedInput: 0, requestId: "req-C-00000000000001" },
   ]
   const mk = () => new FakeReceivingServer({ A: { ordered: 100 }, B: { ordered: 50 }, C: { ordered: 20 } })
-  const submitTo = (srv: FakeReceivingServer) => (r: { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number }) =>
-    srv.receive(r.purchaseOrderItemId, r.receivedInput, r.acceptedInput)
+  const submitTo = (srv: FakeReceivingServer) => (r: { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number; requestId: string }) =>
+    srv.receive(r.purchaseOrderItemId, r.receivedInput, r.acceptedInput, r.requestId)
 
   // F1. A 성공 → B 실패 → 재시도: A 는 다시 입고되지 않는다
   {
@@ -468,18 +473,21 @@ async function testReceivingBatch() {
     eq(out.allDone, true, "F3 수량 0 인 C 는 대상이 아니며 A,B 성공 시 전체 완료")
   }
 
-  // F4. 응답 불명(throw): 처리 여부를 알 수 없으므로 자동 재전송하지 않는다
+  // F4. 응답 불명(서버는 처리했지만 응답 유실): 같은 requestId 로 다시 보내도 중복 입고되지 않는다
   {
     const srv = mk()
-    srv.throwOnce.add("A")
+    srv.loseResponseOnce.add("A")
     const first = await runReceivingBatch(rows, {}, submitTo(srv))
-    eq(first.statuses.A?.state, "unknown", "F4 응답 불명 기록")
-    ok(isRowLocked(first.statuses.A), "F4 결과 불명 품목은 잠금")
-    const again = await runReceivingBatch(rows, first.statuses, submitTo(srv))
-    eq(srv.calls, ["A", "B"], "F4 불명 품목 A 는 재시도 때 서버로 보내지 않음(B 는 진행)")
-    eq(again.allDone, false, "F4 불명 품목이 남아 있으면 자동으로 닫지 않음")
+    eq(first.statuses.A?.state, "unknown", "F4 응답 불명 기록 (서버는 이미 A 를 처리함)")
+    ok(isRowLocked(first.statuses.A) && !isRowDone(first.statuses.A), "F4 결과 불명 품목은 입력 잠금, 완료로 단정하지 않음")
+    eq(srv.items.get("A")!.received, 40, "F4 서버에는 A 40 이 1회 반영됨")
     const a = first.statuses.A
-    ok(a !== undefined && a.state === "unknown" && a.message.includes("중복 입고"), "F4 불명 안내 문구")
+    ok(a !== undefined && a.state === "unknown" && a.message.includes("같은 요청으로 다시 저장"), "F4 불명 안내: 같은 요청으로 다시 저장하면 안전함")
+    const again = await runReceivingBatch(rows, first.statuses, submitTo(srv))
+    eq(srv.calls, ["A", "A", "B"], "F4 재저장 시 A 는 같은 requestId 로 재전송, B 는 이어서 진행")
+    eq(srv.items.get("A")!.received, 40, "F4 재전송에도 A 는 40 그대로 (서버 멱등으로 중복 입고 없음)")
+    eq(srv.items.get("B")!.received, 10, "F4 B 정상 입고 10")
+    eq(again.allDone, true, "F4 재전송이 기존 결과로 확인되어 완료")
   }
 
   // F5. 잔량 초과는 서버가 거부 → 실패 안내, 기입고 수량은 변하지 않음
@@ -719,29 +727,29 @@ async function testQuantityPrecisionAndPostCommit() {
   for (const e of [mk("PrismaClientKnownRequestError", "P2002"), mk("PrismaClientKnownRequestError", "P2034"), new Error("입고수량은 잔여수량을 초과할 수 없습니다."), new Error("FORBIDDEN")]) {
     ok(!isOutcomeUnknownError(e), `I6 롤백이 확실한 오류는 불명 아님: ${(e as { code?: string }).code ?? e.message.slice(0, 16)}`)
   }
-  ok(/isOutcomeUnknownError\(error\)[\s\S]{0,120}outcome: "UNKNOWN"/.test(server), "I6 서버(입고): 결과 불명 오류를 outcome=UNKNOWN 으로 반환")
+  ok(/isOutcomeUnknownError\(error\)[\s\S]{0,160}outcome: "UNKNOWN"/.test(server), "I6 서버(입고): 결과 불명 오류를 outcome=UNKNOWN 으로 반환")
   ok(/isOutcomeUnknownError\(e\)\) return \{ ok: false, error: OUTCOME_UNKNOWN_MESSAGE \}/.test(read("src", "lib", "actions", "material-issue.actions.ts")), "I6 서버(출고): 결과 불명 시 확인 요청 메시지")
   {
     const srv = new FakeReceivingServer({ A: { ordered: 100 }, B: { ordered: 50 } })
     const rows2 = [
-      { purchaseOrderItemId: "A", receivedInput: 40, acceptedInput: 40 },
-      { purchaseOrderItemId: "B", receivedInput: 10, acceptedInput: 10 },
+      { purchaseOrderItemId: "A", receivedInput: 40, acceptedInput: 40, requestId: "req-A-00000000000002" },
+      { purchaseOrderItemId: "B", receivedInput: 10, acceptedInput: 10, requestId: "req-B-00000000000002" },
     ]
     let first = true
-    const submit = async (r: { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number }) => {
+    const submit = async (r: { purchaseOrderItemId: string; receivedInput: number; acceptedInput: number; requestId: string }) => {
       if (r.purchaseOrderItemId === "A" && first) {
         first = false
         // 서버는 커밋했지만 응답이 "결과 불명"으로 돌아온 상황
-        await srv.receive("A", r.receivedInput, r.acceptedInput)
+        await srv.receive("A", r.receivedInput, r.acceptedInput, r.requestId)
         return { success: false, outcome: "UNKNOWN" as const, message: OUTCOME_UNKNOWN_MESSAGE }
       }
-      return srv.receive(r.purchaseOrderItemId, r.receivedInput, r.acceptedInput)
+      return srv.receive(r.purchaseOrderItemId, r.receivedInput, r.acceptedInput, r.requestId)
     }
     const o1 = await receivingBatchModule.runReceivingBatch(rows2, {}, submit)
     eq(o1.statuses.A?.state, "unknown", "I6 outcome=UNKNOWN 응답은 실패가 아니라 결과 불명으로 기록")
     const o2 = await receivingBatchModule.runReceivingBatch(rows2, o1.statuses, submit)
-    eq(srv.items.get("A")!.received, 40, "I6 결과 불명 품목은 재시도해도 다시 전송되지 않아 중복 입고 없음")
-    eq(o2.allDone, false, "I6 결과 불명이 남아 있으면 성공으로 단정하지 않음")
+    eq(srv.items.get("A")!.received, 40, "I6 결과 불명 품목을 같은 requestId 로 다시 보내도 중복 입고 없음(서버 멱등)")
+    eq(o2.allDone, true, "I6 재전송으로 결과가 확인되면 완료 처리")
   }
 }
 
@@ -840,6 +848,82 @@ async function testReceiptTxNumbering() {
   ok(/lockPurchaseOrderItemsForUpdate\(tx, tenantId/.test(src) && /checkReceiptRemaining\(/.test(src) && /computeNextMaterialReceiptLotNo\(/.test(src), "J4 발주품목 행 잠금·잔량 검증·LOT 자동채번 호출은 유지")
 }
 
+// ─── K. 서버 멱등성(requestId) — 순수 로직 · 구조 ─────────────────────────────────
+
+function testReceivingIdempotency() {
+  const ids = require("../src/lib/receiving-request-id") as typeof import("../src/lib/receiving-request-id")
+  const idem = require("../src/lib/receiving-idempotency") as typeof import("../src/lib/receiving-idempotency")
+
+  // K1. 요청 ID 형식
+  ok(ids.isValidReceivingRequestId("3f2b8c1e-5a7d-4e0b-9c1d-2a4f6b8d0e12"), "K1 UUID v4 형식 허용")
+  for (const bad of ["", "short", "has space in it-0000000000", "한글-요청-아이디-0000000000", "a".repeat(129), null, undefined, 12345678901234567890]) {
+    ok(!ids.isValidReceivingRequestId(bad as unknown), `K1 잘못된 요청 ID 거부: ${String(bad).slice(0, 20)}`)
+  }
+  const a = ids.generateReceivingRequestId(), b = ids.generateReceivingRequestId()
+  ok(ids.isValidReceivingRequestId(a) && a !== b, "K1 생성된 ID 는 유효하고 호출마다 다르다")
+  // 비보안 컨텍스트(http 태블릿)에서 crypto.randomUUID 가 없어도 생성 가능
+  const g = globalThis as unknown as { crypto?: unknown }
+  const original = Object.getOwnPropertyDescriptor(globalThis, "crypto")
+  const webcrypto = (require("node:crypto") as typeof import("node:crypto")).webcrypto
+  try {
+    Object.defineProperty(globalThis, "crypto", { value: { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) }, configurable: true })
+    const f1 = ids.generateReceivingRequestId()
+    Object.defineProperty(globalThis, "crypto", { value: undefined, configurable: true })
+    const f2 = ids.generateReceivingRequestId()
+    ok(ids.isValidReceivingRequestId(f1) && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(f1), "K1 randomUUID 없이 getRandomValues 로 UUID v4 생성")
+    ok(ids.isValidReceivingRequestId(f2), "K1 crypto 자체가 없어도 대체 생성")
+  } finally {
+    if (original) Object.defineProperty(globalThis, "crypto", original)
+    else delete g.crypto
+  }
+
+  // K2. 요청 내용 해시
+  const base = {
+    purchaseOrderId: "po1", purchaseOrderItemId: "poi1", warehouseId: "wh1",
+    receivedScaled: "100000000", acceptedScaled: "100000000", rejectedScaled: "0",
+    result: "PASS", lotNo: "LOT-1", lotReservationId: undefined, inspectorId: undefined, note: undefined,
+  }
+  const h = idem.hashReceivingRequest(base)
+  ok(/^[0-9a-f]{64}$/.test(h), "K2 SHA-256 hex 64자")
+  eq(idem.hashReceivingRequest({ ...base, lotNo: "  LOT-1 ", note: " ", lotReservationId: null, inspectorId: null }), idem.hashReceivingRequest({ ...base, note: "" }), "K2 공백·null/undefined 표기 차이는 같은 내용")
+  for (const [label, change] of [
+    ["수량", { receivedScaled: "50000000", acceptedScaled: "50000000" }], ["합격/불합격 배분", { acceptedScaled: "90000000", rejectedScaled: "10000000" }],
+    ["발주품목", { purchaseOrderItemId: "poi2" }], ["창고", { warehouseId: "wh2" }], ["LOT", { lotNo: "LOT-2" }], ["판정", { result: "FAIL" }],
+    ["비고", { note: "x" }], ["검사자", { inspectorId: "u1" }], ["LOT 예약", { lotReservationId: "r1" }], ["발주", { purchaseOrderId: "po2" }],
+  ] as const) {
+    ok(idem.hashReceivingRequest({ ...base, ...change }) !== h, `K2 내용이 다르면 해시가 다름: ${label}`)
+  }
+  eq([idem.judgeExistingRequest(h, h), idem.judgeExistingRequest(h, idem.hashReceivingRequest({ ...base, lotNo: "LOT-2" }))], ["REPLAY", "CONFLICT"], "K2 같은 내용=REPLAY, 다른 내용=CONFLICT")
+
+  // K3. 소스·스키마 구조
+  const schema = read("prisma", "schema.prisma")
+  const model = schema.match(/model ReceivingRequest \{[\s\S]*?\n\}/)?.[0] ?? ""
+  ok(/@@unique\(\[tenantId, requestId\]\)/.test(model) && /requestHash\s+String/.test(model) && /receivingInspectionId\s+String\?\s+@unique/.test(model), "K3 스키마: (tenantId, requestId) unique · requestHash · 검사이력 1:1")
+  const mig = read("prisma", "migrations", "20261019000000_add_receiving_request_idempotency", "migration.sql")
+  const migSql = mig.split(/\r?\n/).filter((l) => !l.trim().startsWith("--")).join("\n") // 주석 제외
+  ok(/CREATE UNIQUE INDEX "ReceivingRequest_tenantId_requestId_key"/.test(migSql) && /ENABLE ROW LEVEL SECURITY/.test(migSql) && !/DROP /.test(migSql) && !/ALTER TABLE "(?!ReceivingRequest")/.test(migSql), "K3 migration: 신규 테이블/인덱스/RLS 만 — 기존 테이블 변경·삭제 없음")
+  const src = read("src", "lib", "actions", "receiving.actions.ts")
+  const iPre = src.indexOf("receivingRequest.findUnique")
+  const iWh = src.indexOf("prisma.warehouse.findFirst")
+  ok(iPre > 0 && iPre < iWh, "K3 서버: 재전송 확인(REPLAY)이 창고·잔량 재검증보다 먼저 — 이미 처리된 요청이 '잔여수량 초과'로 거절되지 않음")
+  const iClaim = src.indexOf("tx.receivingRequest.create")
+  const iLockTx = src.indexOf("allocateReceiptTxNo(tx, tenantId")
+  const iLot = src.indexOf("computeNextMaterialReceiptLotNo(tx")
+  const iInsp = src.indexOf("tx.receivingInspection.create")
+  ok(iClaim > 0 && iClaim < iLockTx && iClaim < iLot && iClaim < iInsp, "K3 서버: 클레임이 거래번호·LOT 번호 발급·입고검사 생성보다 먼저 — 재전송이 새 번호를 소모하지 않음")
+  ok(/tx\.receivingRequest\.update\(\{ where: \{ id: claim\.id \}, data: \{ receivingInspectionId: inspection\.id \} \}\)/.test(src), "K3 서버: 클레임과 입고검사를 같은 트랜잭션에서 연결")
+  ok(/isUniqueConstraintError\(error, \["tenantId", "requestId"\]\)/.test(src) && /RECEIVING_REQUEST_CONFLICT_MESSAGE/.test(src), "K3 서버: 동시 중복은 DB unique 로 걸러 REPLAY/CONFLICT 로 해석")
+  ok(/isValidReceivingRequestId\(data\.requestId\)/.test(src), "K3 서버: 요청 ID 필수·형식 검증")
+  for (const p of [
+    ["src", "app", "app", "mes", "material-receipt", "receiving-form-dialog.tsx"],
+    ["src", "app", "app", "mes", "purchase-orders", "receiving-dialog.tsx"],
+  ]) {
+    const d = read(...p)
+    ok(/requestIdFor\(ins\.purchaseOrderItemId\)/.test(d) && /requestId: row\.requestId/.test(d) && /useRef<Record<string, string>>\(\{\}\)/.test(d), `K3 ${p[p.length - 2]}: 품목별 요청 ID 를 만들어 재시도에도 유지`)
+    ok(/isRowDone\(rowStatus\[ins\.purchaseOrderItemId\]\)/.test(d), `K3 ${p[p.length - 2]}: 완료 품목만 건너뛰고 결과 불명 품목은 같은 요청 ID 로 재전송`)
+  }
+}
+
 async function main() {
   await testPurchaseOrderLock()
   testUserErrors()
@@ -851,6 +935,7 @@ async function main() {
   testReceivingHardening()
   await testQuantityPrecisionAndPostCommit()
   await testReceiptTxNumbering()
+  testReceivingIdempotency()
   console.log(`\nAll ${passed} assertions passed`)
 }
 

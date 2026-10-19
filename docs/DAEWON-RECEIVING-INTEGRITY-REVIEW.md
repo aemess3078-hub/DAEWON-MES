@@ -214,3 +214,52 @@ CREATE UNIQUE INDEX IF NOT EXISTS "InventoryBalance_tenantId_itemId_warehouseId_
 ## 12. 테스트 DB 사용법 (로컬 WSL, 운영과 분리)
 - PostgreSQL 18.3 (Ubuntu 패키지를 sudo 없이 `~/daewon-pgtest` 에 풀어 사용), `127.0.0.1:54329`, DB `daewon_mes_test`, 별도 사용자/무작위 비밀번호(WSL `~/daewon-pgtest/.pw`, Git 제외). Docker 없음.
 - 실제 DB 테스트: `scripts/test-daewon-stabilization-db.ts` — `DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB` 와 `localhost/127.0.0.1 의 *_test` DB 가 아니면 실행을 거부한다. 서버 액션을 그대로 호출하고 인증/캐시만 대체한다.
+
+---
+
+## 13. 서버 멱등성 구현 (requestId) — 후속 작업 A 완료
+
+### 방식
+- **요청 ID**: 입고 요청마다 `requestId`(UUID, 16~128자 영숫자/-/_)를 필수로 보낸다. 화면(두 입고 다이얼로그)은 품목별로 ID 를 **처음 저장할 때 한 번 만들고 재시도·결과 불명 재전송에도 같은 값**을 유지한다. 창을 새로 열어 새 입고를 시작할 때만 새 ID 가 생긴다. http 태블릿처럼 `crypto.randomUUID` 가 없는 환경은 `getRandomValues` → `Math.random` 순으로 대체.
+- **원장 테이블 `ReceivingRequest`** (신규, `prisma/migrations/20261019000000_add_receiving_request_idempotency`): `(tenantId, requestId)` **unique**, `requestHash`(요청 내용 SHA-256), `purchaseOrderItemId`, `receivingInspectionId`(1:1, 검사이력 삭제 시 SET NULL). RLS 활성화·anon/authenticated 회수는 기존 신규 테이블 migration 과 동일한 방식. 기존 migration 파일은 변경하지 않았고 신규 테이블만 추가한다.
+- **요청 내용 해시**: 발주·발주품목·창고·입고/합격/불합격수량(소수점 6자리 정수)·판정·LOT 번호·LOT 예약·검사자·비고. 공백/null/undefined 표기 차이는 같은 내용으로 본다.
+- **서버 흐름 (`receiving.actions.ts`)**
+  1. 수량 검증 → 요청 ID 형식 검증 → 해시 계산
+  2. **재전송 확인(REPLAY)**: 같은 (tenant, requestId) 가 있고 해시가 같으면 현재 잔량/발주 상태와 무관하게 `{ success:true, replayed:true }` 를 돌려준다(재검증하면 "잔여수량 초과"로 거절되므로 가장 앞에서 처리). 해시가 다르면 명확한 오류(`같은 입고 요청 번호로 서로 다른 내용…`).
+  3. 트랜잭션 안: 발주품목 행 잠금 → 재확인 → **클레임 INSERT**(→ 거래번호 advisory lock → LOT 발급/검증 → 입고검사 생성 → 재고/수불) → 클레임에 검사이력 연결. 전부 한 트랜잭션이라 **롤백되면 클레임도 사라져 정상 재시도를 막지 않는다.**
+  4. 다른 발주품목에 같은 ID 가 동시에 오면 DB unique 가 하나만 통과시키고, 진 쪽은 `P2002` 를 REPLAY/CONFLICT 로 해석한다.
+  5. 재전송은 클레임보다 앞에서 반환하므로 **새 LOT 번호·거래번호·LOT 예약·재고 변경이 일어나지 않는다**(합격수량 0 입고검사 포함).
+- **결과 불명 처리**: 연결/응답 오류는 `outcome: "UNKNOWN"` 으로 반환(성공 단정 안 함, 서버가 임의 재시도 안 함). 이제 화면은 해당 품목을 잠그되 **같은 요청 ID 로 다시 저장**할 수 있다 — 이미 처리됐다면 서버가 replay 로 응답하고, 처리되지 않았다면 정상 처리된다.
+- 같은 발주품목의 정상 분할 입고(요청 ID 가 다름)는 모두 허용된다. "같은 발주품목이라서" 차단하지 않는다.
+
+### 실제 PostgreSQL 결과 (58건: 57 PASS / 1 FAIL — 남은 FAIL 은 B 의 T13b 뿐)
+| 시나리오 | 결과 |
+|---|---|
+| T10a 같은 요청 ID 순차 2회 | PASS — 재고 40(80 아님), 검사이력 1 |
+| T10b 같은 요청 ID 동시 2회 | PASS — 재고 40 |
+| ID1 순차 2회 | PASS — 2회차 replayed, 새 LOT·거래번호·검사이력 없음 |
+| ID2 동시 10회 | PASS — 10/10 성공 응답(replayed 9), 실제 입고 1회(재고 40, 거래번호 1개, 요청원장 1) |
+| ID3 정상 분할 100+50, 100 재전송 | PASS — 150, 재전송은 중복 없음 |
+| ID4 같은 ID 다른 내용(수량/발주품목) | PASS — 충돌 오류, DB 변화 없음 |
+| ID5 다른 tenant 의 같은 ID | PASS — 각자 정상 처리 |
+| ID6 롤백 후 같은 ID 재시도 | PASS — 실패 시 요청원장·LOT·재고·거래 미반영, 재시도 정상 처리(번호 0001 재사용) |
+| ID7 커밋 성공 후 응답 유실 | PASS — UNKNOWN 반환 / 같은 ID 재전송은 replayed, 재고·LOT·거래번호 중복 없음 |
+| ID8 합격수량 0 동시 3회 | PASS — 검사이력 1건 |
+| ID9 전량 입고 후 재전송 | PASS — replayed 성공 / 새 ID 추가 입고는 잔여수량 초과 거부 |
+| ID10 요청 ID 누락·형식 오류 | PASS — 4/4 거부 |
+| ID11 LOT 자동발행 + 동일 요청 6회 동시 | PASS — LOT 1개·예약 CONSUMED 1건·거래번호 1개 / 새 ID 는 새 LOT 정상 발급 |
+| ID12 같은 ID 가 서로 다른 발주품목에 동시 도착 | PASS — 1건만 처리, 나머지 충돌 오류 |
+| 기존 45건 (T01~T15, R1~R9) | 44 PASS — FAIL 1건 T13b(B) |
+
+테스트 후 정합성 SQL(이번 실행분): 원장 불일치 0, 발주품목 누적 ≠ 합격합계 0, 요청원장↔검사이력 1:1 불일치 0, 거래번호 중복 0, 비LOT 재고 행 중복 0.
+
+### 배포 순서 (운영 반영 시)
+1. **migration 먼저** (`prisma migrate deploy` — 신규 테이블 추가뿐이라 기존 앱과 호환)
+2. 서버·화면 동시 배포 (서버는 requestId 필수, 화면이 항상 전송). 이전 화면(캐시된 구버전 JS)이 남아 있으면 요청 ID 오류로 거절되므로 배포 직후 새로고침 안내가 필요하다.
+3. 롤백: 코드를 되돌리면 테이블은 남아 있어도 무해(`DROP TABLE "ReceivingRequest"` 로 제거 가능).
+- 운영 영향: 입고 1건당 행 1개 추가(작은 테이블), 입고 트랜잭션에 INSERT/UPDATE 1회씩 추가. 보존 정책은 별도 결정(필요하면 N개월 이후 정리 배치).
+- 이번 구현은 **자재입고**에만 적용했다. 발주 등록·작업지시 등록·자재출고 등 다른 쓰기 액션의 멱등성은 범위 밖이다.
+
+## 14. 남은 문제 B — 비LOT 재고 행 유일성 (T13b FAIL)
+- 현재 상태: 입고 경로는 (tenant,날짜) 잠금 덕에 보호되지만(T13a/R2b PASS) DB 제약이 없어 **다른 경로**(완제품 입고 `finished-goods.actions`, 재고조정 등 `inventoryBalance.create`)나 향후 코드 변경에서 중복 행이 생길 수 있다.
+- 해결 방향: ① 운영 DB 에서 `lotId IS NULL` 중복 행 점검(읽기 전용 SQL, §8-2) → 있으면 수량 합산 병합 절차를 별도 승인으로 수행 ② `CREATE UNIQUE INDEX … WHERE "lotId" IS NULL` 를 새 migration 으로 추가(이번과 같은 방식으로 테스트 DB 선적용) ③ `inventoryBalance.create` 호출부(입고·완제품 입고·재고조정)를 "P2002 이면 재조회 후 increment" 로 방어 — 테스트 DB 실험(T13c)에서 인덱스+잠금은 80/80 성공, 잠금 없이 인덱스만 두면 70/80 이 generic 중복 오류로 실패함을 확인했다. TenantUser partial unique 2건도 같은 방식으로 복구 검토.

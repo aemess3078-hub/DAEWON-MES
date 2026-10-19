@@ -72,6 +72,7 @@ const po = require("../src/lib/actions/purchase-order.actions") as typeof import
 const rcv = require("../src/lib/actions/receiving.actions") as typeof import("../src/lib/actions/receiving.actions")
 const wo = require("../src/lib/actions/work-order.actions") as typeof import("../src/lib/actions/work-order.actions")
 const issue = require("../src/lib/actions/material-issue.actions") as typeof import("../src/lib/actions/material-issue.actions")
+const ids = require("../src/lib/receiving-request-id") as typeof import("../src/lib/receiving-request-id")
 const numbering = require("../src/lib/services/purchase-order-number.service") as typeof import("../src/lib/services/purchase-order-number.service")
 
 // ── 2. 결과 기록 ──────────────────────────────────────────────────────────────
@@ -119,11 +120,12 @@ async function newPO(c: Ctx, items: Array<{ itemId: string; qty: number }>) {
   void before
   return order
 }
-function receive(c: Ctx, order: { id: string }, item: { id: string }, p: { r: number; a: number; j: number; lotNo?: string; wh?: string; inspectorId?: string }) {
+function receive(c: Ctx, order: { id: string }, item: { id: string }, p: { r: number; a: number; j: number; lotNo?: string; wh?: string; inspectorId?: string; requestId?: string }) {
   use(c)
   return als.run({ tenantId: c.tenant.id }, () => rcv.createReceivingInspection({
     purchaseOrderItemId: item.id, purchaseOrderId: order.id, warehouseId: p.wh ?? c.warehouse.id, siteId: c.site.id,
     receivedQty: p.r, acceptedQty: p.a, rejectedQty: p.j, result: "PASS", lotNo: p.lotNo, inspectorId: p.inspectorId,
+    requestId: "requestId" in p ? (p.requestId as string) : ids.generateReceivingRequestId(),
   }))
 }
 const poItem = (id: string) => prisma.purchaseOrderItem.findUniqueOrThrow({ where: { id } })
@@ -281,17 +283,19 @@ async function main() {
     const F = await mkCtx("F")
     const o = await newPO(F, [{ itemId: F.plainRaw.id, qty: 100 }])
     const i = o.items[0]
-    const a = await receive(F, o, i, { r: 40, a: 40, j: 0 })
-    const b = await receive(F, o, i, { r: 40, a: 40, j: 0 }) // 완전히 같은 요청 재전송
+    const ridF = ids.generateReceivingRequestId()
+    const a = await receive(F, o, i, { r: 40, a: 40, j: 0, requestId: ridF })
+    const b = await receive(F, o, i, { r: 40, a: 40, j: 0, requestId: ridF }) // 완전히 같은 요청(같은 요청 ID) 재전송
     const stF = await stock(F.tenant.id, F.plainRaw.id)
     const n = await prisma.receivingInspection.count({ where: { purchaseOrderItemId: i.id } })
-    record("T10a", "동일 요청 순차 재전송: 서버가 중복을 막는가 (멱등성)", !(a.success && b.success) || stF.onHand === 40,
+    record("T10a", "동일 요청(같은 요청 ID) 순차 재전송: 서버가 중복을 막는가 (멱등성)", a.success && b.success && stF.onHand === 40 && n === 1,
       `1차=${a.success} 2차=${b.success} → 재고 ${stF.onHand} (1회분 40 이어야 멱등), 검사이력 ${n}건`)
     const F2 = await mkCtx("F2")
     const o2 = await newPO(F2, [{ itemId: F2.plainRaw.id, qty: 100 }])
-    const same = await Promise.all([receive(F2, o2, o2.items[0], { r: 40, a: 40, j: 0 }), receive(F2, o2, o2.items[0], { r: 40, a: 40, j: 0 })])
+    const ridF2 = ids.generateReceivingRequestId()
+    const same = await Promise.all([receive(F2, o2, o2.items[0], { r: 40, a: 40, j: 0, requestId: ridF2 }), receive(F2, o2, o2.items[0], { r: 40, a: 40, j: 0, requestId: ridF2 })])
     const stF2 = await stock(F2.tenant.id, F2.plainRaw.id)
-    record("T10b", "동일 요청 동시 재전송(이중 클릭/이중 탭): 서버가 중복을 막는가", stF2.onHand === 40, `성공 ${same.filter((r) => r.success).length}/2 → 재고 ${stF2.onHand} (40 이어야 멱등)`)
+    record("T10b", "동일 요청(같은 요청 ID) 동시 재전송(이중 클릭/이중 탭): 서버가 중복을 막는가", same.every((r) => r.success) && stF2.onHand === 40, `성공 ${same.filter((r) => r.success).length}/2 → 재고 ${stF2.onHand} (40 이어야 멱등)`)
   }
 
   // ══ T11 DB 트랜잭션 롤백 ════════════════════════════════════════════════════
@@ -563,6 +567,174 @@ async function main() {
       const nosAfter = await receiptNos(L.tenant.id)
       record("R9c", "LOT 자동채번 동시 6건: 전부 성공, LOT 번호 중복 없음, 거래번호 중복 없음", dupConc.every((r) => r.success) && new Set(lotsAfter.map((x) => x.lotNo)).size === lotsAfter.length && lotsAfter.length === 8 && new Set(nosAfter).size === nosAfter.length && isContiguous(nosAfter),
         `성공 ${dupConc.filter((r) => r.success).length}/6, LOT ${lotsAfter.length}개(고유 ${new Set(lotsAfter.map((x) => x.lotNo)).size}), 거래번호 ${nosAfter.length}개 연속=${isContiguous(nosAfter)}`)
+    } finally {
+      if (savedBrand === undefined) delete process.env.NEXT_PUBLIC_BRAND
+      else process.env.NEXT_PUBLIC_BRAND = savedBrand
+    }
+  }
+
+  // ══ ID: 서버 멱등성 (requestId) — 실제 PostgreSQL ═══════════════════════════════════
+  const rqCount = (tenantId: string) => prisma.receivingRequest.count({ where: { tenantId } })
+  const inspCount = (itemId: string) => prisma.receivingInspection.count({ where: { purchaseOrderItemId: itemId } })
+  const lotCount = (tenantId: string) => prisma.lot.count({ where: { tenantId } })
+  const txCount = (tenantId: string) => prisma.inventoryTransaction.count({ where: { tenantId, txType: "RECEIPT" } })
+
+  {
+    // ID1 동일 요청 2회 순차 실행 — 두 번째는 새 입고 없이 기존 결과(replayed)
+    const I1 = await mkCtx("I1")
+    const o = await newPO(I1, [{ itemId: I1.lotRaw.id, qty: 100 }])
+    const it = o.items[0]
+    const rid = ids.generateReceivingRequestId()
+    const r1 = await receive(I1, o, it, { r: 40, a: 40, j: 0, lotNo: "I1-LOT", requestId: rid })
+    const snap1 = { lots: await lotCount(I1.tenant.id), tx: await txCount(I1.tenant.id) }
+    const r2 = await receive(I1, o, it, { r: 40, a: 40, j: 0, lotNo: "I1-LOT", requestId: rid })
+    const st = await stock(I1.tenant.id, I1.lotRaw.id)
+    record("ID1", "동일 요청 2회 순차 실행: 입고 1회만 반영, 2회차는 replayed 성공(새 LOT·거래번호·검사이력 없음)",
+      r1.success && r2.success && !(r1 as { replayed?: boolean }).replayed && (r2 as { replayed?: boolean }).replayed === true && st.onHand === 40 && D((await poItem(it.id)).receivedQty) === 40 && (await inspCount(it.id)) === 1 && (await rqCount(I1.tenant.id)) === 1 && (await lotCount(I1.tenant.id)) === snap1.lots && (await txCount(I1.tenant.id)) === snap1.tx,
+      `1차=${r1.success} 2차=${r2.success}(replayed=${(r2 as { replayed?: boolean }).replayed}) 재고=${st.onHand} 검사이력=${await inspCount(it.id)} 요청원장=${await rqCount(I1.tenant.id)} LOT ${snap1.lots}→${await lotCount(I1.tenant.id)} 거래 ${snap1.tx}→${await txCount(I1.tenant.id)}`)
+
+    // ID2 동일 요청 10회 동시 실행 (이중 클릭/이중 탭/재전송 폭주)
+    const I2 = await mkCtx("I2")
+    const o2 = await newPO(I2, [{ itemId: I2.plainRaw.id, qty: 100 }])
+    const rid2 = ids.generateReceivingRequestId()
+    const res2 = await Promise.all(Array.from({ length: 10 }, () => receive(I2, o2, o2.items[0], { r: 40, a: 40, j: 0, requestId: rid2 })))
+    const st2 = await stock(I2.tenant.id, I2.plainRaw.id)
+    const nos2 = await receiptNos(I2.tenant.id)
+    const replays = res2.filter((r) => (r as { replayed?: boolean }).replayed).length
+    record("ID2", "동일 요청 10회 동시 실행: 전부 성공 응답, 실제 입고는 1회(재고 40·검사이력 1·요청원장 1·거래번호 1)",
+      res2.every((r) => r.success) && replays === 9 && st2.onHand === 40 && (await inspCount(o2.items[0].id)) === 1 && (await rqCount(I2.tenant.id)) === 1 && nos2.length === 1,
+      `성공 ${res2.filter((r) => r.success).length}/10 (replayed ${replays}), 재고=${st2.onHand}, 검사이력=${await inspCount(o2.items[0].id)}, 요청원장=${await rqCount(I2.tenant.id)}, 거래번호 ${nos2.join(",")}`)
+
+    // ID3 정상 분할 입고 — 같은 발주품목, 요청 ID 만 다르면 모두 처리. 이전 요청 재전송은 중복 생성하지 않음
+    const I3 = await mkCtx("I3")
+    const o3 = await newPO(I3, [{ itemId: I3.plainRaw.id, qty: 200 }])
+    const it3 = o3.items[0]
+    const ridA = ids.generateReceivingRequestId(), ridB = ids.generateReceivingRequestId()
+    const a1 = await receive(I3, o3, it3, { r: 100, a: 100, j: 0, requestId: ridA })
+    const b1 = await receive(I3, o3, it3, { r: 50, a: 50, j: 0, requestId: ridB })
+    const st3a = await stock(I3.tenant.id, I3.plainRaw.id)
+    const a2 = await receive(I3, o3, it3, { r: 100, a: 100, j: 0, requestId: ridA }) // 001 재전송
+    const st3b = await stock(I3.tenant.id, I3.plainRaw.id)
+    record("ID3", "정상 분할 입고(100 + 50, 다른 요청 ID)는 모두 처리, 첫 요청(100) 재전송은 중복 생성 없음",
+      a1.success && b1.success && st3a.onHand === 150 && a2.success && (a2 as { replayed?: boolean }).replayed === true && st3b.onHand === 150 && (await inspCount(it3.id)) === 2 && D((await poItem(it3.id)).receivedQty) === 150,
+      `재고 150 → 재전송 후 ${st3b.onHand}, 검사이력 ${await inspCount(it3.id)}건, 누적 ${D((await poItem(it3.id)).receivedQty)}`)
+
+    // ID4 요청 ID 재사용 + 내용 불일치(수량/품목) → 명확한 오류, DB 변화 없음
+    const diffQty = await receive(I3, o3, it3, { r: 60, a: 60, j: 0, requestId: ridA })
+    const o3b = await newPO(I3, [{ itemId: I3.lotRaw.id, qty: 10 }])
+    const diffItem = await receive(I3, o3b, o3b.items[0], { r: 10, a: 10, j: 0, lotNo: "I4-LOT", requestId: ridA })
+    const st4 = await stock(I3.tenant.id, I3.plainRaw.id)
+    record("ID4", "같은 요청 ID 에 다른 내용(수량/발주품목) → 충돌 오류, DB 변화 없음",
+      !diffQty.success && !diffItem.success && /같은 입고 요청 번호로 서로 다른 내용/.test(diffQty.message ?? "") && /같은 입고 요청 번호로 서로 다른 내용/.test(diffItem.message ?? "") && st4.onHand === 150 && (await stock(I3.tenant.id, I3.lotRaw.id)).onHand === 0 && (await rqCount(I3.tenant.id)) === 2,
+      `수량 불일치: "${(diffQty.message ?? "").slice(0, 32)}…" 품목 불일치: "${(diffItem.message ?? "").slice(0, 32)}…" 재고 ${st4.onHand}, 요청원장 ${await rqCount(I3.tenant.id)}`)
+
+    // ID5 서로 다른 tenant 의 같은 requestId — 서로 독립
+    const I5a = await mkCtx("I5a"), I5b = await mkCtx("I5b")
+    const o5a = await newPO(I5a, [{ itemId: I5a.plainRaw.id, qty: 100 }]), o5b = await newPO(I5b, [{ itemId: I5b.plainRaw.id, qty: 100 }])
+    const sharedId = ids.generateReceivingRequestId()
+    const [r5a, r5b] = await Promise.all([receive(I5a, o5a, o5a.items[0], { r: 30, a: 30, j: 0, requestId: sharedId }), receive(I5b, o5b, o5b.items[0], { r: 30, a: 30, j: 0, requestId: sharedId })])
+    record("ID5", "서로 다른 tenant 가 같은 요청 ID 를 써도 각자 정상 처리(서로 replay/충돌로 보지 않음)",
+      r5a.success && r5b.success && !(r5a as { replayed?: boolean }).replayed && !(r5b as { replayed?: boolean }).replayed && (await stock(I5a.tenant.id, I5a.plainRaw.id)).onHand === 30 && (await stock(I5b.tenant.id, I5b.plainRaw.id)).onHand === 30,
+      `A=${r5a.success} B=${r5b.success}, 재고 A=${(await stock(I5a.tenant.id, I5a.plainRaw.id)).onHand} B=${(await stock(I5b.tenant.id, I5b.plainRaw.id)).onHand}`)
+
+    // ID6 롤백 후 같은 요청 ID 로 정상 재시도 (클레임·LOT·재고가 함께 롤백)
+    const I6 = await mkCtx("I6")
+    const o6 = await newPO(I6, [{ itemId: I6.lotRaw.id, qty: 100 }])
+    const rid6 = ids.generateReceivingRequestId()
+    const realId = testProfile.id
+    testProfile.id = "no-such-profile" // 번호·LOT·재고 반영 이후 감사로그 FK 위반으로 실패
+    const f6 = await receive(I6, o6, o6.items[0], { r: 25, a: 25, j: 0, lotNo: "I6-LOT", requestId: rid6 })
+    testProfile.id = realId
+    const afterFail = { rq: await rqCount(I6.tenant.id), lots: await lotCount(I6.tenant.id), tx: await txCount(I6.tenant.id), st: (await stock(I6.tenant.id, I6.lotRaw.id)).onHand, insp: await inspCount(o6.items[0].id) }
+    const retry6 = await receive(I6, o6, o6.items[0], { r: 25, a: 25, j: 0, lotNo: "I6-LOT", requestId: rid6 })
+    const st6 = (await stock(I6.tenant.id, I6.lotRaw.id)).onHand
+    record("ID6", "롤백 후 같은 요청 ID 재시도: 실패 시 클레임·LOT·재고·거래 모두 미반영 → 재시도는 정상 처리(replay 아님)",
+      !f6.success && afterFail.rq === 0 && afterFail.lots === 0 && afterFail.tx === 0 && afterFail.st === 0 && afterFail.insp === 0 && retry6.success && !(retry6 as { replayed?: boolean }).replayed && st6 === 25 && (await rqCount(I6.tenant.id)) === 1 && isContiguous(await receiptNos(I6.tenant.id)),
+      `실패 직후 요청원장=${afterFail.rq} LOT=${afterFail.lots} 거래=${afterFail.tx} 재고=${afterFail.st} | 재시도 ${retry6.success}(replayed=${(retry6 as { replayed?: boolean }).replayed}) 재고=${st6} 거래번호 ${(await receiptNos(I6.tenant.id)).join(",")}`)
+
+    // ID7 커밋 성공 후 응답 실패 — 서버는 처리했는데 호출자는 UNKNOWN 을 받음 → 같은 ID 재전송은 replay
+    const I7 = await mkCtx("I7")
+    const o7 = await newPO(I7, [{ itemId: I7.lotRaw.id, qty: 100 }])
+    const rid7 = ids.generateReceivingRequestId()
+    const client7 = prisma as unknown as { $transaction: (...a: unknown[]) => Promise<unknown> }
+    const realTx7 = client7.$transaction.bind(prisma)
+    client7.$transaction = async (...a: unknown[]) => {
+      await realTx7(...a) // 실제로 커밋됨
+      throw Object.assign(new Error("Server has closed the connection."), { name: "PrismaClientUnknownRequestError" }) // 그런데 응답은 유실
+    }
+    let r7: Awaited<ReturnType<typeof receive>>
+    try { r7 = await receive(I7, o7, o7.items[0], { r: 30, a: 30, j: 0, lotNo: "I7-LOT", requestId: rid7 }) } finally { client7.$transaction = realTx7 }
+    const mid = { st: (await stock(I7.tenant.id, I7.lotRaw.id)).onHand, lots: await lotCount(I7.tenant.id), tx: await txCount(I7.tenant.id), rq: await rqCount(I7.tenant.id) }
+    const resend7 = await receive(I7, o7, o7.items[0], { r: 30, a: 30, j: 0, lotNo: "I7-LOT", requestId: rid7 })
+    const end = { st: (await stock(I7.tenant.id, I7.lotRaw.id)).onHand, lots: await lotCount(I7.tenant.id), tx: await txCount(I7.tenant.id), rq: await rqCount(I7.tenant.id) }
+    record("ID7", "커밋 성공 후 응답 유실: 호출자는 UNKNOWN(성공 단정 안 함), 같은 요청 ID 재전송은 replayed 성공 — 재고·LOT·거래번호 중복 없음",
+      !r7.success && r7.outcome === "UNKNOWN" && mid.st === 30 && resend7.success && (resend7 as { replayed?: boolean }).replayed === true && end.st === 30 && end.lots === mid.lots && end.tx === mid.tx && end.rq === 1,
+      `응답유실 직후 outcome=${r7.outcome} DB 재고=${mid.st}(이미 반영) | 재전송 ${resend7.success}(replayed=${(resend7 as { replayed?: boolean }).replayed}) 재고=${end.st} LOT ${mid.lots}→${end.lots} 거래 ${mid.tx}→${end.tx} 요청원장=${end.rq}`)
+
+    // ID8 합격수량 0(전량 불합격) 입고검사도 중복 저장되지 않음
+    const I8 = await mkCtx("I8")
+    const o8 = await newPO(I8, [{ itemId: I8.plainRaw.id, qty: 100 }])
+    const rid8 = ids.generateReceivingRequestId()
+    const z = await Promise.all([receive(I8, o8, o8.items[0], { r: 10, a: 0, j: 10, requestId: rid8 }), receive(I8, o8, o8.items[0], { r: 10, a: 0, j: 10, requestId: rid8 }), receive(I8, o8, o8.items[0], { r: 10, a: 0, j: 10, requestId: rid8 })])
+    record("ID8", "합격수량 0 인 입고검사도 중복 저장되지 않음 (동시 3회 → 검사이력 1건, 재고 변화 없음)",
+      z.every((r) => r.success) && (await inspCount(o8.items[0].id)) === 1 && (await stock(I8.tenant.id, I8.plainRaw.id)).onHand === 0 && (await txCount(I8.tenant.id)) === 0,
+      `성공 ${z.filter((r) => r.success).length}/3 검사이력=${await inspCount(o8.items[0].id)} 재고=${(await stock(I8.tenant.id, I8.plainRaw.id)).onHand} 수불=${await txCount(I8.tenant.id)}`)
+
+    // ID9 잔량 0(전량 입고 완료) 이후 같은 요청 재전송 — 재검증에 걸려 실패하지 않고 replayed 성공
+    const I9 = await mkCtx("I9")
+    const o9 = await newPO(I9, [{ itemId: I9.plainRaw.id, qty: 50 }])
+    const rid9 = ids.generateReceivingRequestId()
+    const f9 = await receive(I9, o9, o9.items[0], { r: 50, a: 50, j: 0, requestId: rid9 })
+    const g9 = await receive(I9, o9, o9.items[0], { r: 50, a: 50, j: 0, requestId: rid9 })
+    const newReq = await receive(I9, o9, o9.items[0], { r: 50, a: 50, j: 0, requestId: ids.generateReceivingRequestId() })
+    record("ID9", "전량 입고 후 같은 요청 재전송은 replayed 성공, 새 요청 ID 의 추가 입고는 잔여수량 초과로 거부",
+      f9.success && g9.success && (g9 as { replayed?: boolean }).replayed === true && !newReq.success && /잔여수량/.test(newReq.message ?? "") && (await stock(I9.tenant.id, I9.plainRaw.id)).onHand === 50,
+      `최초=${f9.success} 재전송=${g9.success}(replayed=${(g9 as { replayed?: boolean }).replayed}) 새ID추가=${newReq.success}("${(newReq.message ?? "").slice(0, 28)}…") 재고=${(await stock(I9.tenant.id, I9.plainRaw.id)).onHand}`)
+
+    // ID10 요청 ID 누락/형식 오류 거부
+    const I10 = await mkCtx("I10")
+    const o10 = await newPO(I10, [{ itemId: I10.plainRaw.id, qty: 10 }])
+    const bad = await Promise.all(["", "short", "has space has space has", undefined as unknown as string].map((x) => receive(I10, o10, o10.items[0], { r: 5, a: 5, j: 0, requestId: x })))
+    record("ID10", "요청 ID 누락·형식 오류는 거부, DB 변화 없음", bad.every((r) => !r.success) && (await inspCount(o10.items[0].id)) === 0 && (await rqCount(I10.tenant.id)) === 0, `거부 ${bad.filter((r) => !r.success).length}/4`)
+  }
+
+  // ══ ID12 서로 다른 발주품목에 같은 요청 ID 가 동시에 도착 — DB unique 가 하나만 통과시키고 나머지는 충돌 오류 ═════
+  {
+    const I12 = await mkCtx("I12")
+    const oa = await newPO(I12, [{ itemId: I12.plainRaw.id, qty: 100 }])
+    const ob = await newPO(I12, [{ itemId: I12.lotRaw.id, qty: 100 }])
+    const sameId = ids.generateReceivingRequestId()
+    const [ra, rb] = await Promise.all([
+      receive(I12, oa, oa.items[0], { r: 10, a: 10, j: 0, requestId: sameId }),
+      receive(I12, ob, ob.items[0], { r: 10, a: 10, j: 0, lotNo: "I12-LOT", requestId: sameId }),
+    ])
+    const okCount = [ra, rb].filter((r) => r.success).length
+    const loser = [ra, rb].find((r) => !r.success)
+    const totalStock = (await stock(I12.tenant.id, I12.plainRaw.id)).onHand + (await stock(I12.tenant.id, I12.lotRaw.id)).onHand
+    record("ID12", "같은 요청 ID 가 서로 다른 발주품목에 동시 도착: 정확히 1건만 처리, 나머지는 충돌 오류(DB unique), 재고 10",
+      okCount === 1 && !!loser && /같은 입고 요청 번호로 서로 다른 내용/.test(loser.message ?? "") && totalStock === 10 && (await rqCount(I12.tenant.id)) === 1 && (await receiptNos(I12.tenant.id)).length === 1,
+      `성공 ${okCount}/2, 패자 메시지="${(loser?.message ?? "").slice(0, 30)}…", 재고 합계 ${totalStock}, 요청원장 ${await rqCount(I12.tenant.id)}, 거래 ${(await receiptNos(I12.tenant.id)).length}`)
+  }
+
+  // ══ ID11 LOT 자동발행 중복 방지 (NMES 브랜드에서만 자동채번 허용되는 경로) ═══════════════
+  {
+    const L2 = await mkCtx("L2")
+    const oL = await newPO(L2, [{ itemId: L2.lotRaw.id, qty: 100 }])
+    const savedBrand = process.env.NEXT_PUBLIC_BRAND
+    process.env.NEXT_PUBLIC_BRAND = "newmes"
+    try {
+      const ridL = ids.generateReceivingRequestId()
+      const burst = await Promise.all(Array.from({ length: 6 }, () => receive(L2, oL, oL.items[0], { r: 10, a: 10, j: 0, requestId: ridL })))
+      const lots = await prisma.lot.findMany({ where: { tenantId: L2.tenant.id } })
+      const resv = await prisma.lotNumberReservation.findMany({ where: { tenantId: L2.tenant.id } })
+      const nos = await receiptNos(L2.tenant.id)
+      record("ID11a", "LOT 자동발행 + 동일 요청 6회 동시: LOT 1개·예약 CONSUMED 1건·거래번호 1개 (재전송이 새 LOT/번호를 발급하지 않음)",
+        burst.every((r) => r.success) && lots.length === 1 && resv.length === 1 && resv[0].status === "CONSUMED" && nos.length === 1 && (await stock(L2.tenant.id, L2.lotRaw.id)).onHand === 10,
+        `성공 ${burst.filter((r) => r.success).length}/6, LOT ${lots.map((l) => l.lotNo).join(",")}, 예약 ${resv.map((r) => r.status).join(",")}, 거래번호 ${nos.join(",")}, 재고 ${(await stock(L2.tenant.id, L2.lotRaw.id)).onHand}`)
+      const other = await receive(L2, oL, oL.items[0], { r: 10, a: 10, j: 0, requestId: ids.generateReceivingRequestId() })
+      const lots2 = await prisma.lot.findMany({ where: { tenantId: L2.tenant.id }, orderBy: { lotNo: "asc" } })
+      record("ID11b", "새 요청 ID 의 다음 자동발행 입고는 새 LOT 를 정상 발급(분할 입고 허용)", other.success && lots2.length === 2 && new Set(lots2.map((l) => l.lotNo)).size === 2 && isContiguous(await receiptNos(L2.tenant.id)),
+        `LOT ${lots2.map((l) => l.lotNo).join(",")} 거래번호 ${(await receiptNos(L2.tenant.id)).join(",")}`)
     } finally {
       if (savedBrand === undefined) delete process.env.NEXT_PUBLIC_BRAND
       else process.env.NEXT_PUBLIC_BRAND = savedBrand
