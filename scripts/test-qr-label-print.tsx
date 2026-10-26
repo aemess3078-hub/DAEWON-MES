@@ -380,6 +380,15 @@ async function main() {
   ok(recvSrc.includes("buildReceiptLabelPlan") && recvSrc.includes("testCandidates={isConfirmedPrint ? undefined : previewPlan.candidates}"), "I31 자재입고: 사유 안내(notices) + 확정 전에만 시험용 라벨")
   const issueSrc = read("src/app/app/mes/material-issue/issue-form-dialog.tsx")
   ok(issueSrc.includes("buildIssueLabelPlan") && issueSrc.includes('purpose="ISSUE"') && !issueSrc.includes("? getLotSplitTotal(material.itemId)"), "I32 자재출고: LOT 별 QR 라벨(ISSUE) 연결 · 합계 수량 단일 라벨 제거")
+  ok(
+    issueSrc.includes("setConfirmedIssuePlan(issueLabelPlan)") &&
+      issueSrc.indexOf("await issueMaterialsForWorkOrder") < issueSrc.indexOf("setConfirmedIssuePlan(issueLabelPlan)") &&
+      issueSrc.includes("printBlockedReason={") &&
+      issueSrc.includes("testCandidates={confirmedIssuePlan ? undefined : issueLabelPlan.candidates}"),
+    "I32b 자재출고: 실제 LOT 라벨은 출고 확정(서버 성공) 이후에만 출력 · 확정 전에는 미리보기 + 시험용만",
+  )
+  ok(issueSrc.includes("confirmedIssuePlan !== null") && issueSrc.includes("if (!next && confirmedIssuePlan) handleOpen(false)"), "I32c 자재출고: 확정 후 중복 출고 방지(출고 버튼 비활성 · 라벨 창 닫으면 출고 창 닫힘)")
+  ok(issueSrc.includes("issueMaterialsForWorkOrder(") && !issueSrc.includes("lot-label.actions"), "I32d 자재출고 서버 처리 호출은 그대로 · 라벨 모듈이 출고 액션에 개입하지 않는다")
   const dlg = read("src/components/common/barcode/barcode-print-dialog.tsx")
   const testBranch = dlg.slice(dlg.indexOf("if (testMode) {"), dlg.indexOf("// 1) 읽기 전용 사전 확인"))
   ok(testBranch.includes("checkTestLotNosUnused") && !testBranch.includes("recordLotLabelPrint") && !testBranch.includes("onBeforePrint") && !testBranch.includes("checkLotLabelPrintable"), "I33 시험용 분기: 감사/예약(onBeforePrint)/영속화 검증을 호출하지 않는다 — 실제 흐름은 그대로 아래에 유지")
