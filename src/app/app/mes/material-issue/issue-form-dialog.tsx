@@ -34,6 +34,7 @@ function isLotManaged(item: MaterialRequirement["item"]): boolean {
 }
 import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
+import { buildIssueLabelPlan, type LabelPlan } from "@/lib/label/label-items"
 
 // ── 다중 LOT 분할 행 타입 ─────────────────────────────────────────────────────
 
@@ -68,6 +69,9 @@ export function IssueFormDialog({
   const [lotStockMap, setLotStockMap] = useState<Record<string, LotStockOption[]>>({})
   const [lotLoadingMap, setLotLoadingMap] = useState<Record<string, boolean>>({})
   const [printOpen, setPrintOpen] = useState(false)
+  // 출고 확정(서버 처리 성공) 직후의 라벨 대상 스냅샷. 이 값이 있어야 실제 LOT 라벨을 출력할 수 있다.
+  // 출고 후 router.refresh() 로 화면 데이터가 바뀌어도 확정 당시의 LOT/수량으로 출력한다.
+  const [confirmedIssuePlan, setConfirmedIssuePlan] = useState<LabelPlan | null>(null)
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
@@ -183,6 +187,7 @@ export function IssueFormDialog({
       setLotSplitsMap({})
       setLotStockMap({})
       setLotLoadingMap({})
+      setConfirmedIssuePlan(null)
     }
     onOpenChange(nextOpen)
   }
@@ -294,6 +299,12 @@ export function IssueFormDialog({
           return
         }
         router.refresh()
+        // 출고가 확정되었으므로 확정 당시 선택한 LOT 별 QR 라벨을 바로 출력할 수 있게 한다(라벨 창을 닫으면 출고 창도 닫힘).
+        if (issueLabelPlan.items.length > 0) {
+          setConfirmedIssuePlan(issueLabelPlan)
+          setPrintOpen(true)
+          return
+        }
         handleOpen(false)
       })
     } catch (error) {
@@ -333,6 +344,25 @@ export function IssueFormDialog({
       })
       .filter((s): s is { itemName: string; lotNo: string; warehouseName: string; qty: number; unit: string } => s !== null)
   })
+
+  // ── 출고 LOT 라벨 ────────────────────────────────────────────────────────────
+  // 선택한 원자재 LOT 별 QR 라벨. LOT 분할 출고는 분할행마다 그 행의 출고수량으로 1장씩 만든다.
+  // LOT 관리 품목이 아니거나 LOT 가 선택되지 않은 항목은 임의 QR/LOT 번호 없이 사유(notices)로만 안내한다.
+  const issueLabelPlan = buildIssueLabelPlan(
+    pendingMaterials.map((material) => ({
+      itemId: material.itemId,
+      itemCode: material.item.code,
+      itemName: material.item.name,
+      uom: material.item.uom,
+      lotManaged: isLotManaged(material.item),
+      issueQty: Number(qtyMap[material.itemId] ?? material.pendingQty),
+    })),
+    lotSplitsMap,
+    (itemId, lotValue) => {
+      const lot = lotStockMap[itemId]?.find((l) => getLotSelectValue(l) === lotValue)
+      return lot ? { key: lotValue, lotNo: lot.lotNo } : null
+    },
+  )
 
   // ── 렌더 ─────────────────────────────────────────────────────────────────────
 
@@ -710,14 +740,14 @@ export function IssueFormDialog({
             className="mr-auto"
             disabled={pendingMaterials.length === 0}
           >
-            바코드 라벨 출력
+            LOT 라벨 출력
           </Button>
           <Button variant="outline" onClick={() => handleOpen(false)} disabled={isPending}>
             취소
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={isPending || pendingMaterials.length === 0}
+            disabled={isPending || pendingMaterials.length === 0 || confirmedIssuePlan !== null}
           >
             {isPending ? "처리 중..." : "출고 처리"}
           </Button>
@@ -726,16 +756,28 @@ export function IssueFormDialog({
 
       <BarcodePrintDialog
         open={printOpen}
-        onOpenChange={setPrintOpen}
-        title={`출고 자재 라벨 - ${workOrder.orderNo}`}
-        legacyItemBarcode
-        items={pendingMaterials.map((material) => ({
-          itemCode: material.item.code,
-          itemName: material.item.name,
-          quantity: isLotManaged(material.item)
-            ? getLotSplitTotal(material.itemId)
-            : Number(qtyMap[material.itemId] ?? material.pendingQty),
-          uom: material.item.uom,
+        onOpenChange={(next) => {
+          setPrintOpen(next)
+          // 출고가 확정된 뒤 라벨 창을 닫으면 출고 창도 닫는다(중복 출고 방지).
+          if (!next && confirmedIssuePlan) handleOpen(false)
+        }}
+        title={`출고 자재 LOT 라벨 - ${workOrder.orderNo}`}
+        purpose="ISSUE"
+        context={`출고 ${workOrder.orderNo}`}
+        printBlockedReason={
+          confirmedIssuePlan
+            ? undefined
+            : "출고 확정 후 LOT 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다(시험용 라벨은 지금도 출력할 수 있습니다)."
+        }
+        notices={(confirmedIssuePlan ?? issueLabelPlan).notices}
+        testCandidates={confirmedIssuePlan ? undefined : issueLabelPlan.candidates}
+        items={(confirmedIssuePlan ?? issueLabelPlan).items.map((l) => ({
+          itemCode: l.itemCode,
+          itemName: l.itemName,
+          lotNo: l.lotNo,
+          dateLabel: l.dateLabel,
+          quantity: l.quantity,
+          uom: l.uom,
         }))}
       />
     </Dialog>

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import JsBarcode from "jsbarcode"
 import {
+  TEST_LABEL_MARK,
   LABEL_GAP_MM,
   LABEL_HEIGHT_MM,
   LABEL_PADDING_MM,
@@ -83,6 +84,7 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
       className="daewon-label-face"
       data-label-state={state}
       data-label-kind={data.kind}
+      data-label-test={data.test ? "true" : undefined}
       style={{
         width: `${LABEL_WIDTH_MM}mm`,
         height: `${LABEL_HEIGHT_MM}mm`,
@@ -140,6 +142,11 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
             <div style={{ ...row, display: "flex", justifyContent: "space-between", fontSize: `${layout.companyPt}pt`, fontWeight: 700 }}>
               <span>
                 {companyName}
+                {data.test && (
+                  <span style={{ marginLeft: "1.5mm", background: "#000", color: "#fff", padding: "0 1mm", fontSize: "7.5pt" }} data-label-test>
+                    {TEST_LABEL_MARK}
+                  </span>
+                )}
                 {reprint && (
                   <span style={{ marginLeft: "1.5mm", border: "0.2mm solid #000", padding: "0 0.8mm", fontSize: "7pt" }}>재출력</span>
                 )}

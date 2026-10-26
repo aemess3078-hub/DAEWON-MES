@@ -44,6 +44,28 @@ export type LabelData = {
   date: string
   /** 입고일 / 생산일 등. */
   dateLabel: string
+  /**
+   * 시험용 라벨(현장 출력/스캔 테스트). 실제 LOT 가 아니다 — lotNo 는 반드시 TEST- 임시 번호이며
+   * 라벨에 "시험용" 이 표시된다. LOT 저장·재고·입출고와 무관하다.
+   */
+  test?: boolean
+}
+
+// ─── 시험용 라벨 ─────────────────────────────────────────────────────────────
+
+export const TEST_LOT_PREFIX = "TEST-"
+export const TEST_LABEL_MARK = "시험용"
+const TEST_LOT_PATTERN = /^TEST-[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+
+/** 시험용 임시 LOT 번호 형식(TEST-로 시작, 영문/숫자/.-_ 만). 실제 LOT 번호와 구분하기 위한 접두사다. */
+export function isValidTestLotNo(value: unknown): value is string {
+  return typeof value === "string" && TEST_LOT_PATTERN.test(value.trim())
+}
+
+/** 기본 임시 LOT 번호: TEST-YYYYMMDD-001, -002 … (한국 날짜). */
+export function makeTestLotNos(count: number, date: Date = new Date()): string[] {
+  const ymd = formatLabelDate(date).replace(/-/g, "")
+  return Array.from({ length: Math.max(0, count) }, (_, i) => `${TEST_LOT_PREFIX}${ymd}-${String(i + 1).padStart(3, "0")}`)
 }
 
 export function clampQrMm(value: unknown): number {
@@ -272,11 +294,16 @@ export type LabelBlock = { printable: true } | { printable: false; reason: strin
  * LOT QR 라벨 출력 가능 여부. LOT 번호가 없으면 임의 QR 식별자를 만들거나 CODE128 로 대체하지 않고 사유를 알린다.
  * ITEM_BARCODE(레거시 품목 바코드)는 호출자가 명시적으로 허용한 화면(출하/출고 등)에서만 쓴다.
  */
-export function getLabelBlock(data: Pick<LabelData, "kind" | "itemCode" | "itemName" | "lotNo">): LabelBlock {
+export function getLabelBlock(data: Pick<LabelData, "kind" | "itemCode" | "itemName" | "lotNo" | "test">): LabelBlock {
   if (!data.itemCode?.trim() || !data.itemName?.trim()) {
     return { printable: false, reason: "품목 정보가 없어 라벨을 출력할 수 없습니다." }
   }
   if (data.kind === "ITEM_BARCODE") return { printable: true }
+  if (data.test) {
+    return isValidTestLotNo(data.lotNo)
+      ? { printable: true }
+      : { printable: false, reason: `[${data.itemCode}] 시험용 LOT 번호는 TEST- 로 시작하는 영문/숫자 임시 번호여야 합니다(예: TEST-20261026-001).` }
+  }
   const lotNo = data.lotNo?.trim()
   if (!lotNo) {
     return {
