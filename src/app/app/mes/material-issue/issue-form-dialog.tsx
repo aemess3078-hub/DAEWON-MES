@@ -728,6 +728,7 @@ export function IssueFormDialog({
         open={printOpen}
         onOpenChange={setPrintOpen}
         title={`출고 자재 라벨 - ${workOrder.orderNo}`}
+        legacyItemBarcode
         items={pendingMaterials.map((material) => ({
           itemCode: material.item.code,
           itemName: material.item.name,

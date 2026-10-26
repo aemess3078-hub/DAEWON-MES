@@ -50,6 +50,9 @@ export function ReceiptDialog({
   const [receiptQty, setReceiptQty] = useState<number | undefined>(undefined)
   const [scanVerified, setScanVerified] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
+  // 입고 완료 후 서버가 발번/영속화한 완제품 LOT 번호 — 이 LOT 로 QR 라벨을 출력한다.
+  const [receivedLotNo, setReceivedLotNo] = useState<string | null>(null)
+  const [receivedQty, setReceivedQty] = useState<number | null>(null)
 
   if (!workOrder) return null
 
@@ -70,6 +73,8 @@ export function ReceiptDialog({
       setWarehouseId("")
       setReceiptQty(undefined)
       setScanVerified(false)
+      setReceivedLotNo(null)
+      setReceivedQty(null)
     } else {
       setReceiptQty(workOrder.pendingQty)
     }
@@ -103,6 +108,13 @@ export function ReceiptDialog({
         return
       }
       router.refresh()
+      if (res.lotNo) {
+        // 라벨은 LOT 가 생성된 뒤에만 의미가 있다. 입고 완료 화면에서 바로 QR 라벨을 출력할 수 있게 한다.
+        setReceivedLotNo(res.lotNo)
+        setReceivedQty(qty)
+        setPrintOpen(true)
+        return
+      }
       handleOpen(false)
     })
   }
@@ -224,7 +236,7 @@ export function ReceiptDialog({
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={isPending || Boolean(workOrder.receiptBlockedReason) || !warehouseId || !receiptQty}
+            disabled={isPending || Boolean(receivedLotNo) || Boolean(workOrder.receiptBlockedReason) || !warehouseId || !receiptQty}
             className="gap-1.5"
           >
             <PackagePlus className="h-4 w-4" />
@@ -235,12 +247,21 @@ export function ReceiptDialog({
 
       <BarcodePrintDialog
         open={printOpen}
-        onOpenChange={setPrintOpen}
+        onOpenChange={(next) => {
+          setPrintOpen(next)
+          // 입고가 완료된 뒤 라벨 창을 닫으면 입고 창도 닫는다(중복 입고 방지).
+          if (!next && receivedLotNo) handleOpen(false)
+        }}
         title={`${receiptLabel} 라벨 — ${workOrder.orderNo}`}
+        printBlockedReason={
+          receivedLotNo ? undefined : "입고 처리 후 LOT QR 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다."
+        }
         items={[{
           itemCode: workOrder.item.code,
           itemName: workOrder.item.name,
-          quantity: receiptQty ?? workOrder.pendingQty,
+          lotNo: receivedLotNo ?? undefined,
+          dateLabel: "생산일",
+          quantity: receivedQty ?? receiptQty ?? workOrder.pendingQty,
           uom: workOrder.item.uom,
         }]}
       />

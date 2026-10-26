@@ -803,6 +803,7 @@ export function ShipmentFormSheet({
         open={printOpen && canBulkPrint}
         onOpenChange={setPrintOpen}
         title="출하 라벨 출력"
+        legacyItemBarcode
         items={bulkPrintItems}
       />
     </FormSheet>
