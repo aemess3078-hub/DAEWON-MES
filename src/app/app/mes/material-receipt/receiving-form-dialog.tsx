@@ -123,6 +123,10 @@ export function ReceivingFormDialog({
     return requestIdsRef.current[purchaseOrderItemId]
   }
   const [printOpen, setPrintOpen] = useState(false)
+  // 입고 확정이 끝난 뒤의 라벨 대상. 이 값이 있어야 실제 인쇄가 가능하다(LOT 가 DB 에 영속화된 뒤에만 QR 라벨 출력).
+  const [confirmedLabels, setConfirmedLabels] = useState<
+    Array<{ itemCode: string; itemName: string; lotNo?: string; quantity: number; uom: string }> | null
+  >(null)
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
 
   const [inspections, setInspections] = useState<ItemInspection[]>(() =>
@@ -357,6 +361,21 @@ export function ReceivingFormDialog({
       if (outcome.newlyDone.length > 0 || outcome.stoppedAt) router.refresh()
       if (outcome.allDone) {
         releaseAllTrackedReservations()
+        // 확정된 LOT 의 QR 라벨을 바로 출력할 수 있게 한다(LOT 번호가 확정된 품목만). 라벨 창을 닫으면 입고 창도 닫힌다.
+        const labels = inspections
+          .filter((ins) => (parseFloat(ins.thisReceivedQty) || 0) > 0 && ins.isLotTracked && ins.lotNo.trim())
+          .map((ins) => ({
+            itemCode: ins.itemCode,
+            itemName: ins.itemName,
+            lotNo: ins.lotNo.trim(),
+            quantity: parseFloat(ins.thisAcceptedQty) || parseFloat(ins.thisReceivedQty) || 0,
+            uom: ins.uom,
+          }))
+        if (labels.length > 0) {
+          setConfirmedLabels(labels)
+          setPrintOpen(true)
+          return
+        }
         onClose()
         return
       }
@@ -384,6 +403,9 @@ export function ReceivingFormDialog({
   // 라벨 출력 대상: 금회 입고수량 > 0인 품목만. LOT 관리 품목은 lotNo가 있어야 출력 가능.
   const printableItems = inspections.filter((ins) => (parseFloat(ins.thisReceivedQty) || 0) > 0)
   const hasMissingLotForPrint = printableItems.some((ins) => ins.isLotTracked && !ins.lotNo.trim())
+
+  // LOT QR 라벨의 "실제 출력"은 입고 확정(Lot 행 영속화) 이후에만 가능하다. 확정 전에는 미리보기 전용이다.
+  const isConfirmedPrint = confirmedLabels !== null
 
   // "바코드 라벨 출력" 버튼은 미리보기 다이얼로그만 연다 — 이 시점에는 번호를 소모하지 않는다.
   // 실제 번호 소모(printedAt 기록)는 BarcodePrintDialog 내부의 진짜 "인쇄" 버튼을 누를 때
@@ -727,9 +749,9 @@ export function ReceivingFormDialog({
               type="button"
               variant="outline"
               onClick={() => setPrintOpen(true)}
-              disabled={printableItems.length === 0 || hasMissingLotForPrint}
+              disabled={!printableItems.some((ins) => ins.isLotTracked) || hasMissingLotForPrint}
             >
-              바코드 라벨 출력
+              LOT 라벨 미리보기
             </Button>
             {hasMissingLotForPrint && (
               <p className="text-[11px] text-muted-foreground">
@@ -761,16 +783,43 @@ export function ReceivingFormDialog({
       {/* 바코드 라벨 출력 다이얼로그 */}
       <BarcodePrintDialog
         open={printOpen}
-        onOpenChange={setPrintOpen}
-        title={`바코드 라벨 — ${purchaseOrder.orderNo}`}
-        items={printableItems.map((ins) => ({
-          itemCode: ins.itemCode,
-          itemName: ins.itemName,
-          lotNo: ins.isLotTracked ? ins.lotNo.trim() || undefined : undefined,
-          quantity: parseFloat(ins.thisReceivedQty) || ins.pendingQty,
-          uom: ins.uom,
-        }))}
-        onBeforePrint={handleBeforePrint}
+        onOpenChange={(next) => {
+          setPrintOpen(next)
+          if (!next && isConfirmedPrint) {
+            // 확정 후 라벨 창을 닫으면 입고 창도 닫는다(중복 입고 방지).
+            setConfirmedLabels(null)
+            onClose()
+          }
+        }}
+        title={`LOT 라벨 — ${purchaseOrder.orderNo}`}
+        printBlockedReason={
+          isConfirmedPrint
+            ? undefined
+            : "입고 확정 후 LOT QR 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다(확정 전에 출력한 라벨은 입고 실패/취소 시 현장에 남을 수 있습니다)."
+        }
+        items={
+          isConfirmedPrint
+            ? confirmedLabels.map((l) => ({
+                itemCode: l.itemCode,
+                itemName: l.itemName,
+                lotNo: l.lotNo,
+                dateLabel: "입고일",
+                quantity: l.quantity,
+                uom: l.uom,
+              }))
+            : // LOT QR 은 LOT 관리 품목만 대상이다. 비LOT 품목은 QR 대상이 아니다.
+              printableItems
+                .filter((ins) => ins.isLotTracked)
+                .map((ins) => ({
+                  itemCode: ins.itemCode,
+                  itemName: ins.itemName,
+                  lotNo: ins.lotNo.trim() || undefined,
+                  dateLabel: "입고일",
+                  quantity: parseFloat(ins.thisReceivedQty) || ins.pendingQty,
+                  uom: ins.uom,
+                }))
+        }
+        onBeforePrint={isConfirmedPrint ? undefined : handleBeforePrint}
       />
     </Dialog>
   )
