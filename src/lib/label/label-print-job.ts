@@ -9,7 +9,7 @@
  * 데이터는 같은 브라우저의 localStorage 로만 전달한다(서버 경유·URL 노출 없음). 일정 시간이 지나면 폐기한다.
  * 파싱은 신뢰하지 않는 입력으로 취급해 길이/개수/타입을 검증한다.
  */
-import type { LabelData } from "@/lib/label/label-spec"
+import { isValidTestLotNo, type LabelData } from "@/lib/label/label-spec"
 
 export const LABEL_JOB_PREFIX = "daewon:label-job:"
 export const LABEL_JOB_TTL_MS = 30 * 60 * 1000
@@ -40,6 +40,9 @@ export function sanitizeLabel(raw: unknown): LabelData | null {
   if (!itemCode || !itemName) return null
   const lotNo = str(r.lotNo, 128).trim() || null
   if (kind === "LOT_QR" && !lotNo) return null
+  // 시험용 라벨은 TEST- 임시 번호만 허용한다(실제 LOT 번호로 "시험용" 표시를 단 라벨을 만들 수 없다).
+  const test = r.test === true
+  if (test && (kind !== "LOT_QR" || !isValidTestLotNo(lotNo))) return null
   const quantity = typeof r.quantity === "number" && Number.isFinite(r.quantity) ? r.quantity : null
   return {
     kind,
@@ -51,6 +54,7 @@ export function sanitizeLabel(raw: unknown): LabelData | null {
     uom: str(r.uom, 20).trim() || null,
     date: str(r.date, 20),
     dateLabel: str(r.dateLabel, 10) || "일자",
+    ...(test ? { test: true } : {}),
   }
 }
 

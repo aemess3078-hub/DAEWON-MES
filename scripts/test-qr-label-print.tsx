@@ -285,6 +285,107 @@ async function main() {
   ok(reprintHtml.includes("재출력"), "G6 재출력 표시")
   ok(!html.includes("width:24mm") && html.includes("width:19mm"), "G7 QR 한 변 19mm(18~20mm 범위)")
 
+  // ─── I. 입고/출고 라벨 대상 · 시험용 라벨 · 출고 라벨 감사 ─────────────────────
+  const items = require("../src/lib/label/label-items") as typeof import("../src/lib/label/label-items")
+  const recv = items.buildReceiptLabelPlan([
+    { itemCode: "R-LOT", itemName: "LOT 품목", uom: "KG", isLotTracked: true, lotNo: " L-100 ", receivedQty: 10, acceptedQty: 8 },
+    { itemCode: "R-NOLOT", itemName: "비LOT 품목", uom: "EA", isLotTracked: false, lotNo: "", receivedQty: 5, acceptedQty: 5 },
+    { itemCode: "R-BLANK", itemName: "번호 미정", uom: "EA", isLotTracked: true, lotNo: "", receivedQty: 3, acceptedQty: 3 },
+    { itemCode: "R-ZERO", itemName: "수량0", uom: "EA", isLotTracked: true, lotNo: "L-0", receivedQty: 0, acceptedQty: 0 },
+  ])
+  ok(recv.items.length === 1 && recv.items[0].lotNo === "L-100" && recv.items[0].quantity === 8, "I1 입고: LOT 번호가 있는 LOT 품목만 라벨 · 수량은 합격수량")
+  ok(recv.notices.length === 2 && recv.notices[0].includes("R-NOLOT") && recv.notices[1].includes("R-BLANK"), "I2 입고: 비LOT/번호 미정 품목은 조용히 사라지지 않고 사유 안내")
+  ok(recv.candidates.length === 3 && recv.candidates.every((c) => !("lotNo" in c)), "I3 입고: 시험용 후보는 수량>0 전체 · 실제 LOT 번호를 담지 않는다")
+  ok(recv.items.every((l) => l.lotNo !== "" && !/^TEST-/.test(l.lotNo)), "I4 입고: 실제 라벨에 임의/임시 LOT 번호가 생기지 않는다")
+
+  const mats = [
+    { itemId: "i1", itemCode: "RM-1", itemName: "원자재A", uom: "KG", lotManaged: true },
+    { itemId: "i2", itemCode: "RM-2", itemName: "비LOT 원자재", uom: "EA", lotManaged: false, issueQty: 7 },
+    { itemId: "i3", itemCode: "RM-3", itemName: "LOT 미선택", uom: "EA", lotManaged: true },
+  ]
+  const lotMap = new Map([["i1:l1:w1", "LOT-A"], ["i1:l2:w1", "LOT-B"], ["i3:l9:w1", "LOT-Z"]])
+  const issue = items.buildIssueLabelPlan(
+    mats,
+    {
+      i1: [
+        { lotValue: "i1:l1:w1", qty: "30.5" },
+        { lotValue: "i1:l2:w1", qty: "19.5" },
+        { lotValue: "", qty: "" },
+      ],
+      i3: [{ lotValue: "", qty: "4" }],
+    },
+    (itemId, v) => (lotMap.has(v) ? { key: v, lotNo: lotMap.get(v)! } : null),
+  )
+  eq(issue.items.map((l) => [l.lotNo, l.quantity]), [["LOT-A", 30.5], ["LOT-B", 19.5]], "I5 출고: 선택한 LOT 별 1장 · LOT 별 실제 분할 수량(합산/배분 없음)")
+  ok(issue.items.every((l) => l.dateLabel === "출고일" && l.uom === "KG"), "I6 출고: 출고일 · 단위")
+  ok(issue.notices.some((n) => n.includes("RM-2")) && issue.notices.some((n) => n.includes("RM-3") && n.includes("LOT 가 선택되지 않았습니다")), "I7 출고: 비LOT 품목/LOT 미선택은 라벨 없이 사유 안내(임의 LOT 없음)")
+  ok(issue.candidates.length === 4 && issue.candidates.some((c) => c.itemCode === "RM-2" && c.quantity === 7), "I8 출고: 시험용 후보에 비LOT 출고수량 · LOT 분할행 포함")
+  const zero = items.buildIssueLabelPlan([mats[0]], { i1: [{ lotValue: "i1:l1:w1", qty: "0" }] }, () => null)
+  ok(zero.items.length === 0 && zero.notices.length === 1, "I9 출고: 수량 0 행은 라벨 없음")
+
+  // 시험용 라벨
+  eq(spec.makeTestLotNos(3, new Date("2026-10-26T00:00:00Z")), ["TEST-20261026-001", "TEST-20261026-002", "TEST-20261026-003"], "I10 임시 LOT 번호 기본값 TEST-YYYYMMDD-NNN")
+  ok(spec.isValidTestLotNo("TEST-20261026-001") && !spec.isValidTestLotNo("CNS-RM-1") && !spec.isValidTestLotNo("TEST-") && !spec.isValidTestLotNo("TEST-A B") && !spec.isValidTestLotNo("test-1"), "I11 임시 LOT 번호 형식 검증(TEST- 접두 필수)")
+  const testLabel = { kind: "LOT_QR" as const, test: true, itemCode: "RM-1", itemName: "원자재A", lotNo: "TEST-20261026-001", quantity: 5, uom: "KG", date: "2026-10-26", dateLabel: "출고일" }
+  ok(spec.getLabelBlock(testLabel).printable, "I12 TEST- 번호 시험용 라벨은 출력 가능")
+  ok(!spec.getLabelBlock({ ...testLabel, lotNo: "CNS-RM-20261026-001" }).printable, "I13 시험용 라벨에 실제 LOT 번호를 쓸 수 없다")
+  ok(jobLib.sanitizeLabel(testLabel)?.test === true && jobLib.sanitizeLabel({ ...testLabel, lotNo: "CNS-RM-1" }) === null, "I14 인쇄 job: 시험용은 TEST- 번호만 허용(실제 번호에 시험용 표시 위조 불가)")
+  const testHtml = renderToStaticMarkup(React.createElement(BarcodeLabel, { data: { ...testLabel } }))
+  ok(testHtml.includes("시험용") && testHtml.includes("data-label-test") && testHtml.includes('data-qr-payload="DAEWON|LOT|1|TEST-20261026-001"'), "I15 시험용 라벨: '시험용' 표시 + 표준 QR(DAEWON|LOT|1|TEST-…)")
+  ok(!renderToStaticMarkup(React.createElement(BarcodeLabel, { data: { ...testLabel, test: undefined, lotNo: "L-1" } })).includes("시험용"), "I16 실제 라벨에는 시험용 표시가 없다")
+  {
+    const data = qrSvg.buildLotQrSvgData("TEST-20261026-001")
+    const img = qrSvg.renderQrRgba(data, 8)
+    const decoded = jsQR(img.data, img.width, img.height)
+    const parsed = parseLotQr(decoded?.data)
+    ok(parsed.ok && parsed.lotNo === "TEST-20261026-001", "I17 시험용 QR 디코딩 → 표준 형식으로 임시 LOT 식별")
+  }
+
+  // 서버: 시험용 번호 확인(읽기 전용) / 출고 라벨(ISSUE)
+  const auditBeforeTest = auditDb.length
+  const lotsBefore = lotsDb.length
+  const t1 = await actions.checkTestLotNosUnused({ lotNos: ["TEST-20261026-001", "TEST-20261026-002"] })
+  ok(t1.ok && auditDb.length === auditBeforeTest && lotsDb.length === lotsBefore, "I18 시험용 번호 확인은 읽기 전용(Lot/감사 기록 생성 없음)")
+  lotsDb.push({ id: "lot-test-real", tenantId: "t1", lotNo: "TEST-REAL-1", status: "ACTIVE" })
+  const t2 = await actions.checkTestLotNosUnused({ lotNos: ["TEST-REAL-1"] })
+  ok(!t2.ok && t2.message.includes("이미 사용 중"), "I19 실제 LOT 와 겹치는 TEST- 번호는 거부")
+  lotsDb.pop()
+  const t3 = await actions.checkTestLotNosUnused({ lotNos: ["CNS-RM-1"] })
+  ok(!t3.ok, "I20 TEST- 가 아닌 번호는 시험용으로 확인되지 않는다(실제 LOT 번호로 우회 불가)")
+  currentUser = "ANON"
+  ok(!(await actions.checkTestLotNosUnused({ lotNos: ["TEST-1"] })).ok, "I21 시험용 확인도 로그인 필요")
+  currentUser = { tenantId: "t1", name: "작업자" }
+  const testReal = await actions.checkLotLabelPrintable({ lotNos: ["TEST-20261026-001"] })
+  ok(!testReal.ok && testReal.code === "LOT_NOT_PERSISTED", "I22 실제 라벨 게이트는 그대로 — 임시 번호는 영속화 검증을 우회하지 못한다")
+
+  const issueCheck = await actions.checkLotLabelPrintable({ lotNos: ["CNS-RM-1"], purpose: "ISSUE" })
+  ok(issueCheck.ok && issueCheck.reprintLotNos.length === 0, "I23 출고 라벨: 이미 입고 라벨이 출력된 LOT 도 재출력 사유 불필요")
+  const issueNotPersisted = await actions.recordLotLabelPrint({ lotNos: ["NOPE-1"], purpose: "ISSUE" })
+  ok(!issueNotPersisted.ok && issueNotPersisted.code === "LOT_NOT_PERSISTED", "I24 출고 라벨도 Lot 행이 없으면 거부(영속화 검증 유지)")
+  const issue1 = await actions.recordLotLabelPrint({ lotNos: ["CNS-RM-1", "FG-1"], purpose: "ISSUE", context: "출고 WO-1" })
+  ok(issue1.ok && issue1.results.every((r) => r.event === "LABEL_ISSUE_PRINT" && r.printCount === 1), "I25 출고 라벨 → LABEL_ISSUE_PRINT")
+  ok(auditDb[auditDb.length - 1].afterData.context === "출고 WO-1" && auditDb[auditDb.length - 1].afterData.reason === null, "I26 출고 맥락 기록 · 사유 없음")
+  const issue2 = await actions.recordLotLabelPrint({ lotNos: ["CNS-RM-1"], purpose: "ISSUE" })
+  ok(issue2.ok && issue2.results[0].printCount === 2, "I27 출고 라벨은 출고 라벨끼리만 횟수를 센다")
+  lotsDb.push({ id: "lot-3", tenantId: "t1", lotNo: "ONLY-ISSUE", status: "ACTIVE" })
+  await actions.recordLotLabelPrint({ lotNos: ["ONLY-ISSUE"], purpose: "ISSUE" })
+  const firstReceipt = await actions.recordLotLabelPrint({ lotNos: ["ONLY-ISSUE"] })
+  ok(firstReceipt.ok && firstReceipt.results[0].event === "LABEL_PRINT", "I28 출고 라벨 이력이 입고 라벨의 최초/재출력 판정에 섞이지 않는다")
+  const receiptStill = await actions.recordLotLabelPrint({ lotNos: ["CNS-RM-1"] })
+  ok(!receiptStill.ok && receiptStill.code === "REASON_REQUIRED", "I29 입고 라벨 재출력 사유 규칙은 그대로")
+
+  // 화면 연결 구조
+  const recvSrc = read("src/app/app/mes/material-receipt/receiving-form-dialog.tsx")
+  ok(recvSrc.includes("disabled={printableItems.length === 0}") && !recvSrc.includes("!printableItems.some((ins) => ins.isLotTracked)"), "I30 자재입고: 미리보기 버튼이 품목의 LOT 설정/번호 유무로 비활성화되지 않는다")
+  ok(recvSrc.includes("buildReceiptLabelPlan") && recvSrc.includes("testCandidates={isConfirmedPrint ? undefined : previewPlan.candidates}"), "I31 자재입고: 사유 안내(notices) + 확정 전에만 시험용 라벨")
+  const issueSrc = read("src/app/app/mes/material-issue/issue-form-dialog.tsx")
+  ok(issueSrc.includes("buildIssueLabelPlan") && issueSrc.includes('purpose="ISSUE"') && !issueSrc.includes("? getLotSplitTotal(material.itemId)"), "I32 자재출고: LOT 별 QR 라벨(ISSUE) 연결 · 합계 수량 단일 라벨 제거")
+  const dlg = read("src/components/common/barcode/barcode-print-dialog.tsx")
+  const testBranch = dlg.slice(dlg.indexOf("if (testMode) {"), dlg.indexOf("// 1) 읽기 전용 사전 확인"))
+  ok(testBranch.includes("checkTestLotNosUnused") && !testBranch.includes("recordLotLabelPrint") && !testBranch.includes("onBeforePrint") && !testBranch.includes("checkLotLabelPrintable"), "I33 시험용 분기: 감사/예약(onBeforePrint)/영속화 검증을 호출하지 않는다 — 실제 흐름은 그대로 아래에 유지")
+  ok(dlg.includes("recordLotLabelPrint({ lotNos, reason") && dlg.includes("onBeforePrint()") && dlg.includes("await checkLotLabelPrintable"), "I34 실제 라벨 흐름(영속화 확인·onBeforePrint·감사)은 유지")
+  ok(!/prisma|updateMany|\.create\(/.test(read("src/lib/label/label-items.ts")), "I35 라벨 대상 계산은 순수 함수(DB/재고 무관)")
+
   // ─── H. 소스 구조 · 회귀 ────────────────────────────────────────────────
   const printClient = read("src/app/label-print/label-print-client.tsx")
   ok(/@page \{ size: \$\{pageW\}mm \$\{pageH\}mm; margin: 0; \}/.test(printClient), "H1 @page 크기 지정 · 여백 0")
@@ -300,10 +401,10 @@ async function main() {
   ok(!dialog.includes("react-to-print") && !dialog.includes("useReactToPrint"), "H9 숨은 iframe 인쇄(react-to-print) 제거")
   ok(dialog.includes('window.open("", "_blank")') && dialog.indexOf("window.open") < dialog.indexOf("await checkLotLabelPrintable"), "H10 팝업 차단 방지: await 이전에 동기적으로 창을 연다")
   const iCheck = dialog.indexOf("await checkLotLabelPrintable")
-  const iSave = dialog.indexOf("saveLabelJob(window.localStorage")
+  const iSave = dialog.lastIndexOf("saveLabelJob(window.localStorage")
   const iBefore = dialog.indexOf("await onBeforePrint()")
   const iAudit = dialog.indexOf("await recordLotLabelPrint")
-  const iNav = dialog.indexOf("printWindow.location.href")
+  const iNav = dialog.lastIndexOf("printWindow.location.href")
   ok(iCheck > 0 && iCheck < iSave && iSave < iBefore && iBefore < iAudit && iAudit < iNav, "H11 순서: 영속화 확인 → job 저장 → onBeforePrint → 감사 기록 → 인쇄 페이지")
   ok(dialog.includes("재출력 사유") && dialog.includes("onBeforePrint") && dialog.includes("printBlockedReason"), "H12 재출력 사유 · onBeforePrint · 출력 차단 사유 유지")
   ok(/reprint && !reason\.trim\(\)/.test(dialog), "H13 재출력 모드는 사유 없이 인쇄 불가")
@@ -314,10 +415,10 @@ async function main() {
   const receiving = read("src/app/app/mes/material-receipt/receiving-form-dialog.tsx")
   ok(receiving.includes("runReceivingBatch") && receiving.includes("requestIdFor(ins.purchaseOrderItemId)") && receiving.includes("createReceivingInspection({"), "H15 입고 확정 호출(멱등 requestId · 배치) 유지")
   ok(receiving.includes("onBeforePrint={isConfirmedPrint ? undefined : handleBeforePrint}") && receiving.includes("markLotReservationPrinted"), "H16 기존 onBeforePrint(채번 예약 인쇄 표시) 유지")
-  ok(receiving.includes("printBlockedReason") && receiving.includes("setConfirmedLabels(labels)"), "H17 입고 확정(영속화) 후에만 인쇄 · 확정 후 라벨 단계")
+  ok(receiving.includes("printBlockedReason") && receiving.includes("setConfirmedLabels(plan)"), "H17 입고 확정(영속화) 후에만 인쇄 · 확정 후 라벨 단계")
   const fg = read("src/app/app/mes/finished-goods-receipt/receipt-dialog.tsx")
   ok(fg.includes("createFinishedGoodsReceiptAction(") && fg.includes("setReceivedLotNo(res.lotNo)") && fg.includes("lotNo: receivedLotNo ?? undefined"), "H18 완제품 입고 후 서버가 발번한 LOT 로 라벨 출력")
-  ok(read("src/app/app/mes/material-issue/issue-form-dialog.tsx").includes("legacyItemBarcode") && read("src/app/app/mes/shipments/shipment-form-sheet.tsx").includes("legacyItemBarcode"), "H19 출하/자재출고의 기존 품목 바코드 라벨은 명시적 옵션으로 유지")
+  ok(!read("src/app/app/mes/material-issue/issue-form-dialog.tsx").includes("legacyItemBarcode") && read("src/app/app/mes/shipments/shipment-form-sheet.tsx").includes("legacyItemBarcode"), "H19 자재출고는 QR 전용(CODE128 옵션 제거) · 출하 일괄 라벨만 기존 품목 바코드 옵션 유지")
 
   // 입고·재고·LOT 서버 로직은 이 작업에서 수정하지 않는다(안정화 PR #5 기능 보존)
   const receivingAction = read("src/lib/actions/receiving.actions.ts")

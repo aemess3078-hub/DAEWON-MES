@@ -34,6 +34,7 @@ function isLotManaged(item: MaterialRequirement["item"]): boolean {
 }
 import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
+import { buildIssueLabelPlan } from "@/lib/label/label-items"
 
 // ── 다중 LOT 분할 행 타입 ─────────────────────────────────────────────────────
 
@@ -333,6 +334,25 @@ export function IssueFormDialog({
       })
       .filter((s): s is { itemName: string; lotNo: string; warehouseName: string; qty: number; unit: string } => s !== null)
   })
+
+  // ── 출고 LOT 라벨 ────────────────────────────────────────────────────────────
+  // 선택한 원자재 LOT 별 QR 라벨. LOT 분할 출고는 분할행마다 그 행의 출고수량으로 1장씩 만든다.
+  // LOT 관리 품목이 아니거나 LOT 가 선택되지 않은 항목은 임의 QR/LOT 번호 없이 사유(notices)로만 안내한다.
+  const issueLabelPlan = buildIssueLabelPlan(
+    pendingMaterials.map((material) => ({
+      itemId: material.itemId,
+      itemCode: material.item.code,
+      itemName: material.item.name,
+      uom: material.item.uom,
+      lotManaged: isLotManaged(material.item),
+      issueQty: Number(qtyMap[material.itemId] ?? material.pendingQty),
+    })),
+    lotSplitsMap,
+    (itemId, lotValue) => {
+      const lot = lotStockMap[itemId]?.find((l) => getLotSelectValue(l) === lotValue)
+      return lot ? { key: lotValue, lotNo: lot.lotNo } : null
+    },
+  )
 
   // ── 렌더 ─────────────────────────────────────────────────────────────────────
 
@@ -710,7 +730,7 @@ export function IssueFormDialog({
             className="mr-auto"
             disabled={pendingMaterials.length === 0}
           >
-            바코드 라벨 출력
+            LOT 라벨 출력
           </Button>
           <Button variant="outline" onClick={() => handleOpen(false)} disabled={isPending}>
             취소
@@ -727,15 +747,18 @@ export function IssueFormDialog({
       <BarcodePrintDialog
         open={printOpen}
         onOpenChange={setPrintOpen}
-        title={`출고 자재 라벨 - ${workOrder.orderNo}`}
-        legacyItemBarcode
-        items={pendingMaterials.map((material) => ({
-          itemCode: material.item.code,
-          itemName: material.item.name,
-          quantity: isLotManaged(material.item)
-            ? getLotSplitTotal(material.itemId)
-            : Number(qtyMap[material.itemId] ?? material.pendingQty),
-          uom: material.item.uom,
+        title={`출고 자재 LOT 라벨 - ${workOrder.orderNo}`}
+        purpose="ISSUE"
+        context={`출고 ${workOrder.orderNo}`}
+        notices={issueLabelPlan.notices}
+        testCandidates={issueLabelPlan.candidates}
+        items={issueLabelPlan.items.map((l) => ({
+          itemCode: l.itemCode,
+          itemName: l.itemName,
+          lotNo: l.lotNo,
+          dateLabel: l.dateLabel,
+          quantity: l.quantity,
+          uom: l.uom,
         }))}
       />
     </Dialog>

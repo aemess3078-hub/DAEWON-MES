@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Printer } from "lucide-react"
 import {
   Dialog,
@@ -12,8 +12,9 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { BarcodeLabel } from "./barcode-label"
-import { checkLotLabelPrintable, recordLotLabelPrint } from "@/lib/actions/lot-label.actions"
-import { formatLabelDate, getLabelBlock, type LabelData } from "@/lib/label/label-spec"
+import { checkLotLabelPrintable, checkTestLotNosUnused, recordLotLabelPrint } from "@/lib/actions/lot-label.actions"
+import { formatLabelDate, getLabelBlock, makeTestLotNos, TEST_LABEL_MARK, type LabelData } from "@/lib/label/label-spec"
+import type { TestLabelCandidate } from "@/lib/label/label-items"
 import { labelPrintUrl, saveLabelJob, LABEL_JOB_PREFIX } from "@/lib/label/label-print-job"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
 
@@ -52,6 +53,21 @@ interface BarcodePrintDialogProps {
    * 기본값(false)에서는 LOT 번호가 없는 항목에 임의 QR/CODE128 을 만들지 않고 "출력 불가" 사유를 안내한다.
    */
   legacyItemBarcode?: boolean
+  /**
+   * RECEIPT(기본): 입고/생산 LOT 라벨 — 이미 출력된 LOT 는 재출력 사유를 요구한다.
+   * ISSUE: 자재출고 LOT 별 수량 라벨 — 입고 라벨과 별개의 출력이므로 재출력 사유를 요구하지 않고 "출고 라벨" 로 기록한다.
+   */
+  purpose?: "RECEIPT" | "ISSUE"
+  /** 감사 기록에 남길 출력 맥락(예: 출고 작업지시번호). */
+  context?: string
+  /** 라벨이 되지 못한 항목의 사유(품목 마스터가 LOT 관리가 아님, LOT 미선택 등). 사용자에게 그대로 안내한다. */
+  notices?: string[]
+  /**
+   * 시험용 라벨 후보(현장 출력·QR 스캔 테스트용). 지정하면 [시험용 라벨] 전환 버튼이 나타난다.
+   * 시험용 라벨은 임시 LOT 번호(TEST-YYYYMMDD-001)와 "시험용" 표시를 쓰고 LOT 저장·재고·입출고·감사 기록과 무관하다.
+   * 실제 LOT 라벨의 영속화 확인/재출력 사유/onBeforePrint 는 시험용 모드에서만 건너뛰며, 실제 라벨 흐름은 바뀌지 않는다.
+   */
+  testCandidates?: TestLabelCandidate[]
 }
 
 /**
@@ -70,13 +86,34 @@ export function BarcodePrintDialog({
   reprint = false,
   printBlockedReason,
   legacyItemBarcode = false,
+  purpose = "RECEIPT",
+  context,
+  notices = [],
+  testCandidates,
 }: BarcodePrintDialogProps) {
   const [isPrinting, setIsPrinting] = useState(false)
   const [reason, setReason] = useState("")
   const [reprintRequired, setReprintRequired] = useState(false)
   const today = formatLabelDate()
+  const [testMode, setTestMode] = useState(false)
+  const [testLotNos, setTestLotNos] = useState<string[]>([])
+  const candidateCount = testCandidates?.length ?? 0
 
-  const labels = useMemo<LabelData[]>(
+  // 후보가 바뀌거나 다이얼로그가 닫히면 시험용 모드를 해제한다(실제 라벨이 기본).
+  useEffect(() => {
+    if (!open) setTestMode(false)
+  }, [open])
+  useEffect(() => {
+    setTestMode(false)
+    setTestLotNos([])
+  }, [candidateCount])
+
+  function enterTestMode() {
+    setTestLotNos(makeTestLotNos(candidateCount))
+    setTestMode(true)
+  }
+
+  const realLabels = useMemo<LabelData[]>(
     () =>
       items.map((item) => {
         const lotNo = item.lotNo?.trim() || null
@@ -95,6 +132,22 @@ export function BarcodePrintDialog({
       }),
     [items, legacyItemBarcode, today],
   )
+  const testLabels = useMemo<LabelData[]>(
+    () =>
+      (testCandidates ?? []).map((c, i) => ({
+        kind: "LOT_QR" as const,
+        test: true,
+        itemCode: c.itemCode,
+        itemName: c.itemName,
+        lotNo: (testLotNos[i] ?? "").trim(),
+        quantity: c.quantity,
+        uom: c.uom,
+        date: today,
+        dateLabel: c.dateLabel,
+      })),
+    [testCandidates, testLotNos, today],
+  )
+  const labels = testMode ? testLabels : realLabels
   const blockedReasons = useMemo(
     () =>
       labels.flatMap((label) => {
@@ -103,12 +156,17 @@ export function BarcodePrintDialog({
       }),
     [labels],
   )
-  const needsReason = reprint || reprintRequired
+  const needsReason = !testMode && (reprint || reprintRequired)
+  const duplicateTestLot = testMode && new Set(testLabels.map((l) => l.lotNo)).size !== testLabels.length
 
   // 실제 "인쇄" 버튼을 누른 시점에만 번호를 소모하고 감사 기록을 남긴다(미리보기만 열고 닫으면 아무것도 소모하지 않는다).
   async function handlePrintClick() {
-    if (isPrinting || printBlockedReason || blockedReasons.length > 0 || labels.length === 0) return
-    if (reprint && !reason.trim()) {
+    if (isPrinting || (!testMode && printBlockedReason) || blockedReasons.length > 0 || labels.length === 0) return
+    if (duplicateTestLot) {
+      alert("시험용 LOT 번호가 중복되었습니다. 라벨마다 다른 번호를 사용해 주세요.")
+      return
+    }
+    if (!testMode && reprint && !reason.trim()) {
       alert("재출력 사유를 입력해 주세요.")
       return
     }
@@ -132,9 +190,27 @@ export function BarcodePrintDialog({
       const lotNos = labels.filter((l) => l.kind === "LOT_QR" && l.lotNo).map((l) => l.lotNo as string)
       let effectiveReprint = reprint
 
+      // 시험용 라벨: 실제 LOT·재고·감사와 무관. 임시 번호가 실제 LOT 와 겹치지 않는지만 읽기 전용으로 확인하고 바로 인쇄 페이지로 간다.
+      if (testMode) {
+        const unused = await checkTestLotNosUnused({ lotNos })
+        if (!unused.ok) {
+          alert(unused.message)
+          printWindow.close()
+          return
+        }
+        jobId = saveLabelJob(window.localStorage, labels, false)
+        if (!jobId) {
+          alert("브라우저 저장소를 사용할 수 없어 라벨 인쇄 페이지를 열 수 없습니다. 사생활 보호 모드를 해제해 주세요.")
+          printWindow.close()
+          return
+        }
+        printWindow.location.href = labelPrintUrl(jobId)
+        return
+      }
+
       // 1) 읽기 전용 사전 확인 — 출력할 수 없는 상태에서 번호 소모/감사 기록이 생기지 않게 먼저 거른다.
       if (lotNos.length > 0) {
-        const check = await checkLotLabelPrintable({ lotNos })
+        const check = await checkLotLabelPrintable({ lotNos, purpose })
         if (!check.ok) {
           alert(check.message)
           printWindow.close()
@@ -172,7 +248,7 @@ export function BarcodePrintDialog({
 
       // 4) 감사 기록(최초/재출력은 서버 이력으로 판정)
       if (lotNos.length > 0) {
-        const audit = await recordLotLabelPrint({ lotNos, reason: effectiveReprint ? reason.trim() : undefined })
+        const audit = await recordLotLabelPrint({ lotNos, reason: effectiveReprint ? reason.trim() : undefined, purpose, context })
         if (!audit.ok) {
           if (audit.code === "REASON_REQUIRED") setReprintRequired(true)
           alert(audit.message)
@@ -214,8 +290,49 @@ export function BarcodePrintDialog({
           </p>
         </DialogHeader>
 
-        {printBlockedReason && (
+        {testMode && (
+          <div className="rounded-md border-2 border-dashed border-gray-900 bg-gray-50 p-3 text-[14px] text-gray-900" data-test-banner>
+            <p className="font-semibold">{TEST_LABEL_MARK} 라벨 모드 — 실제 LOT 가 아닙니다</p>
+            <p className="mt-1">
+              임시 LOT 번호(TEST-…)로 출력 테스트만 합니다. LOT 저장·재고·입출고·출력 이력은 만들어지지 않으며, 이 QR 을 스캔해도 LOT 조회는 되지 않습니다.
+              QR 형식은 실제와 같습니다(DAEWON|LOT|1|&lt;LOT번호&gt;).
+            </p>
+            <div className="mt-2 space-y-2">
+              {testLabels.map((label, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[13px] text-gray-700">
+                    [{label.itemCode}] {label.itemName}
+                  </span>
+                  <Input
+                    value={testLotNos[i] ?? ""}
+                    onChange={(e) => setTestLotNos((prev) => prev.map((v, j) => (j === i ? e.target.value : v)))}
+                    className="h-9 w-56 font-mono text-[14px]"
+                    maxLength={105}
+                    aria-label={`시험용 LOT 번호 ${i + 1}`}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!testMode && printBlockedReason && (
           <p className="rounded-md bg-amber-50 p-3 text-[14px] text-amber-900">{printBlockedReason}</p>
+        )}
+
+        {!testMode && notices.length > 0 && (
+          <div className="rounded-md bg-amber-50 p-3 text-[14px] text-amber-900" data-label-notices>
+            <p className="font-semibold">라벨 대상에서 제외된 항목</p>
+            <ul className="mt-1 list-disc pl-5">
+              {notices.map((message, i) => (
+                <li key={i}>{message}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {!testMode && labels.length === 0 && (
+          <p className="rounded-md bg-gray-100 p-3 text-[14px] text-gray-700">출력할 수 있는 LOT QR 라벨이 없습니다.</p>
         )}
 
         {blockedReasons.length > 0 && (
@@ -257,15 +374,25 @@ export function BarcodePrintDialog({
         </div>
 
         <DialogFooter>
+          {candidateCount > 0 && (
+            <Button
+              variant="outline"
+              className="mr-auto"
+              onClick={() => (testMode ? setTestMode(false) : enterTestMode())}
+              disabled={isPrinting}
+            >
+              {testMode ? "실제 라벨로 돌아가기" : `${TEST_LABEL_MARK} 라벨로 테스트`}
+            </Button>
+          )}
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             닫기
           </Button>
           <Button
             onClick={() => void handlePrintClick()}
-            disabled={isPrinting || Boolean(printBlockedReason) || blockedReasons.length > 0 || labels.length === 0}
+            disabled={isPrinting || (!testMode && Boolean(printBlockedReason)) || blockedReasons.length > 0 || labels.length === 0 || duplicateTestLot}
           >
             <Printer className="mr-2 h-4 w-4" />
-            {isPrinting ? "처리 중..." : reprint ? "재출력" : "인쇄"}
+            {isPrinting ? "처리 중..." : testMode ? `${TEST_LABEL_MARK} 라벨 인쇄` : reprint ? "재출력" : "인쇄"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -196,6 +196,46 @@ async function main() {
     ok(single.pages === 1, `18 라벨 1장 → PDF 1페이지 (${single.pages})`)
     ok((await page.evaluate(() => document.body.innerText)).includes("재출력"), "19 재출력 job 은 라벨에 '재출력' 표시")
 
+    // 시험용 라벨(임시 LOT 번호 + '시험용' 표시) — 재출력 표시와 함께 있어도 헤더가 넘치지 않는다
+    await page.emulateMedia({ media: "screen" })
+    const testId = "1111222233334444aaaabbbb"
+    const testLabels = [
+      { kind: "LOT_QR", test: true, itemCode: "CNS-0001", itemName: longName, lotNo: "TEST-20261026-001", quantity: 1234567.5, uom: "KG", date: "2026-10-26", dateLabel: "입고일" },
+      { kind: "LOT_QR", test: true, itemCode: "CNS-0002", itemName: "브라켓", lotNo: "TEST-20261026-002", quantity: 5, uom: "EA", date: "2026-10-26", dateLabel: "출고일" },
+    ]
+    await page.goto(`${BASE}/label-print?job=missing`)
+    await page.evaluate(
+      ({ id, labels }) => window.localStorage.setItem("daewon:label-job:" + id, JSON.stringify({ v: 1, createdAt: Date.now(), reprint: true, labels })),
+      { id: testId, labels: testLabels },
+    )
+    await page.goto(`${BASE}/label-print?job=${testId}`)
+    await waitReady(page)
+    const testState = await page.evaluate(() => {
+      const faces = Array.from(document.querySelectorAll<HTMLElement>(".daewon-label-face"))
+      return faces.map((face) => {
+        const header = face.querySelector<HTMLElement>("[data-label-text] > div")!
+        const mark = face.querySelector<HTMLElement>("[data-label-test]")
+        return { testMark: mark?.textContent ?? null, headerOverflow: header.scrollWidth > header.clientWidth + 1, text: face.innerText }
+      })
+    })
+    ok(testState.every((t) => t.testMark === "시험용" && !t.headerOverflow), "19b 시험용 라벨 2장: '시험용' 표시 · 재출력 표시와 함께여도 헤더 넘침 없음")
+    for (let i = 0; i < testLabels.length; i++) {
+      const png = PNG.sync.read(await page.locator("[data-label-qr]").nth(i).screenshot())
+      const decoded = jsQR(new Uint8ClampedArray(png.data), png.width, png.height)
+      ok(decoded?.data === `DAEWON|LOT|1|${testLabels[i].lotNo}`, `19c-${i + 1} 시험용 QR 디코딩 → ${decoded?.data}`)
+    }
+    await page.locator(".daewon-label-face").first().screenshot({ path: join(process.cwd(), "docs", "qr-label-samples", "label-sample-test.png") })
+    // LOT 번호가 실제 번호인데 시험용 표시가 붙은 job 은 거부된다
+    await page.evaluate(() =>
+      window.localStorage.setItem(
+        "daewon:label-job:cccccccccccccccccccccccc",
+        JSON.stringify({ v: 1, createdAt: Date.now(), reprint: false, labels: [{ kind: "LOT_QR", test: true, itemCode: "A", itemName: "B", lotNo: "CNS-RM-1", date: "x", dateLabel: "y" }] }),
+      ),
+    )
+    await page.goto(`${BASE}/label-print?job=cccccccccccccccccccccccc`)
+    await page.waitForSelector("text=인쇄할 라벨 정보를 찾을 수 없습니다", { timeout: 10000 })
+    ok(true, "19d 실제 LOT 번호에 시험용 표시를 단 job 은 거부")
+
     // 만료/없는 job
     await page.emulateMedia({ media: "screen" })
     await seed(page, "aaaaaaaaaaaaaaaaaaaaaaaa", Date.now() - 31 * 60 * 1000)
