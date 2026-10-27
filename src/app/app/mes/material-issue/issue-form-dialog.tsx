@@ -35,6 +35,8 @@ function isLotManaged(item: MaterialRequirement["item"]): boolean {
 import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
 import { buildIssueLabelPlan, type LabelPlan } from "@/lib/label/label-items"
+import { LotQrScanSection } from "./lot-qr-scan-section"
+import { applyScannedLot, type ApplyScannedLotOutcome } from "@/lib/material-issue/lot-scan"
 
 // ── 다중 LOT 분할 행 타입 ─────────────────────────────────────────────────────
 
@@ -74,6 +76,9 @@ export function IssueFormDialog({
   const [confirmedIssuePlan, setConfirmedIssuePlan] = useState<LabelPlan | null>(null)
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  // QR 스캔 결과 반영(비동기 조회 뒤)이 최신 LOT 행을 보도록 ref 로 미러링한다.
+  const lotSplitsRef = useRef(lotSplitsMap)
+  lotSplitsRef.current = lotSplitsMap
 
   const pendingMaterials = workOrder?.materials.filter((material) => material.pendingQty > 0) ?? []
 
@@ -180,6 +185,27 @@ export function IssueFormDialog({
     setTimeout(() => setHighlightedItemId(null), 3000)
   }
 
+  /**
+   * QR 스캔으로 서버가 확인한 LOT 를 기존 LOT 선택 행에 반영한다(수동 선택과 같은 lotSplitsMap 구조).
+   * LOT 선택만 반영하고 출고 수량은 정하지 않는다 — 출고는 사용자가 [출고 처리]를 눌러야 수행된다.
+   */
+  const handleScannedLot = (itemId: string, option: LotStockOption): ApplyScannedLotOutcome => {
+    const makeKey = () => `${itemId}-qr-${Date.now()}`
+    const emptyRow = (): LotSplitRow[] => [{ key: `${itemId}-0`, lotValue: "", qty: "" }]
+    const { outcome } = applyScannedLot(lotSplitsRef.current[itemId] ?? emptyRow(), option, makeKey)
+    if (outcome === "ALREADY_SELECTED") return outcome
+    // 수동 선택 UI 의 LOT 목록에도 이 재고가 있어야 선택 상자가 값을 표시한다(이미 있으면 그대로)
+    setLotStockMap((prev) => {
+      const list = prev[itemId] ?? []
+      return list.some((l) => l.lotId === option.lotId && l.warehouseId === option.warehouseId) ? prev : { ...prev, [itemId]: [...list, option] }
+    })
+    setLotSplitsMap((prev) => ({ ...prev, [itemId]: applyScannedLot(prev[itemId] ?? emptyRow(), option, makeKey).splits }))
+    setHighlightedItemId(itemId)
+    rowRefs.current[itemId]?.scrollIntoView({ behavior: "smooth", block: "center" })
+    setTimeout(() => setHighlightedItemId(null), 3000)
+    return outcome
+  }
+
   const handleOpen = (nextOpen: boolean) => {
     if (!nextOpen) {
       setWarehouseMap({})
@@ -243,6 +269,10 @@ export function IssueFormDialog({
       for (const row of splits) {
         if (!row.lotValue || !(Number(row.qty) > 0)) continue
         const lot = getLotFromSplitRow(material.itemId, row)
+        if (lot?.issueBlockReason) {
+          alert(`${material.item.name} / ${lot.lotNo}: ${lot.issueBlockReason}`)
+          return
+        }
         if (lot && Number(row.qty) > lot.qtyAvailable) {
           alert(`${material.item.name} / ${lot.lotNo}: 출고수량(${row.qty})이 LOT 가용재고(${lot.qtyAvailable})를 초과합니다.`)
           return
@@ -403,10 +433,26 @@ export function IssueFormDialog({
           </div>
 
           <div className="space-y-2">
-            <div className="text-[14px] font-medium">출고 자재 목록</div>
+            {pendingMaterials.some((material) => isLotManaged(material.item)) ? (
+              // [QR 스캔]: 기존 LOT 선택(아래 자재별 LOT 행) 옆의 선택적 편의 기능. QR 없이도 모든 출고 업무를 수동으로 할 수 있다.
+              <LotQrScanSection
+                workOrderId={workOrder.id}
+                materials={workOrder.materials.map((material) => ({
+                  itemId: material.itemId,
+                  pendingQty: material.pendingQty,
+                  lotManaged: isLotManaged(material.item),
+                }))}
+                disabled={isPending || confirmedIssuePlan !== null}
+                title="출고 자재 목록"
+                onSelectLot={handleScannedLot}
+                isLotSelected={(itemId, lotId) => (lotSplitsRef.current[itemId] ?? []).some((row) => row.lotValue.startsWith(`${lotId}:`))}
+              />
+            ) : (
+              <div className="text-[14px] font-medium">출고 자재 목록</div>
+            )}
             <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-800">
-              현재 출고 가능한 LOT만 표시됩니다. LOT 미지정 재고는 LOT 추적성 기준상
-              출고 대상에서 제외되며, 관리자에게 재고 정리를 요청하세요.
+              LOT가 지정된 재고만 출고할 수 있습니다. 격리·보류·소진·만료 LOT는 목록에 표시되지만 선택할 수 없습니다.
+              LOT 미지정 재고는 LOT 추적성 기준상 출고 대상에서 제외되며, 관리자에게 재고 정리를 요청하세요.
             </p>
 
             {pendingMaterials.length === 0 ? (
@@ -505,8 +551,16 @@ export function IssueFormDialog({
                                               return val === row.lotValue || !usedLotIds.has(l.lotId)
                                             })
                                             .map((lotStock) => (
-                                              <SelectItem key={getLotSelectValue(lotStock)} value={getLotSelectValue(lotStock)} className="text-[13px]">
+                                              <SelectItem
+                                                key={getLotSelectValue(lotStock)}
+                                                value={getLotSelectValue(lotStock)}
+                                                className="text-[13px]"
+                                                // 격리·보류·소진·만료 LOT 는 선택할 수 없다(서버도 출고 확정에서 같은 규칙으로 거부한다)
+                                                disabled={Boolean(lotStock.issueBlockReason)}
+                                                title={lotStock.issueBlockReason ?? undefined}
+                                              >
                                                 {lotStock.lotNo} / [{lotStock.warehouseCode}] / 가용 {formatQuantity(lotStock.qtyAvailable)} {lotStock.unit}
+                                                {lotStock.issueBlockReason ? ` — 출고 불가(${lotStock.issueBlockLabel ?? "제한"})` : ""}
                                               </SelectItem>
                                             ))
                                         ) : (
@@ -516,6 +570,11 @@ export function IssueFormDialog({
                                         )}
                                       </SelectContent>
                                     </Select>
+                                    {lotOptions.some((l) => l.issueBlockReason) && (
+                                      <p className="mt-0.5 text-[13px] text-amber-700" data-testid="issue-lot-blocked-note">
+                                        격리·보류·소진·만료 LOT 는 출고할 수 없어 선택할 수 없습니다. 항목에 마우스를 올리면 사유가 표시됩니다.
+                                      </p>
+                                    )}
                                     {rowLot && (
                                       <p className="mt-0.5 text-[11px] text-muted-foreground">
                                         [{rowLot.warehouseCode}] {rowLot.warehouseName} · 가용 {formatQuantity(rowLot.qtyAvailable)}
