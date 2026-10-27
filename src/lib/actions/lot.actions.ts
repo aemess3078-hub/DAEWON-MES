@@ -98,23 +98,48 @@ export async function getLots(): Promise<LotWithDetails[]> {
 
 // ─── LOT 생성 ─────────────────────────────────────────────────────────────────
 
-export async function createLot(data: CreateLotInput, tenantId: string) {
-  await requireResourcePermission("LOT", "CREATE")
+/** 선택 입력 날짜: 비어 있으면 null(기존과 동일), 해석할 수 없는 값은 DB 쓰기 전에 거부한다. */
+function parseOptionalDate(value: unknown): Date | null {
+  if (!value) return null
+  const date = new Date(value as string)
+  if (typeof value !== "string" || Number.isNaN(date.getTime())) throw new Error("날짜 형식이 올바르지 않습니다.")
+  return date
+}
+
+export async function createLot(data: CreateLotInput, clientTenantId: string) {
+  // 로그인 · LOT 등록(LOT CREATE) 권한 확인. tenant 는 세션 값만 쓰고, 클라이언트가 보낸 tenantId 가 다르면 거부한다.
+  // (getTenantId 의 개발용 대체값을 쓰지 않는다.) 아래 검증은 모두 DB 쓰기 전에 끝난다.
+  const actor = await requireResourcePermission("LOT", "CREATE")
+  if (typeof clientTenantId !== "string" || clientTenantId !== actor.tenantId) throw new Error("이 기능을 사용할 권한이 없습니다.")
+  const tenantId = actor.tenantId
+
+  // 입력 검증: 저장되는 값은 아래 명시한 필드뿐이다(data 안의 tenantId·status 등 다른 필드는 무시된다).
+  const itemId = typeof data?.itemId === "string" ? data.itemId : ""
+  const lotNo = typeof data?.lotNo === "string" ? data.lotNo : ""
+  if (!lotNo.trim()) throw new Error("LOT번호를 입력하세요")
+  if (lotNo.length > 128) throw new Error("LOT번호가 너무 깁니다.")
+  const manufactureDate = parseOptionalDate(data?.manufactureDate)
+  const expiryDate = parseOptionalDate(data?.expiryDate)
+
+  // 품목은 세션 tenant 소속만 인정한다. 없는/잘못된 품목과 다른 tenant 의 품목은 같은 오류로 응답한다(존재 여부 비노출).
+  const item = itemId ? await prisma.item.findFirst({ where: { id: itemId, tenantId }, select: { id: true } }) : null
+  if (!item) throw new Error("품목을 찾을 수 없습니다.")
+
   const existing = await prisma.lot.findFirst({
-    where: { tenantId, lotNo: data.lotNo },
+    where: { tenantId, lotNo },
   })
   if (existing) {
-    throw new Error(`LOT번호 '${data.lotNo}'는 이미 존재합니다.`)
+    throw new Error(`LOT번호 '${lotNo}'는 이미 존재합니다.`)
   }
 
   await prisma.lot.create({
     data: {
       tenantId,
-      itemId: data.itemId,
-      lotNo: data.lotNo,
+      itemId: item.id,
+      lotNo,
       status: "ACTIVE",
-      manufactureDate: data.manufactureDate ? new Date(data.manufactureDate) : null,
-      expiryDate: data.expiryDate ? new Date(data.expiryDate) : null,
+      manufactureDate,
+      expiryDate,
     },
   })
 

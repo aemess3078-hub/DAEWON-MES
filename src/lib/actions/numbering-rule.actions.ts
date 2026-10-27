@@ -148,13 +148,41 @@ function resolveDateToken(format: string, date: Date): string {
 
 // ─── 번호 생성 ────────────────────────────────────────────────────────────────
 
+const CONTEXT_KEYS: readonly string[] = ["LINE_CODE", "PROD_CODE", "CLIENT_CODE", "ITEM_CODE", "ITEM_TYPE", "SHIFT"]
+const MAX_CONTEXT_VALUE_LENGTH = 100
+
+/**
+ * 번호 생성 context 검증: 알려진 키만, 값은 문자열(길이 제한). 비어 있는(undefined/null) 값은 없는 것으로 본다.
+ * context 는 번호 토큰(CONTEXT)을 채우는 표시용 문자열일 뿐 tenant·규칙·시퀀스를 고르는 데 쓰이지 않는다 — 식별자(id)를 담지 않는다.
+ */
+function sanitizeNumberContext(context: unknown): Partial<Record<ContextKey, string>> | undefined {
+  if (context === undefined || context === null) return undefined
+  if (typeof context !== "object" || Array.isArray(context)) throw new Error("번호 생성 정보가 올바르지 않습니다.")
+  const result: Partial<Record<ContextKey, string>> = {}
+  for (const [key, value] of Object.entries(context as Record<string, unknown>)) {
+    if (value === undefined || value === null) continue
+    if (!CONTEXT_KEYS.includes(key) || typeof value !== "string" || value.length > MAX_CONTEXT_VALUE_LENGTH) {
+      throw new Error("번호 생성 정보가 올바르지 않습니다.")
+    }
+    result[key as ContextKey] = value
+  }
+  return result
+}
+
 export async function generateNumber(
-  tenantId: string,
+  clientTenantId: string,
   type: "LOT" | "SERIAL",
-  context?: Partial<Record<ContextKey, string>>
+  rawContext?: Partial<Record<ContextKey, string>>
 ): Promise<string> {
-  // 시퀀스를 증가시키는 쓰기 동작 — LOT 등록 권한이 있는 사용자만
-  await requireResourcePermission("LOT", "CREATE")
+  // 시퀀스를 증가시키는 쓰기 동작 — LOT 등록 권한이 있는 사용자만(기존 정책 유지: LOT/SERIAL 모두 LOT CREATE).
+  // 현재 호출처는 LOT 등록 시트(type "LOT")뿐이다. SERIAL 은 호출처가 없고 권한 정책이 별도로 확정되지 않아 기존 권한을 그대로 적용한다.
+  const actor = await requireResourcePermission("LOT", "CREATE")
+  // tenant 는 세션 값만 쓰고(getTenantId 의 개발용 대체값은 쓰지 않는다), 클라이언트가 보낸 tenantId 가 다르면 거부한다.
+  if (typeof clientTenantId !== "string" || clientTenantId !== actor.tenantId) throw new Error("이 기능을 사용할 권한이 없습니다.")
+  const tenantId = actor.tenantId
+  // 규칙 조회와 시퀀스 증가 전에 모든 입력 검증을 끝낸다(거부된 요청은 시퀀스를 올리지 않는다).
+  if (type !== "LOT" && type !== "SERIAL") throw new Error("지원하지 않는 번호 유형입니다.")
+  const context = sanitizeNumberContext(rawContext)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
