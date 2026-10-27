@@ -138,8 +138,13 @@ export async function updateLotStatus(id: string, status: string) {
 // ─── LOT 번호 자동 생성 ───────────────────────────────────────────────────────
 
 export async function generateLotNo(itemId: string, tenantId: string): Promise<string> {
-  const item = await prisma.item.findUnique({
-    where: { id: itemId },
+  // 로그인 · LOT 등록(LOT CREATE) 권한 확인 — LOT 등록 시트의 다른 번호 생성/등록 액션과 같은 권한이다.
+  // tenant 는 세션 값만 쓰고(getTenantId 의 개발용 대체값은 쓰지 않는다), 클라이언트가 보낸 tenantId 가 다르면 거부한다.
+  const actor = await requireResourcePermission("LOT", "CREATE")
+  if (typeof tenantId !== "string" || tenantId !== actor.tenantId) throw new Error("이 기능을 사용할 권한이 없습니다.")
+  // 품목은 세션 tenant 소속만 조회한다. 없는 품목과 다른 tenant 의 품목은 같은 오류로 응답한다(존재 여부 비노출).
+  const item = typeof itemId === "string" && itemId ? await prisma.item.findFirst({
+    where: { id: itemId, tenantId: actor.tenantId },
     select: {
       code: true,
       itemType: true,
@@ -149,15 +154,16 @@ export async function generateLotNo(itemId: string, tenantId: string): Promise<s
       itemGroup: { select: { code: true } },
       category: { select: { code: true } },
     },
-  })
-  return generateCnsMaterialReceiptLotNo(prisma, tenantId, {
-    itemCode: item?.code,
-    itemGroupCode: item?.itemGroup?.code,
-    itemCategoryCode: item?.category?.code,
-    itemType: item?.itemType,
-    lotNumberingType: item?.lotNumberingType,
-    lotPrefix: item?.lotPrefix,
-    manualLotPolicy: item?.manualLotPolicy,
+  }) : null
+  if (!item) throw new Error("품목을 찾을 수 없습니다.")
+  return generateCnsMaterialReceiptLotNo(prisma, actor.tenantId, {
+    itemCode: item.code,
+    itemGroupCode: item.itemGroup?.code,
+    itemCategoryCode: item.category?.code,
+    itemType: item.itemType,
+    lotNumberingType: item.lotNumberingType,
+    lotPrefix: item.lotPrefix,
+    manualLotPolicy: item.manualLotPolicy,
   })
 }
 
