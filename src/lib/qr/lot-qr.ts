@@ -98,6 +98,73 @@ export function parseLotQr(raw: unknown): LotQrParseResult {
   return { ok: true, entity: "LOT", version, lotNo: decoded, source: "QR" }
 }
 
+// ─── WIP QR (라벨 3종 중 공정·재공 통합 라벨) ─────────────────────────────────
+//
+// 형식:  DAEWON|WIP|1|<identifier>   — identifier = 재공 단위의 고유 식별값(encodeURIComponent).
+// 어떤 DB 값을 식별값으로 쓸지는 미확정이다(제안: WipUnit.id — 불변·tenant 내 unique·생성 후 변하지 않음).
+// 라벨은 최초 발행 후 모든 공정에서 재사용되므로 수량/공정/상태 등 변하는 값은 QR 에도 라벨에도 넣지 않는다.
+// LOT 스캔 파서(parseLotQr/classifyScanInput)는 이 QR 을 "LOT QR 이 아닙니다"로 거부한다(오인 방지).
+
+export const QR_ENTITY_WIP = "WIP"
+export const QR_VERSION_WIP = 1
+
+export type WipQrParseResult =
+  | { ok: true; entity: "WIP"; version: number; wipId: string; source: "QR" }
+  | { ok: false; code: LotQrErrorCode; message: string }
+
+/** 재공 식별값을 QR payload 로 만든다. 결정적(같은 WIP → 같은 문자열). */
+export function encodeWipQr(wipId: string): string {
+  const id = String(wipId ?? "").trim()
+  if (!id) throw new Error("WIP 식별값이 비어 있어 QR 을 만들 수 없습니다.")
+  if (id.length > QR_MAX_IDENTIFIER_LENGTH || CONTROL_CHARS.test(id)) {
+    throw new Error("WIP 식별값이 QR 로 만들 수 없는 형식입니다.")
+  }
+  return `${QR_PREFIX}|${QR_ENTITY_WIP}|${QR_VERSION_WIP}|${encodeURIComponent(id)}`
+}
+
+const failWip = (code: LotQrErrorCode): WipQrParseResult => ({ ok: false, code, message: ERROR_MESSAGES[code] })
+
+/** 대원정밀 규격 WIP QR 만 엄격히 파싱한다. */
+export function parseWipQr(raw: unknown): WipQrParseResult {
+  if (typeof raw !== "string") return failWip("MALFORMED")
+  const input = raw.trim()
+  if (!input) return failWip("EMPTY")
+  if (input.length > QR_MAX_INPUT_LENGTH) return failWip("TOO_LONG")
+  const parts = input.split("|")
+  if (parts.length !== 4) return parts[0] === QR_PREFIX ? failWip("MALFORMED") : failWip("WRONG_PREFIX")
+  const [prefix, entity, versionText, identifier] = parts
+  if (prefix !== QR_PREFIX) return failWip("WRONG_PREFIX")
+  if (entity !== QR_ENTITY_WIP) return failWip("UNSUPPORTED_ENTITY")
+  if (!/^[0-9]{1,3}$/.test(versionText)) return failWip("MALFORMED")
+  const version = Number(versionText)
+  if (version !== QR_VERSION_WIP) return failWip("UNSUPPORTED_VERSION")
+  if (!identifier) return failWip("INVALID_IDENTIFIER")
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(identifier)
+  } catch {
+    return failWip("INVALID_IDENTIFIER")
+  }
+  decoded = decoded.trim()
+  if (!decoded || decoded.length > QR_MAX_IDENTIFIER_LENGTH || CONTROL_CHARS.test(decoded)) return failWip("INVALID_IDENTIFIER")
+  return { ok: true, entity: "WIP", version, wipId: decoded, source: "QR" }
+}
+
+/** 라벨 종류 판별용(스캐너 단계에서 사용 예정): LOT QR 인지 WIP QR 인지 구분해 파싱한다. */
+export function parseDaewonQr(
+  raw: unknown,
+):
+  | { ok: true; entity: "LOT"; version: number; lotNo: string }
+  | { ok: true; entity: "WIP"; version: number; wipId: string }
+  | { ok: false; code: LotQrErrorCode; message: string } {
+  const lot = parseLotQr(raw)
+  if (lot.ok) return { ok: true, entity: "LOT", version: lot.version, lotNo: lot.lotNo }
+  const wip = parseWipQr(raw)
+  if (wip.ok) return { ok: true, entity: "WIP", version: wip.version, wipId: wip.wipId }
+  // 둘 다 아니면 더 구체적인 오류(접두는 맞는데 다른 종류가 아닌 경우 LOT 쪽 오류)를 돌려준다.
+  return lot.code === "UNSUPPORTED_ENTITY" ? wip : lot
+}
+
 // ─── 스캔 입력 분류(QR / 수동 LOT 번호 / 레거시 바코드) ────────────────────────
 
 export type ScanInput =
