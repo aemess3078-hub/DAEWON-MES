@@ -124,6 +124,9 @@ export function ReceivingFormDialog({
     return requestIdsRef.current[purchaseOrderItemId]
   }
   const [printOpen, setPrintOpen] = useState(false)
+  // 서버가 입고 성공 응답으로 돌려준 "실제 저장 확인된" LOT 번호(발주품목 id → LOT). 서버가 자동 발행한 LOT 도 여기로 들어온다.
+  // 클라이언트가 번호를 만들지 않는다 — 응답에 lotNo 가 없으면 기존처럼 화면에 입력/예약된 번호만 쓴다.
+  const serverLotNosRef = useRef<Record<string, string>>({})
   // 입고 확정이 끝난 뒤의 라벨 대상. 이 값이 있어야 실제 인쇄가 가능하다(LOT 가 DB 에 영속화된 뒤에만 QR 라벨 출력).
   const [confirmedLabels, setConfirmedLabels] = useState<LabelPlan | null>(null)
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
@@ -328,7 +331,7 @@ export function ReceivingFormDialog({
         rowStatus,
         async (row) => {
           const ins = inspections.find((i) => i.purchaseOrderItemId === row.purchaseOrderItemId)!
-          return createReceivingInspection({
+          const response = await createReceivingInspection({
             purchaseOrderItemId: ins.purchaseOrderItemId,
             purchaseOrderId: purchaseOrder.id,
             warehouseId: ins.warehouseId,
@@ -342,6 +345,8 @@ export function ReceivingFormDialog({
             lotNo: ins.lotNo.trim() || undefined,
             lotReservationId: ins.isAutoNumbered ? ins.lotReservationId ?? undefined : undefined,
           })
+          if (response.success && response.lotNo) serverLotNosRef.current[ins.purchaseOrderItemId] = response.lotNo
+          return response
         }
       )
       setRowStatus(outcome.statuses)
@@ -367,7 +372,8 @@ export function ReceivingFormDialog({
             itemName: ins.itemName,
             uom: ins.uom,
             isLotTracked: ins.isLotTracked,
-            lotNo: ins.lotNo,
+            // 서버가 확인해 돌려준 LOT 가 있으면 그 번호(서버 자동 발행 포함), 없으면 화면에 입력/예약된 번호(수동 입력 LOT)
+            lotNo: serverLotNosRef.current[ins.purchaseOrderItemId] ?? ins.lotNo,
             receivedQty: parseFloat(ins.thisReceivedQty) || 0,
             acceptedQty: parseFloat(ins.thisAcceptedQty) || 0,
           })),
@@ -812,6 +818,7 @@ export function ReceivingFormDialog({
             : "입고 확정 후 LOT QR 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다(확정 전에 출력한 라벨은 입고 실패/취소 시 현장에 남을 수 있습니다)."
         }
         items={labelPlan.items.map((l) => ({
+          labelType: l.labelType, // 원자재 LOT 라벨(RAW_LOT) — 유형 칩 표시
           itemCode: l.itemCode,
           itemName: l.itemName,
           lotNo: l.lotNo,

@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, CheckCircle2, PackageMinus } from "lucide-re
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { IssueFormDialog } from "./issue-form-dialog"
+import { WipLabelButton } from "./wip-label-button"
 import {
   type WarehouseStockOption,
   type WorkOrderForIssue,
@@ -163,7 +164,9 @@ export function MaterialIssueTable({
                     )}
                   </div>
 
-                  <div className="flex justify-end px-3 py-3">
+                  <div className="flex justify-end gap-2 px-3 py-3">
+                    {/* WIP 라벨: 자재출고가 모두 완료된 작업지시만. 대상 WIP(기존 WipUnit)은 클릭 시 서버가 조회한다. */}
+                    {workOrder.allIssued && <WipLabelButton workOrderId={workOrder.id} orderNo={workOrder.orderNo} />}
                     {!workOrder.allIssued && (
                       <Button
                         size="sm"

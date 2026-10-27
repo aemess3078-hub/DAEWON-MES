@@ -257,6 +257,7 @@ export function ReceiptDialog({
           receivedLotNo ? undefined : "입고 처리 후 LOT QR 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다."
         }
         items={[{
+          labelType: "FG_LOT", // 완제품 LOT 라벨 — 유형 칩 표시
           itemCode: workOrder.item.code,
           itemName: workOrder.item.name,
           lotNo: receivedLotNo ?? undefined,

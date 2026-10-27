@@ -1,6 +1,6 @@
 "use server"
 
-import { getTenantId, requireRole } from "@/lib/auth"
+import { requireRole } from "@/lib/auth"
 import { prisma } from "@/lib/db/prisma"
 import { generateCnsMaterialReceiptLotNo } from "@/lib/lot-numbering/lot-number-generator"
 import { computeNextMaterialReceiptLotNo } from "@/lib/lot-numbering/lot-reservation"
@@ -49,7 +49,15 @@ export type CreateReceivingInspectionInput = {
 
 /** 특정 사이트에 속한 창고 목록 조회 (다이얼로그 창고 선택용) */
 export async function getWarehousesForSite(siteId: string) {
-  const tenantId = await getTenantId()
+  // 로그인 · 자재입고(PURCHASE_ORDER) 조회 권한 확인. tenant 는 세션 값만 쓴다(getTenantId 의 개발용 대체값을 쓰지 않는다).
+  // 거부 시 빈 목록 — 두 호출 화면(자재입고/발주 입고)은 창고 선택 목록이 비어 보일 뿐 다른 정보는 노출되지 않는다.
+  let tenantId: string
+  try {
+    tenantId = (await requireResourcePermission("PURCHASE_ORDER", "READ")).tenantId
+  } catch {
+    return []
+  }
+  if (typeof siteId !== "string" || !siteId) return []
   return prisma.warehouse.findMany({
     where: { siteId, tenantId },
     select: { id: true, code: true, name: true },
@@ -66,7 +74,11 @@ export async function generateReceivingLotNo(
   itemContext: CnsItemRuleContext = {},
   sequenceOffset = 0,
 ): Promise<string> {
-  return generateCnsMaterialReceiptLotNo(prisma, tenantId, itemContext, new Date(), sequenceOffset)
+  // 로그인 · 자재입고(PURCHASE_ORDER) 생성 권한 확인(createReceivingInspection 과 같은 권한). tenant 는 세션 값만 쓰고,
+  // 클라이언트가 보낸 tenantId 가 세션과 다르면 거부한다(다른 tenant 의 LOT 채번 순번을 볼 수 없다). 현재 호출처는 없다.
+  const actor = await requireResourcePermission("PURCHASE_ORDER", "CREATE")
+  if (typeof tenantId !== "string" || tenantId !== actor.tenantId) throw new Error("이 기능을 사용할 권한이 없습니다.")
+  return generateCnsMaterialReceiptLotNo(prisma, actor.tenantId, itemContext, new Date(), sequenceOffset)
 }
 
 const AUTO_LOT_COLLISION = "AUTO_LOT_COLLISION"
@@ -76,7 +88,9 @@ const AUTO_LOT_COLLISION = "AUTO_LOT_COLLISION"
  *          "UNKNOWN"(DB 연결/응답 오류로 커밋 여부를 알 수 없음 — 성공으로 단정하지 않고 자동 재시도도 금지)
  */
 // replayed: 같은 requestId 의 재전송이라 새로 처리하지 않고 기존 결과(성공)를 돌려준 경우
-type ReceivingResult = { success: boolean; message?: string; outcome?: "FAILED" | "UNKNOWN"; replayed?: boolean }
+// lotNo: 이번 호출이 새로 입고를 처리해 커밋한 뒤 DB 에서 Lot 행을 다시 확인한 LOT 번호(LOT 관리 품목, 서버 자동 발행 포함).
+//        라벨 출력용 확인값이다 — 재전송(replayed)이거나 확인하지 못하면 포함하지 않는다(클라이언트는 번호를 추측하지 않는다).
+type ReceivingResult = { success: boolean; message?: string; outcome?: "FAILED" | "UNKNOWN"; replayed?: boolean; lotNo?: string }
 
 export async function createReceivingInspection(
   data: CreateReceivingInspectionInput,
@@ -249,7 +263,10 @@ async function createReceivingInspectionInternal(
   // 번호를 "소유"할 수 있으므로 Lot 테이블과 예약 테이블 사이의 경합이 사라진다.
   const maxAttempts = qty.accepted > 0 || lotResolutionMode === "AUTO" ? BUSINESS_NUMBER_MAX_ATTEMPTS : 1
   let replayed = false
+  // 트랜잭션이 끝까지 실행된 시도에서 확정된 LOT 번호(커밋 후 아래에서 DB 로 재확인한다). 시도마다 초기화한다.
+  const committed: { lotNo: string | null } = { lotNo: null }
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    committed.lotNo = null
     try {
       await prisma.$transaction(async (tx) => {
         await lockPurchaseOrderItemsForUpdate(tx, tenantId, [data.purchaseOrderItemId])
@@ -533,6 +550,7 @@ async function createReceivingInspectionInternal(
       },
       menuName: "자재입고",
     })
+    committed.lotNo = resolvedLotNo
       })
       break
     } catch (error) {
@@ -588,5 +606,19 @@ async function createReceivingInspectionInternal(
     "createReceivingInspection"
   )
 
-  return { success: true }
+  // LOT 관리 품목: 커밋 뒤 DB 에서 (tenant, lotNo, 품목)의 Lot 행이 실제로 있는지 다시 확인한 번호만 돌려준다.
+  // 이 확인이 실패해도 입고 결과를 뒤집지 않는다(lotNo 없이 성공 반환 → 화면은 번호를 추측하지 않는다).
+  let confirmedLotNo: string | undefined
+  if (isLotTracked && committed.lotNo) {
+    try {
+      const persisted = await prisma.lot.findFirst({
+        where: { tenantId, lotNo: committed.lotNo, itemId: purchaseOrderItem.itemId },
+        select: { id: true },
+      })
+      if (persisted) confirmedLotNo = committed.lotNo
+    } catch (error) {
+      console.error("[createReceivingInspection] LOT 확인 실패(입고 결과에는 영향 없음):", error)
+    }
+  }
+  return confirmedLotNo ? { success: true, lotNo: confirmedLotNo } : { success: true }
 }
