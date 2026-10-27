@@ -29,6 +29,8 @@ import {
   type AvailableFinishedGoodsLot,
   type EmptyLotReason,
 } from "@/lib/actions/shipment.actions"
+import { FgLotQrScan } from "./fg-lot-qr-scan"
+import { planScannedFgLot } from "@/lib/shipment/fg-lot-scan"
 import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
 import { formatQuantity } from "@/lib/utils"
@@ -268,6 +270,28 @@ export function ShipmentFormSheet({
         : 0,
     }
     setLotAllocations(itemIndex, allocations)
+  }
+
+  /**
+   * QR 로 확인된 LOT 를 기존 LOT 선택 행에 반영한다(선택만 — 출하 등록/확정·서버 호출 없음).
+   * 수동 선택과 같은 handleLotChange 를 쓰므로 수량 제안 등 결과가 수동 선택과 같다.
+   * 다만 LOT 를 고르지 않은 행에 사용자가 이미 입력한 수량은 그대로 둔다.
+   */
+  function handleScannedLot(itemIndex: number, scanned: AvailableFinishedGoodsLot) {
+    const allocations = form.getValues(`items.${itemIndex}.lotAllocations`)
+    const plan = planScannedFgLot(allocations, scanned.lotId)
+    if (plan.outcome === "ALREADY_SELECTED") return plan.outcome
+    if (plan.outcome === "ADDED_ROW") {
+      setLotAllocations(itemIndex, [...allocations, { lotId: "", qty: 0 }])
+    }
+    handleLotChange(itemIndex, plan.rowIndex, scanned.lotId)
+    if (plan.preserveQty !== null) {
+      form.setValue(`items.${itemIndex}.lotAllocations.${plan.rowIndex}.qty`, plan.preserveQty, {
+        shouldDirty: true,
+        shouldValidate: true,
+      })
+    }
+    return plan.outcome
   }
 
   function handleScan(parsed: ParsedBarcode) {
@@ -730,17 +754,30 @@ export function ShipmentFormSheet({
                           </p>
                         )}
 
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-8 gap-1 text-[12px]"
-                          onClick={() => addLotAllocation(itemIndex)}
-                          disabled={!selectedWarehouseId || lots.length === 0}
-                        >
-                          <Plus className="h-3.5 w-3.5" />
-                          LOT 추가
-                        </Button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 gap-1 text-[12px]"
+                            onClick={() => addLotAllocation(itemIndex)}
+                            disabled={!selectedWarehouseId || lots.length === 0}
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                            LOT 추가
+                          </Button>
+                          {/* 선택적 편의기능: 완제품 LOT 라벨 QR 로 위 LOT 선택 상자와 같은 LOT 를 고른다(수량·등록은 직접) */}
+                          <FgLotQrScan
+                            itemId={field.itemId}
+                            warehouseId={selectedWarehouseId}
+                            disabled={isLoading || isLotLoading}
+                            findLot={(lotId) => lots.find((lot) => lot.lotId === lotId)}
+                            isLotSelected={(lotId) =>
+                              (form.getValues(`items.${itemIndex}.lotAllocations`) ?? []).some((row) => row.lotId === lotId)
+                            }
+                            onSelectLot={(lot) => handleScannedLot(itemIndex, lot)}
+                          />
+                        </div>
 
                         {selectedTotal > remainingQty && (
                           <p className="text-[12px] text-destructive">

@@ -274,8 +274,10 @@ async function main() {
       return fs.statSync(full).isDirectory() ? walk(full) : [full]
     })
   }
-  const offenders = others.flatMap((d) => walk(join(process.cwd(), d))).filter((f) => /\.(ts|tsx)$/.test(f) && /qr-scanner|QrScanner|lot-qr-scan-section/.test(readFileSync(f, "utf8")))
-  ok(offenders.length === 0, "D14 입고·완제품입고·출하·재고·LOT 관리·POP·키오스크 화면 파일에는 스캐너를 직접 연결하지 않았다(POP 의 WIP QR 스캔은 공용 컴포넌트 src/components/pop 한 곳에만 있다)")
+  // 4-3단계: 출하 화면의 [QR 스캔]은 fg-lot-qr-scan.tsx 한 파일에만 둔다(test:shipment-fg-qr 가 그 외 출하 파일의 미연동을 따로 확인한다)
+  const SHIPMENT_QR_FILE = join(process.cwd(), "src/app/app/mes/shipments/fg-lot-qr-scan.tsx")
+  const offenders = others.flatMap((d) => walk(join(process.cwd(), d))).filter((f) => f !== SHIPMENT_QR_FILE && /\.(ts|tsx)$/.test(f) && /qr-scanner|QrScanner|lot-qr-scan-section/.test(readFileSync(f, "utf8")))
+  ok(offenders.length === 0, "D14 입고·완제품입고·재고·LOT 관리·POP·키오스크 화면과 출하 화면(fg-lot-qr-scan.tsx 제외) 파일에는 스캐너를 직접 연결하지 않았다(POP 의 WIP QR 스캔은 공용 컴포넌트 src/components/pop 한 곳에만 있다)")
   const harness = read("src/app/label-print/scan/issue-lot/issue-lot-test-client.tsx")
   ok(!/from "@\/lib\/actions\/material-issue\.actions"[^;]*\{[^}]*(issueMaterials|getLot)/.test(harness) && !/issueMaterialsForWorkOrder|fetch\(/.test(harness), "D15 점검 화면은 출고/재고 서버 액션을 호출하지 않는다")
   // 이 단계의 변경 파일에 라벨 디자인/QR 규격이 없고, 규격 상수·QR 데이터 규격이 그대로임을 확인(이전 단계 변경은 아직 미커밋이라 HEAD diff 로는 구분할 수 없다)
