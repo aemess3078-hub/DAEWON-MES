@@ -6,6 +6,12 @@ import type { Token, ContextKey } from "@/lib/types/numbering-rule"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
+import { assertSessionTenant, requireLotEntryReader } from "@/lib/lot-numbering/lot-session-access"
+
+/** 번호 규칙 type 검증(지원: LOT, SERIAL). */
+function assertNumberingType(type: unknown): void {
+  if (type !== "LOT" && type !== "SERIAL") throw new Error("지원하지 않는 번호 유형입니다.")
+}
 
 // ─── 규칙 조회 ────────────────────────────────────────────────────────────────
 
@@ -57,9 +63,14 @@ export async function getCodeGroupsForBuilder(tenantId: string) {
 // ─── 컨텍스트 토큰 목록 조회 ─────────────────────────────────────────────────
 
 export async function getRuleContextTokens(
-  tenantId: string,
+  clientTenantId: string,
   type: "LOT" | "SERIAL"
 ): Promise<Array<{ key: ContextKey; fallback?: string; codeGroupCode?: string }>> {
+  // LOT 등록 시트의 자동 채번 단계 — 로그인 · LOT 조회/등록 권한 확인, tenant 는 세션 값(클라이언트 값은 일치 여부만 확인).
+  // 개발자 전용 가드는 일반 LOT 사용자의 등록을 막으므로 쓰지 않는다. 조회만 하며 시퀀스는 건드리지 않는다.
+  const { tenantId } = await requireLotEntryReader()
+  assertSessionTenant(clientTenantId, tenantId)
+  assertNumberingType(type)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
@@ -79,9 +90,13 @@ export async function getRuleContextTokens(
 // ─── LOT 등록용 컨텍스트 코드 옵션 조회 ──────────────────────────────────────
 
 export async function getContextCodeOptions(
-  tenantId: string,
+  clientTenantId: string,
   type: "LOT" | "SERIAL"
 ): Promise<Record<string, { code: string; name: string }[]>> {
+  // getRuleContextTokens 와 같은 확인(로그인 · LOT 조회/등록 권한 · 세션 tenant). 규칙과 공통코드는 세션 tenant 의 것만 조회한다.
+  const { tenantId } = await requireLotEntryReader()
+  assertSessionTenant(clientTenantId, tenantId)
+  assertNumberingType(type)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
