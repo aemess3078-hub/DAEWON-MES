@@ -13,6 +13,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import Module from "node:module"
+import { CORE_ISSUE_BASELINE_FINGERPRINTS, between, coreIssueFingerprints, qrCouplingViolations, schemaViolations } from "./test-support/source-invariants"
 
 const ModuleInternals = Module as unknown as { _resolveFilename: (request: string, ...rest: unknown[]) => string }
 const originalResolve = ModuleInternals._resolveFilename
@@ -29,11 +30,6 @@ function ok(value: unknown, label: string) {
   console.log(`PASS ${label}`)
 }
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8")
-function execGit(command: string): string {
-  const { execSync } = require("node:child_process") as typeof import("node:child_process")
-  return execSync(command, { encoding: "utf8" }).trim()
-}
-
 async function main() {
   // ─── A. 공통 규칙 ──────────────────────────────────────────────────────────
   const now = new Date("2026-10-27T03:00:00Z") // KST 2026-10-27 12:00
@@ -361,15 +357,16 @@ async function main() {
   const lk = read("src/lib/actions/material-issue-lot-lookup.actions.ts")
   ok(src.includes("evaluateLotIssueEligibility") && lk.includes("evaluateLotIssueEligibility") && !/ISSUABLE_LOT_STATUSES/.test(lk + read("src/lib/material-issue/lot-scan.ts")), "E5 수동 목록·QR 조회·출고 확정이 같은 공통 함수를 쓰고, QR 전용 상태 목록은 없다")
   ok(!/qr|scan/i.test(src.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "")) , "E6 출고 확정 서버 액션에는 QR/스캔 분기가 없다(QR 여부를 출고 허용 조건으로 쓰지 않음)")
-  const diff = execGit("git diff -U0 HEAD -- src/lib/actions/material-issue.actions.ts")
-  const removed = diff.split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---")).map((l) => l.slice(1).trim())
-  // 삭제/변경된 기존 줄은 조회 함수(lot select, 인증 후 tenant 사용, 빈 목록 처리, 반환 필드)와 import 뿐이다
-  const allowedRemoved = new Set(["lot: { select: { id: true, lotNo: true } },", "unit: b.item.uom,", "lotId = item.lotId", "}", "", "tenantId,", "if (itemIds.length === 0) return {}", "lockWorkOrderForUpdate,", "tenantId: string", "tenantId: string,"])
-  ok(removed.length <= 9 && removed.every((l) => allowedRemoved.has(l)), `E7 출고 서버 액션의 삭제된 기존 줄은 ${removed.length}줄뿐(조회 함수의 tenant 처리 등) — 재고 차감·수량 계산·WIP 생성 로직은 수정하지 않았다`)
-  ok(!/decrement|issueQty\s*[-+*/]=|qtyOnHand/.test(diff.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).join("\n")), "E8 추가된 코드에는 재고 차감/수량 계산이 없다(적격성 확인만)")
+  // E7: 재고 차감·수량 검증·수불·WIP 생성/재사용·예약 갱신 코드는 QR 작업 이전 코드와 동일(정규화한 코드 블록의 지문 비교)
+  const coreNow = coreIssueFingerprints(src)
+  const coreChanged = Object.keys(CORE_ISSUE_BASELINE_FINGERPRINTS).filter((k) => coreNow[k] !== CORE_ISSUE_BASELINE_FINGERPRINTS[k])
+  ok(coreChanged.length === 0, `E7 출고 서버 액션의 재고 차감·수량 계산·수불·WIP 생성/재사용·예약 갱신 코드 7개 블록은 QR 작업 이전과 동일${coreChanged.length ? " — 변경됨: " + coreChanged.join(", ") : ""}`)
+  // E8: 적격성 확인(잠금 + LOT 상태 확인)에 추가된 코드 자체에는 재고 차감/수량 계산이 없다
+  const addedEligibility = [between(src, "const lotIdsToLock", "// ── 0. WipUnit"), between(src, "const lotState = await tx.lot.findFirst", "if (warehouseId) {")]
+  ok(addedEligibility.every((block) => block !== null && !/decrement|updateMany|qtyOnHand|issueQty\s*[-+*/]=/.test(block)), "E8 적격성 확인(LOT 잠금·상태 재확인) 코드에는 재고 차감/수량 계산이 없다")
   ok(dlg.includes("disabled={Boolean(lotStock.issueBlockReason)}") && dlg.includes("if (lot?.issueBlockReason)") && dlg.includes("<Select") && dlg.includes("addLotSplit"), "E9 수동 선택 UI: 제한 LOT 는 사유와 함께 선택 불가 표시 · 확정 전 안내, 기존 수동 선택/행 추가 그대로")
   ok(read("src/app/app/mes/material-issue/lot-qr-scan-section.tsx").includes('process.env.NEXT_PUBLIC_QR_SCAN_DISABLED === "true"'), "E10 [QR 비활성화] 스위치를 켜도 수동 출고 경로는 같은 서버 액션 — D2/D3 의 수동 출고가 QR 없이 완료됨")
-  ok(execGit("git diff --name-only HEAD -- prisma src/lib/actions/inventory.actions.ts src/lib/actions/lot.actions.ts") === "", "E11 스키마·재고관리·LOT 관리 서버 로직은 변경 없음(입고 액션의 LOT 번호 응답은 이전 단계 변경)")
+  ok(qrCouplingViolations(["src/lib/actions/inventory.actions.ts", "src/lib/actions/lot.actions.ts"]).length === 0 && schemaViolations().length === 0, "E11 스키마·재고관리·LOT 관리 서버 로직은 QR/출고 모듈에 결합되지 않았고 스키마 변경이 없다")
 
   console.log(`\n${passed} checks passed`)
 }

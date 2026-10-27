@@ -16,6 +16,18 @@ import Module from "node:module"
 import React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import jsQR from "jsqr"
+import {
+  CORE_ISSUE_BASELINE_FINGERPRINTS,
+  RECEIVING_TX_BASELINE_FINGERPRINT,
+  RECEIVING_TX_BLOCK,
+  between,
+  coreIssueFingerprints,
+  fingerprint,
+  qrCouplingViolations,
+  readSource,
+  schemaViolations,
+  stripComments,
+} from "./test-support/source-invariants"
 
 const ModuleInternals = Module as unknown as { _resolveFilename: (request: string, ...rest: unknown[]) => string }
 const originalResolve = ModuleInternals._resolveFilename
@@ -28,12 +40,6 @@ const spec = require("../src/lib/label/label-spec") as typeof import("../src/lib
 const svg = require("../src/lib/qr/qr-svg") as typeof import("../src/lib/qr/qr-svg")
 const jobLib = require("../src/lib/label/label-print-job") as typeof import("../src/lib/label/label-print-job")
 const samples = require("../src/lib/label/label-samples") as typeof import("../src/lib/label/label-samples")
-
-function execSyncGit(command: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { execSync } = require("node:child_process") as typeof import("node:child_process")
-  return execSync(command, { encoding: "utf8" }).trim()
-}
 
 let passed = 0
 function ok(value: unknown, label: string) {
@@ -549,8 +555,11 @@ async function main() {
   ok(!/192\.168|ipp:\/\/|:9100|BrotherSDK|printerIp/i.test(allSrc), "H26 프린터 IP 직접 출력/자동 선택 기능 없음(브라우저 인쇄만)")
   const noScan = ["src/app/app/mes/material-issue/wip-label-button.tsx", "src/lib/actions/wip-label.actions.ts"].map(read).join("\n")
   ok(!/jsqr|camera|getUserMedia|BarcodeScanInput/i.test(noScan), "H27 카메라/스캐너 코드 없음(이번 단계 범위 밖)")
-  const diffOthers = execSyncGit("git diff --name-only HEAD -- src/app/app/mes/shipments src/app/pop src/app/app/pop src/lib/actions/pop.actions.ts src/lib/actions/process-progress.actions.ts src/lib/actions/outsourcing.actions.ts src/lib/actions/wip-traceability.helpers.ts src/lib/actions/finished-goods.actions.ts src/lib/actions/lot.actions.ts src/lib/actions/lot-label.actions.ts prisma")
-  ok(diffOthers === "", "H28 출하·POP·WIP 생성/이동·완제품입고/LOT 서버 로직·스키마는 HEAD 와 diff 없음")
+  // 출하·POP·WIP 이동·완제품입고·LOT 서버 로직이 QR/WIP 라벨 모듈에 결합되지 않았고(QR 은 선택적 편의기능), DB 스키마에 라벨/QR 전용 모델이 없다.
+  // (예전에는 git diff HEAD 로 "변경 없음"을 확인했다 — 커밋 후에도, .git 없는 환경에서도 같은 목적을 내용으로 검사한다.)
+  const businessModules = ["src/app/app/mes/shipments", "src/app/pop", "src/app/app/pop", "src/lib/actions/pop.actions.ts", "src/lib/actions/process-progress.actions.ts", "src/lib/actions/outsourcing.actions.ts", "src/lib/actions/wip-traceability.helpers.ts", "src/lib/actions/finished-goods.actions.ts", "src/lib/actions/lot.actions.ts"]
+  const coupledBusiness = qrCouplingViolations(businessModules)
+  ok(coupledBusiness.length === 0 && !/wip-label|material-issue|qr-scan/.test(stripComments(readSource("src/lib/actions/lot-label.actions.ts"))) && schemaViolations().length === 0, `H28 출하·POP·WIP 생성/이동·완제품입고/LOT 서버 로직은 QR/WIP 라벨 모듈에 결합되지 않았고 스키마에 라벨/QR 전용 모델이 없다(결합: ${coupledBusiness.join(", ") || "없음"})`)
 
   // ─── I. WIP 라벨 발행 조건 통일: 자재출고 완료만 허용 (서버 검증) ─────────────────────
   const elig = require("../src/lib/label/wip-label-eligibility") as typeof import("../src/lib/label/wip-label-eligibility")
@@ -691,7 +700,8 @@ async function main() {
   // 화면 연동 구조: 출고완료 행 버튼 + 서버 재검증
   const tbl = read("src/app/app/mes/material-issue/material-issue-table.tsx")
   ok(tbl.includes("workOrder.allIssued && <WipLabelButton") && actSrc.includes("computeIssueProgress"), "I25 화면(출고완료 행에만 버튼)과 서버(computeIssueProgress)가 같은 기준 — 화면 값은 서버가 신뢰하지 않고 재검증")
-  ok(execSyncGit("git diff --name-only HEAD -- src/lib/actions/pop.actions.ts src/lib/actions/wip-traceability.helpers.ts src/lib/actions/outsourcing.actions.ts src/lib/actions/process-progress.actions.ts prisma") === "", "I26 (자재출고 액션의 LOT 적격성 검사 추가는 test:lot-issue-eligibility 에서 검증) WIP 생성/이동/분할·POP 로직과 스키마는 변경하지 않았다")
+  const issueCoreNow = coreIssueFingerprints(readSource("src/lib/actions/material-issue.actions.ts"))
+  ok(qrCouplingViolations(["src/lib/actions/pop.actions.ts", "src/lib/actions/wip-traceability.helpers.ts", "src/lib/actions/outsourcing.actions.ts", "src/lib/actions/process-progress.actions.ts"]).length === 0 && issueCoreNow.wipCreate === CORE_ISSUE_BASELINE_FINGERPRINTS.wipCreate && issueCoreNow.wipReuse === CORE_ISSUE_BASELINE_FINGERPRINTS.wipReuse && schemaViolations().length === 0, "I26 WIP 생성(재사용/신규 생성 코드는 QR 작업 이전과 동일)·이동/분할·POP 로직은 QR/WIP 라벨에 결합되지 않았고 스키마 변경이 없다 (자재출고 액션의 LOT 적격성 검사 추가는 test:lot-issue-eligibility 에서 검증)")
 
   // ─── J. 서버 자동 생성 LOT 라벨 연결 (입고 응답의 확정 LOT) ─────────────────────────
   const rcvAct = read("src/lib/actions/receiving.actions.ts")
@@ -705,14 +715,13 @@ async function main() {
   ok(tail.includes("prisma.lot.findFirst") && tail.includes("lotNo: committed.lotNo") && tail.includes("itemId: purchaseOrderItem.itemId") && tail.includes("isLotTracked && committed.lotNo"), "J3 커밋 뒤 DB 에서 (tenant, lotNo, 품목) Lot 행을 다시 확인한 번호만 반환 · LOT 관리 품목만")
   ok(/try \{[\s\S]*prisma\.lot\.findFirst[\s\S]*\} catch/.test(tail) && tail.includes("return confirmedLotNo ? { success: true, lotNo: confirmedLotNo } : { success: true }"), "J4 확인 실패가 입고 결과를 뒤집지 않는다(lotNo 없이 성공 반환)")
   const replayCount = (t: string) => (t.match(/return \{ success: true, replayed: true \}/g) ?? []).length
-  ok(replayCount(rcvAct) === replayCount(execSyncGit("git show HEAD:src/lib/actions/receiving.actions.ts")) && replayCount(rcvAct) >= 3, "J5 재전송(replay) 응답은 기존과 같은 수 그대로(lotNo 없음 — 이번 호출에서 새로 확정한 LOT 가 아니므로)")
-  const removed = execSyncGit("git diff HEAD -U0 -- src/lib/actions/receiving.actions.ts").split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---")).map((l) => l.slice(1).trim())
-  // 4-1.7단계: 인증 보완(getWarehousesForSite/generateReceivingLotNo 의 tenant·권한 확인)으로 바뀐 기존 줄 3개(import, tenant 취득, 채번 호출 인자)는 허용한다.
-  const authRemoved = new Set(['import { getTenantId, requireRole } from "@/lib/auth"', "const tenantId = await getTenantId()", "return generateCnsMaterialReceiptLotNo(prisma, tenantId, itemContext, new Date(), sequenceOffset)"])
-  const coreRemoved = removed.filter((l) => !authRemoved.has(l))
-  ok(coreRemoved.length === 2 && coreRemoved.some((l) => l.startsWith("type ReceivingResult = {")) && coreRemoved.some((l) => l === "return { success: true }") && removed.length - coreRemoved.length === 3, `J6 입고 서버(createReceivingInspection) 변경은 응답 필드 추가뿐 — 삭제된 기존 줄은 타입 선언·최종 return 2줄뿐(${coreRemoved.length}줄), 그 밖은 조회 액션 인증 보완 3줄`)
-  const diffForRules = execSyncGit("git diff HEAD -U0 -- src/lib/actions/receiving.actions.ts").split("\n").filter((l) => !l.includes("generateCnsMaterialReceiptLotNo(prisma, actor.tenantId") && !l.includes("generateCnsMaterialReceiptLotNo(prisma, tenantId")).join("\n")
-  ok(!/computeNextMaterialReceiptLotNo|generateCns|lot-numbering/.test(diffForRules) &&execSyncGit("git diff --name-only HEAD -- src/lib/lot-numbering src/lib/actions/lot-reservation.actions.ts") === "", "J7 LOT 채번 규칙/예약 로직은 변경하지 않았다")
+  ok(replayCount(rcvAct) === 3, "J5 재전송(replay) 응답은 QR 작업 이전과 같은 3곳 그대로(lotNo 없음 — 이번 호출에서 새로 확정한 LOT 가 아니므로)")
+  // J6: 입고 확정 트랜잭션 본문(재고·검수·발주 수량·감사 기록)은 QR 작업 이전 코드와 동일(지문 비교)하고, 변경은 응답 타입의 lotNo 필드와 최종 return 뿐이다.
+  const rcvTx = between(readSource("src/lib/actions/receiving.actions.ts"), RECEIVING_TX_BLOCK[0], RECEIVING_TX_BLOCK[1])
+  ok(rcvTx !== null && fingerprint(rcvTx) === RECEIVING_TX_BASELINE_FINGERPRINT && /type ReceivingResult = \{[^}]*replayed\?: boolean; lotNo\?: string \}/.test(rcvAct) && rcvAct.includes("return confirmedLotNo ? { success: true, lotNo: confirmedLotNo } : { success: true }"), "J6 입고 확정 트랜잭션 본문은 QR 작업 이전과 동일(지문) — 변경은 응답의 lotNo 필드와 최종 return 뿐")
+  // J7: LOT 채번 규칙/예약 모듈은 QR/라벨에 결합되지 않았고, 입고 액션의 채번 호출 지점 수도 그대로다.
+  const tokenCount = (text: string, token: string) => text.split(token).length - 1
+  ok(tokenCount(rcvAct, "generateCnsMaterialReceiptLotNo") === 2 && tokenCount(rcvAct, "computeNextMaterialReceiptLotNo") === 2 && qrCouplingViolations(["src/lib/lot-numbering", "src/lib/actions/lot-reservation.actions.ts"]).length === 0, "J7 LOT 채번 규칙/예약 로직은 QR/라벨에 결합되지 않았고 입고 액션의 채번 호출 지점도 그대로다")
   ok(rcvDlg.includes("serverLotNosRef.current[ins.purchaseOrderItemId] = response.lotNo") && rcvDlg.includes("response.success && response.lotNo") && rcvDlg.includes("serverLotNosRef.current[ins.purchaseOrderItemId] ?? ins.lotNo"), "J8 화면: 서버가 확인해 돌려준 LOT 를 우선, 없으면 화면에 입력·예약된 번호(수동 입력 LOT 유지)")
   ok(!/Math\.random|generateLot/.test(rcvDlg), "J9 화면에서 LOT 번호를 만들지 않는다(서버 응답 값만 보관)")
   const allDoneBranch = rcvDlg.slice(rcvDlg.indexOf("if (outcome.allDone)"), rcvDlg.indexOf("if (outcome.stoppedAt)"))
@@ -775,10 +784,8 @@ async function main() {
   ok(!page.includes("lot-label.actions") && !page.includes("wip-label.actions") && page.includes("buildSampleLabels"), "G8 샘플 페이지는 서버 액션/DB 를 쓰지 않는다")
   ok(read("src/lib/actions/receiving.actions.ts") === read("src/lib/actions/receiving.actions.ts") && !read("src/lib/actions/receiving.actions.ts").includes("label"), "G9 입고/재고 서버 로직은 라벨 모듈에 의존하지 않는다")
 
-  // 기존 LOT 라벨 이력/서버 로직 불변(HEAD 대비 diff 없음) — 이번 작업에서 수정하지 않았다
-  const { execSync } = require("node:child_process") as typeof import("node:child_process")
-  const lotFilesDiff = execSync("git diff --name-only HEAD -- src/lib/actions/lot-label.actions.ts src/lib/actions/lot.actions.ts src/lib/actions/finished-goods.actions.ts prisma", { encoding: "utf8" }).trim()
-  ok(lotFilesDiff === "", "G10 LOT 라벨 액션·완제품/LOT 서버 로직·prisma 스키마/마이그레이션은 HEAD 와 diff 없음(입고 서버는 응답 필드 추가만 — J6, 출고 액션은 LOT 적격성 검사만 추가 — test:lot-issue-eligibility)")
+  // 기존 LOT 라벨 이력/서버 로직은 WIP 라벨·자재출고와 분리된 채 유지(내용 기반 검사 — Git 상태와 무관)
+  ok(qrCouplingViolations(["src/lib/actions/lot.actions.ts", "src/lib/actions/finished-goods.actions.ts"]).length === 0 && !/wip-label|material-issue|qr-scan/.test(stripComments(readSource("src/lib/actions/lot-label.actions.ts"))) && schemaViolations().length === 0, "G10 LOT 라벨 액션은 WIP 라벨·자재출고와 분리되어 있고, 완제품/LOT 서버 로직은 QR 모듈에 결합되지 않았으며, 스키마에 라벨/QR 전용 모델이 없다(입고 서버는 응답 필드 추가만 — J6, 출고 액션은 LOT 적격성 검사만 추가 — test:lot-issue-eligibility)")
   const lotDialogPart = read("src/components/common/barcode/barcode-print-dialog.tsx")
   ok(lotDialogPart.includes("recordLotLabelPrint({ lotNos, reason: effectiveReprint ? reason.trim() : undefined, purpose, context })"), "G11 LOT 라벨 이력 호출(사유 전달 방식)은 기존과 동일")
 

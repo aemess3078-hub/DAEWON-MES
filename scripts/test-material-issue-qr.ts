@@ -12,6 +12,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import Module from "node:module"
+import { CORE_ISSUE_BASELINE_FINGERPRINTS, coreIssueFingerprints, qrCouplingViolations, readSource as readSourceLf, schemaViolations } from "./test-support/source-invariants"
 
 const ModuleInternals = Module as unknown as { _resolveFilename: (request: string, ...rest: unknown[]) => string }
 const originalResolve = ModuleInternals._resolveFilename
@@ -35,12 +36,6 @@ function eq<T>(actual: T, expected: T, label: string) {
   console.log(`PASS ${label}`)
 }
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8")
-function execGit(command: string): string {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { execSync } = require("node:child_process") as typeof import("node:child_process")
-  return execSync(command, { encoding: "utf8" }).trim()
-}
-
 async function main() {
   // ─── A. 반영 규칙 ──────────────────────────────────────────────────────────
   const optA1 = { lotId: "lot-1", warehouseId: "wh-1" }
@@ -251,7 +246,8 @@ async function main() {
   ok(dialog.includes("const getLotSelectValue = (lotStock: LotStockOption) => `${lotStock.lotId}:${lotStock.warehouseId}`") && scan.lotSelectValue({ lotId: "L", warehouseId: "W" }) === "L:W", "C3 QR 가 만드는 선택 값(lotId:warehouseId)은 수동 선택 UI 가 쓰는 값과 같은 형식")
   const submitBlock = dialog.slice(dialog.indexOf("const handleSubmit = () => {"), dialog.indexOf("// ── 재고 초과 경고"))
   ok(submitBlock.includes("issueMaterialsForWorkOrder(") && submitBlock.includes("getLotSplits(material.itemId)") && !/handleScannedLot|lookupLotForMaterialIssue|LotQrScanSection|viaQr|fromQr|scanned/i.test(submitBlock), "C4 출고 확정(handleSubmit)은 입력 방식을 구분하지 않는다 — 같은 LOT 행 구조를 읽어 같은 서버 액션을 호출(QR/스캔 분기 없음)")
-  ok(execGit("git diff --name-only HEAD -- src/lib/actions/inventory.actions.ts src/lib/actions/lot.actions.ts src/lib/actions/lot-reservation.actions.ts src/lib/quantity-scale.ts prisma") === "", "C5 재고·LOT·예약 서버 로직과 스키마는 HEAD 와 diff 없음 — 확정 시 서버 검증은 수동/QR 동일(출고 액션·잠금 헬퍼 변경은 test:material-issue-integrity 에서 검증)")
+  const issueCoreNow = coreIssueFingerprints(readSourceLf("src/lib/actions/material-issue.actions.ts"))
+  ok(qrCouplingViolations(["src/lib/actions/inventory.actions.ts", "src/lib/actions/lot.actions.ts", "src/lib/actions/lot-reservation.actions.ts", "src/lib/quantity-scale.ts"]).length === 0 && issueCoreNow.decrement === CORE_ISSUE_BASELINE_FINGERPRINTS.decrement && issueCoreNow.reservation === CORE_ISSUE_BASELINE_FINGERPRINTS.reservation && schemaViolations().length === 0, "C5 재고·LOT·예약 서버 로직은 QR 에 결합되지 않았고 재고 차감·예약 갱신 코드는 QR 작업 이전과 동일(지문) · 스키마 변경 없음 — 확정 시 서버 검증은 수동/QR 동일")
 
   // ─── D. 소스 구조 ──────────────────────────────────────────────────────────
   const section = read("src/app/app/mes/material-issue/lot-qr-scan-section.tsx")
@@ -272,7 +268,6 @@ async function main() {
   ok(!/tenantId:\s*string/.test(act0.slice(act0.indexOf("export async function lookupLotForMaterialIssue"), act0.indexOf("{", act0.indexOf("export async function lookupLotForMaterialIssue") + 60))) && act0.includes("getLotStockByItems(") && act0.includes("resolveLotStockReader"), "D13 tenant 를 클라이언트에서 받지 않고 세션으로 확인 · 기존 LOT 재고 조회 재사용")
   const others = ["src/app/app/mes/material-receipt", "src/app/app/mes/finished-goods-receipt", "src/app/app/mes/shipments", "src/app/app/mes/inventory", "src/app/app/mes/material", "src/app/app/mes/lot", "src/app/pop", "src/app/app/pop", "src/app/kiosk"]
   function walk(dir: string): string[] {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const fs = require("node:fs") as typeof import("node:fs")
     return fs.readdirSync(dir).flatMap((name) => {
       const full = join(dir, name)

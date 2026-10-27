@@ -13,6 +13,17 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import Module from "node:module"
+import {
+  CORE_ISSUE_BASELINE_FINGERPRINTS,
+  LOT_STATUS_ACTION_BASELINE_FINGERPRINT,
+  coreIssueFingerprints,
+  fingerprint,
+  listFiles,
+  lotStatusActionBlock,
+  qrCouplingViolations,
+  readSource,
+  schemaViolations,
+} from "./test-support/source-invariants"
 
 const ModuleInternals = Module as unknown as { _resolveFilename: (request: string, ...rest: unknown[]) => string }
 const originalResolve = ModuleInternals._resolveFilename
@@ -30,11 +41,6 @@ function ok(value: unknown, label: string) {
 }
 const read = (p: string) => readFileSync(join(process.cwd(), p), "utf8")
 const stripComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")
-function execGit(command: string): string {
-  const { execSync } = require("node:child_process") as typeof import("node:child_process")
-  return execSync(command, { encoding: "utf8" }).trim()
-}
-
 async function main() {
   type Row = Record<string, unknown> & { id?: string }
   const state: Record<string, Row[]> = {}
@@ -534,7 +540,7 @@ async function main() {
   ok(/SELECT id\s+FROM "Lot"/.test(lockFn) && lockFn.includes('"tenantId" = ${tenantId}') && lockFn.includes("FOR SHARE") && !/status/.test(stripComments(lockFn)), "C8 소스: 잠금은 tenant 로 한정한 id 만 읽는 SELECT … FOR SHARE (enum 컬럼을 raw 로 읽지 않음)")
   const lotSrc = read("src/lib/actions/lot.actions.ts")
   const updateFn = lotSrc.slice(lotSrc.indexOf("export async function updateLotStatus"), lotSrc.indexOf("// ─── LOT 번호 자동 생성"))
-  ok(execGit("git diff --name-only HEAD -- src/lib/actions/lot.actions.ts") === "" && !updateFn.includes("$transaction") && (updateFn.match(/prisma\.lot\.update\(/g) ?? []).length === 1, "C9 LOT 상태 변경 액션은 수정하지 않았다 — 단일 UPDATE 문 1개(자기 행 잠금만 잡고 다른 잠금을 기다리지 않아 교착 불가)")
+  ok(fingerprint(lotStatusActionBlock(lotSrc) ?? "") === LOT_STATUS_ACTION_BASELINE_FINGERPRINT && !updateFn.includes("$transaction") && (updateFn.match(/prisma\.lot\.update\(/g) ?? []).length === 1, "C9 LOT 상태 변경 액션은 QR 작업 이전 코드와 동일(지문) — 단일 UPDATE 문 1개(자기 행 잠금만 잡고 다른 잠금을 기다리지 않아 교착 불가)")
   ok(issueSrc.indexOf("await lockLotForShare(tx, tenantId, lockLotId)") > issueSrc.indexOf("await lockWorkOrderForUpdate(tx, tenantId, data.workOrderId)") && issueSrc.indexOf("await lockLotForShare(tx, tenantId, lockLotId)") < issueSrc.indexOf("tx.wipUnit.findFirst") && issueSrc.indexOf("tx.wipUnit.findFirst") < issueSrc.indexOf("tx.inventoryBalance.updateMany") && issueSrc.includes(".sort()") && !issueSrc.includes("await lockLotForShare(tx, tenantId, lotId)"), "C10 소스: 잠금 순서 = 작업지시 FOR UPDATE → LOT FOR SHARE(LOT ID 정렬, 루프 전 일괄) → WIP 확인 → 재고 차감")
 
   // ═══ D. 유효기간 · 회귀 ═══════════════════════════════════════════════════
@@ -552,7 +558,7 @@ async function main() {
   ok(nullExpiry.eligible, "D5 유효기간이 비어 있으면 제한 없음")
   const colSrc = read("src/app/app/mes/lot/columns.tsx")
   ok(colSrc.includes("kstDateString(new Date(d)) < kstDateString(new Date())") && !colSrc.includes("new Date(d) < new Date()"), "D6 LOT 관리 화면의 만료(붉은색) 표시 기준을 서버 정책(한국 날짜, 당일까지 유효)과 일치시켰다 — 표시만 변경")
-  ok(execGit("git diff --name-only HEAD -- src/lib/actions/lot.actions.ts src/app/app/mes/lot") === "src/app/app/mes/lot/columns.tsx", "D7 LOT 관리 쪽 변경은 표시 기준 1곳뿐(상태 관리 정책 등 다른 LOT 관리 로직 변경 없음)")
+  ok(qrCouplingViolations(["src/app/app/mes/lot", "src/lib/actions/lot.actions.ts"], ["src/app/app/mes/lot/columns.tsx"]).length === 0 && (read("src/app/app/mes/lot/columns.tsx").match(/@\/lib\/material-issue\/[\w-]+/g) ?? []).join() === "@/lib/material-issue/lot-eligibility", "D7 LOT 관리 쪽에서 출고 모듈을 참조하는 곳은 만료 표시 기준(lot-eligibility 의 날짜 함수) 1곳뿐 — 상태 관리 정책 등 다른 LOT 관리 로직은 결합되지 않았다")
 
   // 회귀
   resetState()
@@ -567,10 +573,10 @@ async function main() {
   resetState()
   const manual = await silence(() => issue.issueMaterialsForWorkOrder(request([{ lotId: "lot-ok", quantity: 10 }]), "t1"))
   ok(flag.includes('process.env.NEXT_PUBLIC_QR_SCAN_DISABLED === "true"') && manual.ok && !/qr|scan/i.test(stripComments(issueSrc)), "D11 [QR 비활성] 스위치를 꺼도(수동 경로 = 같은 서버 액션) 수동 출고 정상, 출고 액션에는 QR 분기가 없다")
-  ok(execGit("git diff --name-only HEAD -- prisma") === "", "D12 DB 스키마 변경 없음")
-  const diffLines = execGit("git diff -U0 HEAD -- src/lib/actions/material-issue.actions.ts").split("\n")
-  const addedText = diffLines.filter((l) => l.startsWith("+") && !l.startsWith("+++")).join("\n")
-  ok(!/decrement|issueQty\s*[-+*/]=|qtyOnHand|wipUnit\.create|materialReservation\.(create|update)/.test(addedText), "D13 출고 액션에 추가된 코드에는 재고 차감·수량 계산·WIP 생성·예약 생성/갱신 변경이 없다(인증·BOM·예약 소속 조회·잠금만)")
+  ok(schemaViolations().length === 0, "D12 DB 스키마: 라벨/QR 전용 모델·마이그레이션이 없고 LOT 상태 5종·Lot.expiryDate 등 출고 적격성이 의존하는 기존 필드가 그대로다")
+  const coreNow = coreIssueFingerprints(issueSrc)
+  const coreChanged = Object.keys(CORE_ISSUE_BASELINE_FINGERPRINTS).filter((k) => coreNow[k] !== CORE_ISSUE_BASELINE_FINGERPRINTS[k])
+  ok(coreChanged.length === 0, `D13 재고 차감·수량 검증·수불 기록·WIP 생성/재사용·자재LOT 연결·예약 갱신/생성 코드 7개 블록이 QR 작업 이전 코드와 동일(지문 비교)${coreChanged.length ? " — 변경됨: " + coreChanged.join(", ") : ""}`)
 
   // ═══ F. 자재출고 조회 액션 인증(getWorkOrdersForIssue / getWarehousesWithStock) ═══════════
   const rejection = async (fn: () => Promise<unknown>): Promise<string | null> => {
@@ -625,7 +631,7 @@ async function main() {
   const whFn = issueSrc.slice(issueSrc.indexOf("export async function getWarehousesWithStock"), issueSrc.indexOf("// ─── LOT별 재고 조회"))
   ok((woFn.match(/clientTenantId/g) ?? []).length === 2 && (whFn.match(/clientTenantId/g) ?? []).length === 2 && woFn.includes("requireMaterialIssueReader(clientTenantId)") && whFn.includes("requireMaterialIssueReader(clientTenantId)"), "F7 소스: 클라이언트 tenantId 는 인증 확인에만 쓰이고(선언 + 확인 호출 각 1회) 조회 쿼리는 세션 tenant 를 쓴다")
   const layoutSrc = read("src/app/app/layout.tsx")
-  ok(layoutSrc.includes("canReadPath") && layoutSrc.includes("redirect('/login')") && execGit("git diff --name-only HEAD -- src/app/app/mes/material-issue/page.tsx") === "", "F8 호출처는 자재출고 페이지(서버 컴포넌트) 하나뿐이며 페이지·layout 의 로그인/메뉴 권한 확인은 그대로 — POP·키오스크 경로의 호출 없음")
+  ok(layoutSrc.includes("canReadPath") && layoutSrc.includes("redirect('/login')") && read("src/app/app/mes/material-issue/page.tsx").includes("getWorkOrdersForIssue(tenantId)") && read("src/app/app/mes/material-issue/page.tsx").includes("getWarehousesWithStock(tenantId, itemIds)"), "F8 호출처는 자재출고 페이지(서버 컴포넌트) 하나뿐이며 페이지 호출 방식·layout 의 로그인/메뉴 권한 확인은 그대로 — POP·키오스크 경로의 호출 없음")
   ok(!/getWorkOrdersForIssue|getWarehousesWithStock/.test(read("src/app/pop/work-select/page.tsx") + read("src/lib/actions/pop.actions.ts")), "F9 POP 경로는 이 조회 액션을 쓰지 않는다(별도 인증 체계 영향 없음)")
 
   // ═══ G. 자재예약 ID 소속 검증 ═════════════════════════════════════════════
@@ -693,8 +699,7 @@ async function main() {
   const preEnd = issueSrc.indexOf("// txNo 사전 생성")
   const preBlock = issueSrc.slice(preStart, preEnd)
   ok(preStart > issueSrc.indexOf("bomComponentIds") && preStart < issueSrc.indexOf("withQuantityTransactionRetry(() =>") && !/\.(create|update|updateMany|delete)\(/.test(preBlock) && issueSrc.includes("if (!res || res.workOrderId !== data.workOrderId || res.itemId !== item.itemId)"), "G12 소스: 예약 소속 검증은 쓰기 전(읽기만)에 하고, 트랜잭션 안에서 한 번 더 확인한다")
-  const resDiffRemoved = execGit("git diff -U0 HEAD -- src/lib/actions/material-issue.actions.ts").split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---") && /materialReservation|reservation/i.test(l))
-  ok(resDiffRemoved.length === 0 && issueSrc.includes("await tx.materialReservation.create({") && issueSrc.includes("const existing = await tx.materialReservation.findFirst"), "G13 기존 예약 생성/갱신 코드는 삭제·수정하지 않았다(검증 추가만)")
+  ok(coreIssueFingerprints(issueSrc).reservation === CORE_ISSUE_BASELINE_FINGERPRINTS.reservation && issueSrc.includes("await tx.materialReservation.create({") && issueSrc.includes("const existing = await tx.materialReservation.findFirst"), "G13 기존 예약 생성/갱신 코드는 QR 작업 이전과 동일(소속 재확인 가드를 제외한 지문 비교) — 검증 추가만")
 
   // ═══ H. Multi-LOT 잠금 순서 ═══════════════════════════════════════════════
   const lockOps = () => ops.filter((o) => o.startsWith("lock:"))
@@ -794,8 +799,8 @@ async function main() {
   ok(typeof lotNormal === "string" && lotNormal.length > 0 && rawQueryCount > rawAfterSpoof && String(lotRuleBlocked).includes("LOT 채번 규칙"), "I6 [LOT 채번] 정상 사용자(입고 생성 권한 + 같은 tenant)는 인증을 통과해 기존 채번 로직까지 도달한다(대원정밀 규칙 미확정 정책은 그대로 적용, 허용 브랜드에서는 번호 생성)")
   const recvSrc = read("src/lib/actions/receiving.actions.ts")
   ok(!/\bgetTenantId\b/.test(stripComments(recvSrc)) && recvSrc.indexOf("getWarehousesForSite") < recvSrc.indexOf('requireResourcePermission("PURCHASE_ORDER", "READ")') && recvSrc.includes('requireResourcePermission("PURCHASE_ORDER", "CREATE")'), "I7 소스: 입고 액션에서 개발용 대체값을 쓰는 getTenantId 를 더 이상 쓰지 않는다")
-  ok(execGit("git diff --name-only HEAD -- src/app/app/mes/purchase-orders/receiving-dialog.tsx") === "" && /getWarehousesForSite\(siteId\)/.test(read("src/app/app/mes/purchase-orders/receiving-dialog.tsx")) && /getWarehousesForSite\(siteId\)/.test(read("src/app/app/mes/material-receipt/receiving-form-dialog.tsx")), "I8 두 호출 화면(자재입고 · 발주 입고)의 호출 방식은 변경 없음(시그니처 유지)")
-  ok(execGit("git grep -l --untracked generateReceivingLotNo -- src").split("\n").map((f) => f.trim()).filter((f) => f && f !== "src/lib/actions/receiving.actions.ts").length === 0, "I9 generateReceivingLotNo 는 다른 화면/액션에서 호출되지 않는다(호출처 영향 없음)")
+  ok(/getWarehousesForSite\(siteId\)/.test(read("src/app/app/mes/purchase-orders/receiving-dialog.tsx")) && /getWarehousesForSite\(siteId\)/.test(read("src/app/app/mes/material-receipt/receiving-form-dialog.tsx")), "I8 두 호출 화면(자재입고 · 발주 입고)의 호출 방식은 변경 없음(시그니처 유지)")
+  ok(listFiles("src").filter((file) => /\.(ts|tsx)$/.test(file) && file !== "src/lib/actions/receiving.actions.ts" && readSource(file).includes("generateReceivingLotNo")).length === 0, "I9 generateReceivingLotNo 는 다른 화면/액션에서 호출되지 않는다(호출처 영향 없음)")
 
   // ═══ J. 개발용 QR 테스트 페이지 접근 제한 ═════════════════════════════════
   const devPages = require("../src/lib/dev-pages") as typeof import("../src/lib/dev-pages")
@@ -807,7 +812,7 @@ async function main() {
     ok(s.includes("if (!isQrDevPagesEnabled()) notFound()") && s.includes('export const dynamic = "force-dynamic"') && !s.includes("NEXT_PUBLIC_"), `J4 ${p}: 요청 시점 환경변수로 게이트(404) · 빌드 시점에 굳지 않음 · NEXT_PUBLIC 미사용`)
   }
   const realPrint = read("src/app/label-print/page.tsx")
-  ok(!realPrint.includes("dev-pages") && execGit("git diff --name-only HEAD -- src/app/label-print/page.tsx src/app/label-print/label-print-client.tsx src/middleware.ts") === "", "J5 실제 라벨 출력 경로(/label-print)와 미들웨어는 변경하지 않았다 — 접근 제한은 점검 페이지 3개에만 적용")
+  ok(!realPrint.includes("dev-pages") && !read("src/app/label-print/label-print-client.tsx").includes("dev-pages") && !read("src/app/label-print/label-print-client.tsx").includes("ENABLE_QR_DEV_PAGES") && read("src/middleware.ts").includes("matcher: ['/app/:path*', '/login']") && !read("src/middleware.ts").includes("label-print"), "J5 실제 라벨 출력 경로(/label-print)와 미들웨어 보호 범위(/app, /login)는 그대로 — 접근 제한은 점검 페이지 3개에만 적용")
   ok(!read("src/lib/dev-pages.ts").includes("process.env.NEXT_PUBLIC") && !/ENABLE_QR_DEV_PAGES/.test(read("src/components/common/qr-scanner/qr-scanner-dialog.tsx") + read("src/app/app/mes/material-issue/lot-qr-scan-section.tsx")), "J6 업무 화면(자재출고 QR 스캔 · 스캐너 컴포넌트)은 이 환경변수와 무관 — 실제 업무에서 QR 기능은 그대로 동작")
 
   // ═══ K. 문구 · 권한 조회 성능 ═══════════════════════════════════════════
