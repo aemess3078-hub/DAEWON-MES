@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { LotWithDetails } from "@/lib/actions/lot.actions"
 import { formatQuantity } from "@/lib/utils"
+import { kstDateString } from "@/lib/material-issue/lot-eligibility"
 
 // ─── 상태 레이블 ─────────────────────────────────────────────────────────────
 
@@ -144,7 +145,8 @@ export function getColumns({ onStatusChange }: ColumnActions): ColumnDef<LotWith
       cell: ({ row }) => {
         const d = row.original.expiryDate
         if (!d) return <span className="text-[13px] text-muted-foreground">—</span>
-        const expired = new Date(d) < new Date()
+        // 자재출고 서버 정책과 같은 기준: 한국 날짜로 유효기한 당일까지는 유효, 다음 날부터 만료 표시
+        const expired = kstDateString(new Date(d)) < kstDateString(new Date())
         return (
           <span
             className={`text-[13px] font-medium ${

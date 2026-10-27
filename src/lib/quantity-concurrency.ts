@@ -134,6 +134,25 @@ export async function lockWorkOrderForUpdate(
   `
 }
 
+/**
+ * LOT 행 공유 잠금(FOR SHARE). 출고 트랜잭션이 끝날 때까지 다른 트랜잭션이 이 LOT 의 상태·유효기간을 바꾸지 못하게 한다
+ * (LOT 상태 변경은 UPDATE 라 잠금이 풀릴 때까지 기다린다). 공유 잠금끼리는 충돌하지 않아 동시 출고는 서로 막지 않는다.
+ * id 만 읽는다(enum 컬럼을 raw 로 읽지 않는다).
+ */
+export async function lockLotForShare(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  lotId: string
+): Promise<void> {
+  await tx.$queryRaw`
+    SELECT id
+    FROM "Lot"
+    WHERE id = ${lotId}
+      AND "tenantId" = ${tenantId}
+    FOR SHARE
+  `
+}
+
 export async function lockWorkOrderOperationForUpdate(
   tx: Prisma.TransactionClient,
   workOrderOperationId: string
