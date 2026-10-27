@@ -7,7 +7,7 @@
  */
 import QRCode from "qrcode"
 import { QR_QUIET_ZONE_MODULES } from "@/lib/label/label-spec"
-import { encodeLotQr } from "@/lib/qr/lot-qr"
+import { encodeLotQr, encodeWipQr } from "@/lib/qr/lot-qr"
 
 export type QrSvgData = {
   /** QR 에 인코딩된 문자열. */
@@ -51,6 +51,11 @@ export function buildQrSvgData(payload: string, quietZone: number = QR_QUIET_ZON
 /** 라벨용: LOT 번호 → LOT QR SVG 데이터(규격 `DAEWON|LOT|1|<lotNo>`). 잘못된 LOT 번호면 throw. */
 export function buildLotQrSvgData(lotNo: string): QrSvgData {
   return buildQrSvgData(encodeLotQr(lotNo))
+}
+
+/** 라벨용: WIP 식별값 → WIP QR SVG 데이터(규격 `DAEWON|WIP|1|<식별값>`). 잘못된 값이면 throw. */
+export function buildWipQrSvgData(wipId: string): QrSvgData {
+  return buildQrSvgData(encodeWipQr(wipId))
 }
 
 /** 테스트/진단용: quiet zone 포함 모듈 행렬을 (scale)배 확대한 RGBA 로 만든다(jsQR 등 디코더 입력). */

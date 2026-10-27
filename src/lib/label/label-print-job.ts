@@ -9,7 +9,7 @@
  * 데이터는 같은 브라우저의 localStorage 로만 전달한다(서버 경유·URL 노출 없음). 일정 시간이 지나면 폐기한다.
  * 파싱은 신뢰하지 않는 입력으로 취급해 길이/개수/타입을 검증한다.
  */
-import { isValidTestLotNo, type LabelData } from "@/lib/label/label-spec"
+import { LABEL_TYPE_META, isValidTestLotNo, type LabelData, type LabelType } from "@/lib/label/label-spec"
 
 export const LABEL_JOB_PREFIX = "daewon:label-job:"
 export const LABEL_JOB_TTL_MS = 30 * 60 * 1000
@@ -33,16 +33,24 @@ function str(value: unknown, max: number): string {
 export function sanitizeLabel(raw: unknown): LabelData | null {
   if (!raw || typeof raw !== "object") return null
   const r = raw as Record<string, unknown>
-  const kind = r.kind === "LOT_QR" || r.kind === "ITEM_BARCODE" ? r.kind : null
+  const kind = r.kind === "LOT_QR" || r.kind === "WIP_QR" || r.kind === "ITEM_BARCODE" ? r.kind : null
   if (!kind) return null
   const itemCode = str(r.itemCode, 80).trim()
   const itemName = str(r.itemName, 200).trim()
   if (!itemCode || !itemName) return null
   const lotNo = str(r.lotNo, 128).trim() || null
   if (kind === "LOT_QR" && !lotNo) return null
+  const wipId = str(r.wipId, 128).trim() || null
+  if (kind === "WIP_QR" && !wipId) return null
+  const labelType: LabelType | null =
+    r.labelType === "RAW_LOT" || r.labelType === "WIP" || r.labelType === "FG_LOT" ? r.labelType : null
+  // 라벨 유형과 QR 종류가 어긋난 job 은 거부한다(WIP 라벨에 LOT QR 등).
+  if (labelType && LABEL_TYPE_META[labelType].kind !== kind) return null
   // 시험용 라벨은 TEST- 임시 번호만 허용한다(실제 LOT 번호로 "시험용" 표시를 단 라벨을 만들 수 없다).
   const test = r.test === true
-  if (test && (kind !== "LOT_QR" || !isValidTestLotNo(lotNo))) return null
+  if (test && kind === "ITEM_BARCODE") return null
+  if (test && kind === "LOT_QR" && !isValidTestLotNo(lotNo)) return null
+  if (test && kind === "WIP_QR" && !isValidTestLotNo(wipId)) return null
   const quantity = typeof r.quantity === "number" && Number.isFinite(r.quantity) ? r.quantity : null
   return {
     kind,
@@ -55,6 +63,15 @@ export function sanitizeLabel(raw: unknown): LabelData | null {
     date: str(r.date, 20),
     dateLabel: str(r.dateLabel, 10) || "일자",
     ...(test ? { test: true } : {}),
+    ...(labelType ? { labelType } : {}),
+    ...(kind === "WIP_QR"
+      ? {
+          wipId,
+          manufacturingNo: str(r.manufacturingNo, 80).trim() || null,
+          workOrderNo: str(r.workOrderNo, 80).trim() || null,
+        }
+      : {}),
+    ...(str(r.spec, 100).trim() ? { spec: str(r.spec, 100).trim() } : {}),
   }
 }
 

@@ -14,6 +14,8 @@ export type LabelItem = {
   quantity: number
   uom: string
   dateLabel: string
+  /** 라벨 3종 구분. 자재입고 라벨은 RAW_LOT(원자재). 출고 LOT 라벨은 지정하지 않는다(기존 모양 유지). */
+  labelType?: "RAW_LOT" | "FG_LOT"
 }
 
 /** 화면에 있는 출력 후보 한 줄(LOT 유무와 무관). 시험용 라벨(임시 TEST- 번호)을 만드는 재료로만 쓴다. */
@@ -23,6 +25,11 @@ export type TestLabelCandidate = {
   quantity: number
   uom: string
   dateLabel: string
+  /** 라벨 3종 구분(미지정 = 기존 LOT 라벨). WIP 이면 시험용 WIP 식별값(TEST-WIP-…)으로 WIP 라벨을 만든다. */
+  labelType?: "RAW_LOT" | "WIP" | "FG_LOT"
+  manufacturingNo?: string | null
+  workOrderNo?: string | null
+  spec?: string | null
 }
 
 export type LabelPlan = {
@@ -66,6 +73,7 @@ export function buildReceiptLabelPlan(rows: ReceiptLabelSource[], opts: { dateLa
       quantity: row.acceptedQty > 0 ? row.acceptedQty : row.receivedQty,
       uom: row.uom,
       dateLabel,
+      labelType: "RAW_LOT",
     })
     if (!row.isLotTracked) {
       notices.push(`${tag(row.itemCode, row.itemName)}: ${NOT_LOT_TRACKED_NOTICE}`)
@@ -83,6 +91,7 @@ export function buildReceiptLabelPlan(rows: ReceiptLabelSource[], opts: { dateLa
       quantity: row.acceptedQty > 0 ? row.acceptedQty : row.receivedQty,
       uom: row.uom,
       dateLabel,
+      labelType: "RAW_LOT",
     })
   }
   return { items, notices, candidates }

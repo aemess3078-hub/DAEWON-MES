@@ -13,7 +13,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { BarcodeLabel } from "./barcode-label"
 import { checkLotLabelPrintable, checkTestLotNosUnused, recordLotLabelPrint } from "@/lib/actions/lot-label.actions"
-import { formatLabelDate, getLabelBlock, makeTestLotNos, TEST_LABEL_MARK, type LabelData } from "@/lib/label/label-spec"
+import { checkWipLabelPrintable, recordWipLabelPrint } from "@/lib/actions/wip-label.actions"
+import { formatLabelDate, getLabelBlock, makeTestLotNos, TEST_LABEL_MARK, type LabelData, type LabelType } from "@/lib/label/label-spec"
 import type { TestLabelCandidate } from "@/lib/label/label-items"
 import { labelPrintUrl, saveLabelJob, LABEL_JOB_PREFIX } from "@/lib/label/label-print-job"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
@@ -28,6 +29,14 @@ interface BarcodePrintItem {
   uom?: string
   /** 입고일/생산일 문구 선택 */
   dateLabel?: string
+  /** 라벨 3종 구분: RAW_LOT 원자재 / WIP 공정·재공 통합 / FG_LOT 완제품. 미지정 = 기존 LOT 라벨 모양. */
+  labelType?: LabelType
+  /** WIP 라벨: 재공 식별값(제안: WipUnit.id). 지정하면 WIP QR(DAEWON|WIP|1|<id>)로 출력되고 WIP 발행 이력이 남는다. */
+  wipId?: string | null
+  manufacturingNo?: string | null
+  workOrderNo?: string | null
+  /** 원자재 LOT 라벨: 규격 */
+  spec?: string | null
 }
 
 interface BarcodePrintDialogProps {
@@ -94,6 +103,8 @@ export function BarcodePrintDialog({
   const [isPrinting, setIsPrinting] = useState(false)
   const [reason, setReason] = useState("")
   const [reprintRequired, setReprintRequired] = useState(false)
+  // WIP 라벨 인쇄 요청 이력을 남긴 뒤 표시하는 안내(실제 출력 완료가 아님을 알린다).
+  const [wipRequested, setWipRequested] = useState(false)
   const today = formatLabelDate()
   const [testMode, setTestMode] = useState(false)
   const [testLotNos, setTestLotNos] = useState<string[]>([])
@@ -101,7 +112,10 @@ export function BarcodePrintDialog({
 
   // 후보가 바뀌거나 다이얼로그가 닫히면 시험용 모드를 해제한다(실제 라벨이 기본).
   useEffect(() => {
-    if (!open) setTestMode(false)
+    if (!open) {
+      setTestMode(false)
+      setWipRequested(false)
+    }
   }, [open])
   useEffect(() => {
     setTestMode(false)
@@ -109,7 +123,8 @@ export function BarcodePrintDialog({
   }, [candidateCount])
 
   function enterTestMode() {
-    setTestLotNos(makeTestLotNos(candidateCount))
+    // WIP 후보는 TEST-WIP-YYYYMMDD-NNN, LOT 후보는 TEST-YYYYMMDD-NNN (둘 다 TEST- 접두로 실제 값과 구분)
+    setTestLotNos(makeTestLotNos(candidateCount).map((id, i) => (testCandidates?.[i]?.labelType === "WIP" ? id.replace("TEST-", "TEST-WIP-") : id)))
     setTestMode(true)
   }
 
@@ -117,9 +132,15 @@ export function BarcodePrintDialog({
     () =>
       items.map((item) => {
         const lotNo = item.lotNo?.trim() || null
-        const kind = !lotNo && legacyItemBarcode ? "ITEM_BARCODE" : "LOT_QR"
+        const wipId = item.wipId?.trim() || null
+        const kind = item.labelType === "WIP" || wipId ? "WIP_QR" : !lotNo && legacyItemBarcode ? "ITEM_BARCODE" : "LOT_QR"
         return {
           kind,
+          ...(item.labelType ? { labelType: item.labelType } : wipId ? { labelType: "WIP" as const } : {}),
+          wipId,
+          manufacturingNo: item.manufacturingNo ?? null,
+          workOrderNo: item.workOrderNo ?? null,
+          spec: item.spec ?? null,
           itemCode: item.itemCode,
           itemName: item.itemName,
           lotNo,
@@ -134,17 +155,26 @@ export function BarcodePrintDialog({
   )
   const testLabels = useMemo<LabelData[]>(
     () =>
-      (testCandidates ?? []).map((c, i) => ({
-        kind: "LOT_QR" as const,
-        test: true,
-        itemCode: c.itemCode,
-        itemName: c.itemName,
-        lotNo: (testLotNos[i] ?? "").trim(),
-        quantity: c.quantity,
-        uom: c.uom,
-        date: today,
-        dateLabel: c.dateLabel,
-      })),
+      (testCandidates ?? []).map((c, i) => {
+        const id = (testLotNos[i] ?? "").trim()
+        const isWip = c.labelType === "WIP"
+        return {
+          kind: isWip ? ("WIP_QR" as const) : ("LOT_QR" as const),
+          ...(c.labelType ? { labelType: c.labelType } : {}),
+          test: true,
+          itemCode: c.itemCode,
+          itemName: c.itemName,
+          lotNo: isWip ? null : id,
+          wipId: isWip ? id : null,
+          manufacturingNo: c.manufacturingNo ?? null,
+          workOrderNo: c.workOrderNo ?? null,
+          spec: c.spec ?? null,
+          quantity: c.quantity,
+          uom: c.uom,
+          date: today,
+          dateLabel: c.dateLabel,
+        }
+      }),
     [testCandidates, testLotNos, today],
   )
   const labels = testMode ? testLabels : realLabels
@@ -157,7 +187,8 @@ export function BarcodePrintDialog({
     [labels],
   )
   const needsReason = !testMode && (reprint || reprintRequired)
-  const duplicateTestLot = testMode && new Set(testLabels.map((l) => l.lotNo)).size !== testLabels.length
+  const hasRealWip = labels.some((l) => l.kind === "WIP_QR" && !l.test)
+  const duplicateTestLot = testMode && new Set(testLabels.map((l) => l.lotNo ?? l.wipId)).size !== testLabels.length
 
   // 실제 "인쇄" 버튼을 누른 시점에만 번호를 소모하고 감사 기록을 남긴다(미리보기만 열고 닫으면 아무것도 소모하지 않는다).
   async function handlePrintClick() {
@@ -188,15 +219,19 @@ export function BarcodePrintDialog({
     let jobId: string | null = null
     try {
       const lotNos = labels.filter((l) => l.kind === "LOT_QR" && l.lotNo).map((l) => l.lotNo as string)
+      const wipUnitIds = labels.filter((l) => l.kind === "WIP_QR" && l.wipId).map((l) => l.wipId as string)
       let effectiveReprint = reprint
 
       // 시험용 라벨: 실제 LOT·재고·감사와 무관. 임시 번호가 실제 LOT 와 겹치지 않는지만 읽기 전용으로 확인하고 바로 인쇄 페이지로 간다.
       if (testMode) {
-        const unused = await checkTestLotNosUnused({ lotNos })
-        if (!unused.ok) {
-          alert(unused.message)
-          printWindow.close()
-          return
+        // (WIP 시험용 식별값 TEST-WIP-… 는 실제 WIP 식별값(cuid)과 겹칠 수 없어 별도 확인이 필요 없다.)
+        if (lotNos.length > 0) {
+          const unused = await checkTestLotNosUnused({ lotNos })
+          if (!unused.ok) {
+            alert(unused.message)
+            printWindow.close()
+            return
+          }
         }
         jobId = saveLabelJob(window.localStorage, labels, false)
         if (!jobId) {
@@ -221,6 +256,24 @@ export function BarcodePrintDialog({
           if (!reason.trim()) {
             setReprintRequired(true)
             alert("이미 출력된 LOT 입니다. 재출력 사유를 입력한 뒤 다시 눌러 주세요.")
+            printWindow.close()
+            return
+          }
+        }
+      }
+
+      if (wipUnitIds.length > 0) {
+        const check = await checkWipLabelPrintable({ wipUnitIds })
+        if (!check.ok) {
+          alert(check.message)
+          printWindow.close()
+          return
+        }
+        if (check.reissueWipIds.length > 0) {
+          effectiveReprint = true
+          if (!reason.trim()) {
+            setReprintRequired(true)
+            alert("이미 라벨 인쇄가 요청된 재공입니다(WIP 라벨은 모든 공정에서 재사용합니다). 이전 인쇄가 취소·실패했거나 라벨을 다시 만들어야 하면 아래 사유를 입력한 뒤 다시 눌러 주세요.")
             printWindow.close()
             return
           }
@@ -256,6 +309,21 @@ export function BarcodePrintDialog({
           printWindow.close()
           return
         }
+      }
+
+      if (wipUnitIds.length > 0) {
+        // 사유는 서버가 이력으로 재요청 여부를 판정한 뒤 필요하면 받는다(동시 요청 포함 — 서버가 직렬화).
+        const audit = await recordWipLabelPrint({ wipUnitIds, reason: reason.trim() || undefined, context })
+        if (!audit.ok) {
+          if (audit.code === "REASON_REQUIRED") setReprintRequired(true)
+          alert(audit.message)
+          window.localStorage.removeItem(LABEL_JOB_PREFIX + jobId)
+          printWindow.close()
+          return
+        }
+        // 인쇄를 취소하거나 실패해 다시 시도할 수 있도록 사유 입력란을 미리 열어 둔다.
+        setReprintRequired(true)
+        setWipRequested(true)
       }
 
       // 5) 라벨 전용 페이지로 이동 — 그 페이지가 QR 렌더링을 확인한 뒤 인쇄한다.
@@ -313,6 +381,19 @@ export function BarcodePrintDialog({
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {!testMode && hasRealWip && (
+          <div className="rounded-md bg-blue-50 p-3 text-[14px] text-blue-900" data-wip-note>
+            <p>
+              WIP 라벨은 최초 인쇄 요청 후 <b>모든 공정에서 같은 라벨을 재사용</b>합니다. 기록되는 이력은 <b>인쇄 요청</b>이며 실제 출력 완료는 아닙니다.
+            </p>
+            {wipRequested && (
+              <p className="mt-1">
+                인쇄를 요청했습니다. 인쇄가 취소되었거나 실패했다면 아래 사유를 입력하고 [재요청]을 눌러 다시 인쇄할 수 있습니다.
+              </p>
+            )}
           </div>
         )}
 
@@ -392,7 +473,7 @@ export function BarcodePrintDialog({
             disabled={isPrinting || (!testMode && Boolean(printBlockedReason)) || blockedReasons.length > 0 || labels.length === 0 || duplicateTestLot}
           >
             <Printer className="mr-2 h-4 w-4" />
-            {isPrinting ? "처리 중..." : testMode ? `${TEST_LABEL_MARK} 라벨 인쇄` : reprint ? "재출력" : "인쇄"}
+            {isPrinting ? "처리 중..." : testMode ? `${TEST_LABEL_MARK} 라벨 인쇄` : reprint ? "재출력" : wipRequested && hasRealWip ? "재요청" : "인쇄"}
           </Button>
         </DialogFooter>
       </DialogContent>

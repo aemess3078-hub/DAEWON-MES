@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import JsBarcode from "jsbarcode"
 import {
+  LABEL_TYPE_META,
   TEST_LABEL_MARK,
   LABEL_GAP_MM,
   LABEL_HEIGHT_MM,
@@ -10,12 +11,11 @@ import {
   LABEL_QR_MM_DEFAULT,
   LABEL_WIDTH_MM,
   computeLabelLayout,
-  formatLabelQuantity,
   getLabelBlock,
   labelContentHeightMm,
   type LabelData,
 } from "@/lib/label/label-spec"
-import { buildLotQrSvgData } from "@/lib/qr/qr-svg"
+import { buildLotQrSvgData, buildWipQrSvgData } from "@/lib/qr/qr-svg"
 
 interface BarcodeLabelProps {
   data: LabelData
@@ -32,7 +32,9 @@ const FONT_MONO = 'ui-monospace,"Consolas","Courier New","Noto Sans Mono",monosp
 /**
  * 29×90mm 라벨 1장 (가로 90mm × 세로 29mm).
  * 모든 치수는 mm/pt 인라인 스타일로 고정한다 — Tailwind/화면 CSS 에 영향받지 않고 미리보기와 인쇄가 같은 모양이 된다.
- *  - LOT_QR: 왼쪽 LOT QR, 오른쪽 대원정밀·품목명·품목코드·LOT·수량·일자
+ *  - 라벨 3종(labelType): RAW_LOT 원자재 / WIP 공정·재공 통합 / FG_LOT 완제품. 헤더에 유형 칩을 표시한다.
+ *  - LOT_QR: 왼쪽 LOT QR, 오른쪽 대원정밀·품목명·품목코드(+규격)·LOT·수량·일자
+ *  - WIP_QR: 왼쪽 WIP QR, 오른쪽 대원정밀·품목명·품목코드+WO·WIP 식별값·제조번호·발행일 (수량/공정/상태는 인쇄하지 않음 — MES 조회)
  *  - ITEM_BARCODE: LOT 이 없는 품목 라벨(출하/출고 등 호출자가 명시적으로 허용한 화면). 상단 텍스트 + 하단 CODE128.
  * LOT 번호가 없는 LOT_QR 라벨은 QR 을 만들지 않고 출력 불가 사유를 보여 준다(임의 식별자/CODE128 대체 금지).
  *
@@ -42,13 +44,15 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
   const block = getLabelBlock(data)
   const layout = useMemo(() => computeLabelLayout(data, qrMm), [data, qrMm])
   const qr = useMemo(() => {
-    if (data.kind !== "LOT_QR" || !data.lotNo || !block.printable) return null
+    if (!block.printable) return null
     try {
-      return buildLotQrSvgData(data.lotNo)
+      if (data.kind === "LOT_QR" && data.lotNo) return buildLotQrSvgData(data.lotNo)
+      if (data.kind === "WIP_QR" && data.wipId) return buildWipQrSvgData(data.wipId)
     } catch {
       return null
     }
-  }, [data.kind, data.lotNo, block.printable])
+    return null
+  }, [data.kind, data.lotNo, data.wipId, block.printable])
 
   const svgRef = useRef<SVGSVGElement>(null)
   const [barcodeReady, setBarcodeReady] = useState(false)
@@ -73,11 +77,11 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
     }
   }, [data.kind, barcodeValue])
 
-  const ready = data.kind === "LOT_QR" ? qr !== null : barcodeReady
+  const isQrKind = data.kind !== "ITEM_BARCODE"
+  const ready = isQrKind ? qr !== null : barcodeReady
   const state = !block.printable ? "blocked" : ready ? "ready" : "pending"
 
   const row: React.CSSProperties = { whiteSpace: "nowrap", overflow: "hidden", lineHeight: 1.15 }
-  const qty = formatLabelQuantity(data.quantity, data.uom)
 
   return (
     <div
@@ -91,8 +95,8 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
         boxSizing: "border-box",
         padding: `${LABEL_PADDING_MM}mm`,
         display: "flex",
-        flexDirection: data.kind === "LOT_QR" ? "row" : "column",
-        alignItems: data.kind === "LOT_QR" ? "center" : "stretch",
+        flexDirection: isQrKind ? "row" : "column",
+        alignItems: isQrKind ? "center" : "stretch",
         gap: `${LABEL_GAP_MM}mm`,
         background: "#fff",
         color: "#000",
@@ -107,7 +111,7 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
         </div>
       ) : (
         <>
-          {data.kind === "LOT_QR" && (
+          {isQrKind && (
             <div style={{ width: `${layout.qrMm}mm`, height: `${layout.qrMm}mm`, flex: "none", background: "#fff" }} data-label-qr>
               {qr && (
                 <svg
@@ -116,7 +120,7 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
                   height="100%"
                   shapeRendering="crispEdges"
                   role="img"
-                  aria-label={`LOT QR ${data.lotNo}`}
+                  aria-label={`${data.kind === "WIP_QR" ? "WIP" : "LOT"} QR ${data.kind === "WIP_QR" ? data.wipId : data.lotNo}`}
                   data-qr-payload={qr.payload}
                 >
                   <rect width={qr.viewBoxSize} height={qr.viewBoxSize} fill="#fff" />
@@ -129,7 +133,7 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
           <div
             style={{
               width: `${layout.textWidthMm}mm`,
-              height: data.kind === "LOT_QR" ? `${labelContentHeightMm()}mm` : undefined,
+              height: isQrKind ? `${labelContentHeightMm()}mm` : undefined,
               display: "flex",
               flexDirection: "column",
               justifyContent: "center",
@@ -142,6 +146,14 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
             <div style={{ ...row, display: "flex", justifyContent: "space-between", fontSize: `${layout.companyPt}pt`, fontWeight: 700 }}>
               <span>
                 {companyName}
+                {data.labelType && (
+                  <span
+                    style={{ marginLeft: "1.5mm", border: "0.25mm solid #000", padding: "0 1mm", fontSize: "7.5pt" }}
+                    data-label-type={data.labelType}
+                  >
+                    {LABEL_TYPE_META[data.labelType].tag}
+                  </span>
+                )}
                 {data.test && (
                   <span style={{ marginLeft: "1.5mm", background: "#000", color: "#fff", padding: "0 1mm", fontSize: "7.5pt" }} data-label-test>
                     {TEST_LABEL_MARK}
@@ -164,7 +176,7 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
               ))}
             </div>
 
-            <div style={{ ...row, fontSize: `${layout.codePt}pt`, fontFamily: FONT_MONO }}>{data.itemCode}</div>
+            <div style={{ ...row, fontSize: `${layout.codePt}pt`, fontFamily: FONT_MONO }}>{layout.codeText}</div>
 
             {layout.lot && (
               <div style={{ fontWeight: 700, fontSize: `${layout.lot.fontPt}pt`, fontFamily: FONT_MONO }} data-label-lot>
@@ -176,7 +188,7 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
               </div>
             )}
 
-            {qty && <div style={{ ...row, fontWeight: 700, fontSize: `${layout.qtyPt}pt` }}>수량 {qty}</div>}
+            {layout.last && <div style={{ ...row, fontWeight: 700, fontSize: `${layout.last.fontPt}pt` }}>{layout.last.text}</div>}
           </div>
 
           {data.kind === "ITEM_BARCODE" && (
