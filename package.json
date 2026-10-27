@@ -47,6 +47,7 @@
     "test:mrp-run-history-ui": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-mrp-run-history-ui.tsx",
     "test:ncwatch-phase12": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-ncwatch-phase12.ts",
     "ncwatch:ops": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/ncwatch-ops.ts",
+    "test:pop-wip-qr": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-pop-wip-qr.ts",
     "test:lot-read-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-lot-read-security.ts",
     "test:lot-tenant-isolation": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-lot-tenant-isolation.ts",
     "test:lot-number-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-lot-number-security.ts",

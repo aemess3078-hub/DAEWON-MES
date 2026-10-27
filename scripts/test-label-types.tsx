@@ -558,7 +558,9 @@ async function main() {
   // 출하·POP·WIP 이동·완제품입고·LOT 서버 로직이 QR/WIP 라벨 모듈에 결합되지 않았고(QR 은 선택적 편의기능), DB 스키마에 라벨/QR 전용 모델이 없다.
   // (예전에는 git diff HEAD 로 "변경 없음"을 확인했다 — 커밋 후에도, .git 없는 환경에서도 같은 목적을 내용으로 검사한다.)
   const businessModules = ["src/app/app/mes/shipments", "src/app/pop", "src/app/app/pop", "src/lib/actions/pop.actions.ts", "src/lib/actions/process-progress.actions.ts", "src/lib/actions/outsourcing.actions.ts", "src/lib/actions/wip-traceability.helpers.ts", "src/lib/actions/finished-goods.actions.ts", "src/lib/actions/lot.actions.ts"]
-  const coupledBusiness = qrCouplingViolations(businessModules)
+  // 4-2단계 예외: POP 작업지시 선택 화면 두 곳(관리자 작업대기·현장 태블릿)의 WIP QR 스캔 연결 파일뿐(POP 서버 액션·WIP 이동 헬퍼·그 밖의 현장 POP 파일은 계속 QR 에 결합되지 않는다)
+  const POP_QR_UI_FILES = ["src/app/app/pop/work-queue/work-queue-client.tsx", "src/app/pop/work-select/work-select-client.tsx"]
+  const coupledBusiness = qrCouplingViolations(businessModules, POP_QR_UI_FILES)
   ok(coupledBusiness.length === 0 && !/wip-label|material-issue|qr-scan/.test(stripComments(readSource("src/lib/actions/lot-label.actions.ts"))) && schemaViolations().length === 0, `H28 출하·POP·WIP 생성/이동·완제품입고/LOT 서버 로직은 QR/WIP 라벨 모듈에 결합되지 않았고 스키마에 라벨/QR 전용 모델이 없다(결합: ${coupledBusiness.join(", ") || "없음"})`)
 
   // ─── I. WIP 라벨 발행 조건 통일: 자재출고 완료만 허용 (서버 검증) ─────────────────────

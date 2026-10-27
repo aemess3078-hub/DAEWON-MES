@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
   ClipboardEdit,
@@ -20,6 +20,8 @@ import {
   submitProductionResult,
   type PopWorkQueueRow,
 } from "@/lib/actions/pop.actions"
+import type { PopWipLookupResult } from "@/lib/actions/pop-wip-lookup.actions"
+import { PopWipQrScan, type PopWipFound } from "@/components/pop/pop-wip-qr-scan"
 
 // ─── Filter types ────────────────────────────────────────────────────────────
 
@@ -258,10 +260,20 @@ function ResultForm({
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function WorkQueueClient({ rows }: { rows: PopWorkQueueRow[] }) {
+export function WorkQueueClient({
+  rows,
+  wipLookup,
+}: {
+  rows: PopWorkQueueRow[]
+  /** WIP QR 조회 함수(기본: 읽기 전용 서버 액션). 점검 화면/테스트에서 가짜를 주입한다. */
+  wipLookup?: (input: { wipUnitId: string }) => Promise<PopWipLookupResult>
+}) {
   const router = useRouter()
   const [filter, setFilter] = useState<QueueFilter>("ALL")
   const [keyword, setKeyword] = useState("")
+  // WIP QR 로 찾은 작업지시(표시 필터일 뿐 — 작업 시작/실적등록 처리와 무관)
+  const [qrWip, setQrWip] = useState<PopWipFound | null>(null)
+  const workOrderIdsInList = useMemo(() => new Set(rows.map((row) => row.workOrderId)), [rows])
 
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [openFormId, setOpenFormId] = useState<string | null>(null)
@@ -362,6 +374,7 @@ export function WorkQueueClient({ rows }: { rows: PopWorkQueueRow[] }) {
     const normalizedKeyword = keyword.trim().toLowerCase()
 
     return rows.filter((row) => {
+      if (qrWip && row.workOrderId !== qrWip.workOrderId) return false
       const matchesFilter =
         filter === "ALL" ||
         (filter === "PENDING" && row.status === "PENDING") ||
@@ -384,7 +397,13 @@ export function WorkQueueClient({ rows }: { rows: PopWorkQueueRow[] }) {
         .toLowerCase()
         .includes(normalizedKeyword)
     })
-  }, [filter, keyword, rows])
+  }, [filter, keyword, qrWip, rows])
+
+  // QR 로 작업지시를 표시하면 그 작업지시의 첫 공정 카드로 스크롤한다(표시만 — 어떤 업무 처리도 호출하지 않는다)
+  useEffect(() => {
+    if (!qrWip) return
+    document.querySelector(`[data-workorder-id="${CSS.escape(qrWip.workOrderId)}"]`)?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [qrWip])
 
   const availableCount = rows.filter((row) => row.canWork).length
   const inProgressCount = rows.filter((row) => row.status === "IN_PROGRESS").length
@@ -445,6 +464,21 @@ export function WorkQueueClient({ rows }: { rows: PopWorkQueueRow[] }) {
             />
           </div>
         </div>
+        {/* WIP QR 스캔: 라벨의 WIP 로 작업지시를 찾아 목록에 표시한다(선택적 편의기능 — 검색·필터·수동 선택은 그대로) */}
+        <div className="mt-3 border-t pt-3">
+          <PopWipQrScan
+            workOrderIdsInList={workOrderIdsInList}
+            selected={qrWip}
+            lookup={wipLookup}
+            onSelect={(found) => {
+              // 찾은 작업지시가 현재 필터·검색어에 가려지지 않도록 전체 보기로 돌린다
+              setFilter("ALL")
+              setKeyword("")
+              setQrWip(found)
+            }}
+            onClear={() => setQrWip(null)}
+          />
+        </div>
       </div>
 
       {/* 작업 카드 목록 */}
@@ -467,6 +501,7 @@ export function WorkQueueClient({ rows }: { rows: PopWorkQueueRow[] }) {
             return (
               <article
                 key={row.rowId}
+                data-workorder-id={row.workOrderId}
                 className={`rounded-xl border bg-white p-5 shadow-sm transition-colors ${
                   row.status === "IN_PROGRESS"
                     ? "border-amber-200"

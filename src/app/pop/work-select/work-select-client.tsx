@@ -1,7 +1,10 @@
 "use client"
 
+import { useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { formatQuantity } from "@/lib/utils"
+import type { PopWipLookupResult } from "@/lib/actions/pop-wip-lookup.actions"
+import { PopWipQrScan, type PopWipFound } from "@/components/pop/pop-wip-qr-scan"
 
 type Operation = {
   id: string
@@ -30,10 +33,15 @@ type WorkOrder = {
 
 type Props = {
   workOrders: WorkOrder[]
+  /** WIP QR 조회 함수(기본: 읽기 전용 서버 액션). 점검 화면/테스트에서 가짜를 주입한다. */
+  wipLookup?: (input: { wipUnitId: string }) => Promise<PopWipLookupResult>
 }
 
-export function WorkSelectClient({ workOrders }: Props) {
+export function WorkSelectClient({ workOrders, wipLookup }: Props) {
   const router = useRouter()
+  // WIP QR 로 찾은 작업지시(표시 필터일 뿐 — 카드 클릭·화면 이동·작업 시작과 무관)
+  const [qrWip, setQrWip] = useState<PopWipFound | null>(null)
+  const workOrderIdsInList = useMemo(() => new Set(workOrders.map((wo) => wo.id)), [workOrders])
 
   const handleCardClick = (wo: WorkOrder) => {
     // 진행 중이거나 대기 중인 첫 번째 공정으로 이동
@@ -60,9 +68,15 @@ export function WorkSelectClient({ workOrders }: Props) {
     )
   }
 
+  // QR 로 찾았다면 그 작업지시의 기존 카드만 보여 준다(새 카드를 만들지 않는다)
+  const visibleWorkOrders = qrWip ? workOrders.filter((wo) => wo.id === qrWip.workOrderId) : workOrders
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      {workOrders.map((wo) => {
+    <div className="space-y-4">
+      {/* WIP QR 스캔: 라벨의 WIP 로 작업지시를 찾아 표시한다(선택적 편의기능 — 카드 목록·카드 클릭은 그대로) */}
+      <PopWipQrScan variant="field" workOrderIdsInList={workOrderIdsInList} selected={qrWip} lookup={wipLookup} onSelect={setQrWip} onClear={() => setQrWip(null)} />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {visibleWorkOrders.map((wo) => {
         const totalOps = wo.operations.length
         const completedOps = wo.operations.filter(
           (op) => op.status === "COMPLETED"
@@ -121,6 +135,7 @@ export function WorkSelectClient({ workOrders }: Props) {
           </button>
         )
       })}
+      </div>
     </div>
   )
 }
