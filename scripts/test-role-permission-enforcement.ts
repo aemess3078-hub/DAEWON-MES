@@ -105,7 +105,8 @@ const expectedMutationGuards: Array<[string, string, string, string]> = [
   ["src/lib/actions/purchase-order.actions.ts", "updatePurchaseOrder", "PURCHASE_ORDER", "UPDATE"],
   ["src/lib/actions/purchase-order.actions.ts", "deletePurchaseOrder", "PURCHASE_ORDER", "DELETE"],
   ["src/lib/actions/receiving.actions.ts", "createReceivingInspection", "PURCHASE_ORDER", "CREATE"],
-  ["src/lib/actions/inventory.actions.ts", "createTransaction", "INVENTORY_TXN", "CREATE"],
+  // createTransaction(INVENTORY_TXN/CREATE) 항목은 제거: 범용 입출고 등록(createTransaction)은 의도적으로 삭제되었다
+  // (test-f27-inventory-adjustment-integrity.ts 가 "generic createTransaction export 제거"를 검사). 재고 쓰기 경로는 adjustInventoryStock 이 담당한다.
   ["src/lib/actions/inventory.actions.ts", "adjustInventoryStock", "INVENTORY", "UPDATE"],
   ["src/lib/actions/finished-goods.actions.ts", "createFinishedGoodsReceiptAction", "WORK_RESULT", "CREATE"],
   ["src/lib/actions/process-progress.actions.ts", "updateOperationStatusAction", "WORK_RESULT", "UPDATE"],
