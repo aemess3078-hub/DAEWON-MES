@@ -136,6 +136,15 @@ export async function createLot(data: CreateLotInput, clientTenantId: string) {
   if (existing) {
     throw new Error(`LOT번호 '${lotNo}'는 이미 존재합니다.`)
   }
+  // 입고 화면에서 자동채번으로 예약(미만료)된 번호는 수동 등록할 수 없다 — 입고 수동 경로(다른 발주품목의 예약 번호 차단)와 같은 정책.
+  // 예약 번호를 먼저 수동 등록하면 예약한 사용자의 입고 확정이 그 LOT 에 합쳐지거나 실패한다.
+  const activeReservation = await prisma.lotNumberReservation.findFirst({
+    where: { tenantId, lotNo, status: "RESERVED", expiresAt: { gt: new Date() } },
+    select: { id: true },
+  })
+  if (activeReservation) {
+    throw new Error(`LOT번호 '${lotNo}'는 입고 화면에서 자동채번 예약 중입니다. 다른 번호를 입력하거나 예약이 끝난 뒤 다시 시도해 주세요.`)
+  }
 
   await prisma.lot.create({
     data: {

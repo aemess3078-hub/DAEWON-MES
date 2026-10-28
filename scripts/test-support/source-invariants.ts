@@ -91,7 +91,8 @@ export const RECEIVING_TX_BLOCK: [string, string] = [
   "await lockPurchaseOrderItemsForUpdate(tx, tenantId, [data.purchaseOrderItemId])",
   'menuName: "자재입고",',
 ]
-export const RECEIVING_TX_BASELINE_FINGERPRINT = "24c0e3ce1ad6ab9b"
+// 갱신 이력: 24c0e3ce1ad6ab9b → b07151c9b9f5df40 — 예약(RESERVED) 모드에서 이미 존재하는 LOT 에 합치지 않고 중단하는 4줄 추가(LOT 번호 충돌 방지). 그 외 본문 변경 없음.
+export const RECEIVING_TX_BASELINE_FINGERPRINT = "b07151c9b9f5df40"
 
 // ─── 2. 결합 금지 ───────────────────────────────────────────────────────────────
 

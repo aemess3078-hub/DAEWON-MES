@@ -49,6 +49,7 @@ async function main() {
   ]
   const sequences = new Map<string, number>()
   const lots: Row[] = []
+  const reservedLotNos = new Set<string>()
   const calls = { itemFind: 0, lotFind: 0, lotCreate: 0, lotCount: 0, ruleFind: 0, seqUpsert: 0, revalidate: 0 }
   const createdData: Array<Record<string, unknown>> = []
   const itemWheres: Array<Record<string, unknown>> = []
@@ -80,6 +81,10 @@ async function main() {
         itemWheres.push(a.where)
         return items.find((it) => Object.entries(a.where).every(([k, v]) => it[k] === v)) ?? null
       },
+    },
+    // 입고 화면 자동채번 예약(미만료 RESERVED)된 LOT 번호 — createLot 이 이 번호의 수동 등록을 막는다
+    lotNumberReservation: {
+      findFirst: async (a: { where: Record<string, unknown> }) => (reservedLotNos.has(String(a.where.lotNo)) && a.where.status === "RESERVED" && a.where.tenantId === "t1" ? { id: "res-1" } : null),
     },
     lot: {
       findFirst: async (a: { where: Record<string, unknown> }) => {
@@ -235,6 +240,15 @@ async function main() {
   const createSrc = stripComments(between(lotSrc, "export async function createLot", "// ─── LOT 상태 변경") ?? "")
   ok(bypassLot === "UNAUTHORIZED" && noDbActivity() && !/getTenantId/.test(createSrc), "L10 [DEFAULT_TENANT_ID] 개발용 대체값이 있어도 비로그인 호출은 거부되고 createLot 은 getTenantId 를 쓰지 않는다")
   ok(createSrc.indexOf('requireResourcePermission("LOT", "CREATE")') < createSrc.indexOf("prisma.") && createSrc.indexOf("prisma.item.findFirst") < createSrc.indexOf("prisma.lot.create") && !createSrc.includes("...data"), "L11 소스: 권한 확인이 모든 DB 접근보다 앞서고, 품목 소속 확인 후에만 생성하며, data 를 통째로 펼치지 않는다")
+
+  // L12. 예약 중인 번호의 수동 등록 거부(입고 확정과의 충돌 방지) — 실제 DB 검증은 scripts/db-it/11-reservation-conflict.ts
+  setAuth("ok")
+  reset()
+  reservedLotNos.add("LOT-RESERVED-1")
+  const reservedReject = await rejection(() => lotActions.createLot({ ...valid, lotNo: "LOT-RESERVED-1" }, "t1"))
+  ok(reservedReject?.includes("자동채번 예약 중") === true && calls.lotCreate === 0, "L12 [예약 번호] 입고 화면에서 예약 중인 번호는 수동 LOT 등록이 거부되고 Lot 가 만들어지지 않는다")
+  reservedLotNos.clear()
+  reset()
 
   // ═══ N. generateNumber ══════════════════════════════════════════════════════
   const periodKey = "ALL"

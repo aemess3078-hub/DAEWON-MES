@@ -417,6 +417,10 @@ async function createReceivingInspectionInternal(
         if (lotResolutionMode === "AUTO") {
           throw new Error(AUTO_LOT_COLLISION)
         }
+        if (lotResolutionMode === "RESERVED") {
+          // 예약 번호는 발급 시점에 존재하지 않던 번호다. 그 사이 같은 번호의 LOT 가 생겼다면(경쟁 상태) 기존 LOT 에 합치지 않고 중단한다.
+          throw new Error("자동채번 예약 번호가 이미 다른 LOT 로 등록되었습니다. 다시 자동채번한 후 라벨을 출력해주세요.")
+        }
         lotId = existingLot.id
       } else {
         const newLot = await tx.lot.create({
