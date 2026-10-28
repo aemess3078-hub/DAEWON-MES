@@ -3,7 +3,7 @@
  * → 수불·출하 결과. 수동 선택 vs QR 선택 결과 비교, 스캔만으로 등록/확정/재고 변경이 없는지, 거부 사례, 동시성(예약·확정).
  * 실제 Supabase DB + 앱의 실제 서버 액션.
  */
-import { assertTarget, check, cookieJar, fixtures, info, loginAs, logout, prisma, summary, TENANT_ID, testPopPin, uniq, withTimeout } from "./lib"
+import { assertTarget, check, cookieJar, fixtures, info, loginAs, logout, preflight, prisma, summary, TENANT_ID, testPopPin, uniq, withTimeout } from "./lib"
 import { workOrderWithWip } from "./03-wip-pop"
 
 const mod = {
@@ -14,7 +14,7 @@ const mod = {
 }
 type Fx = Awaited<ReturnType<typeof fixtures>>
 
-async function produceAll(fx: Fx, woId: string, qty: number) {
+export async function produceAll(fx: Fx, woId: string, qty: number) {
   logout()
   const w = await mod.pop().popLogin(testPopPin(), TENANT_ID)
   if (!w) throw new Error("POP 로그인 실패(03 시나리오가 PIN 을 설정해야 합니다)")
@@ -41,6 +41,7 @@ const balanceOf = async (lotId: string, warehouseId: string) => {
 
 async function main() {
   assertTarget()
+  await preflight("완제품 입고·출하 통합 테스트(04)")
   const fx = await fixtures()
 
   // ═══ A. 완제품 입고(분할 입고 → LOT 2개) ═════════════════════════════════
@@ -227,6 +228,7 @@ if (require.main === module) {
   main()
     .catch((e) => {
       console.error("실패:", String((e as Error).message).split("\n").slice(-6).join(" | "))
+      summary("fg-shipment (중단 — 여기까지의 결과)")
       process.exitCode = 1
     })
     .finally(() => prisma.$disconnect())

@@ -60,6 +60,23 @@ async function main() {
   const fx = await fixtures()
   const jwt = require("../../src/lib/jwt") as typeof import("../../src/lib/jwt")
   const token = jwt.signAuthToken({ profileId: fx.operator.profileId, tenantId: TENANT_ID, loginId: fx.operator.loginId, email: fx.operator.email, name: fx.operator.name, role: "OPERATOR", mustChangePw: false })
+  // 반복 실행하면 이전 실행의 출하예정(예약)이 ZT5-SO-001 의 미출하수량을 계속 줄인다. 이 테스트가 쓰는 것은 ZT5 테스트 수주뿐이므로,
+  // 실행 전에 FG-A 수주 수량을 (출하완료 수량 + 5000) 이상으로 올려 반복 실행이 가능하게 한다. 다른 수주·품목은 건드리지 않는다.
+  await prisma.$executeRawUnsafe(
+    `update "SalesOrderItem" set qty = greatest(qty, "shippedQty" + 5000) where "itemId" = $1 and "salesOrderId" in (select id from "SalesOrder" where "tenantId" = $2 and "orderNo" = 'ZT5-SO-001')`,
+    fx.fgA.id,
+    TENANT_ID,
+  )
+  // 이 테스트는 수주 ZT5-SO-001 의 첫 품목 행이 ZT5-FG-A 라고 가정한다. 화면의 품목 행 순서는 DB 조회 순서(정렬 없음)라서,
+  // 04 같은 출하 테스트가 FG-A 행을 갱신하면 물리 순서가 바뀌어 FG-B 가 먼저 나올 수 있다. 시작 전에 FG-B 행을 한 번 다시 써서(값 불변) 순서를 맞춘다.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const so = await prisma.salesOrder.findFirstOrThrow({ where: { tenantId: TENANT_ID, orderNo: "ZT5-SO-001" }, include: { items: true } })
+    if (so.items[0]?.itemId === fx.fgA.id) break
+    const fgB = so.items.find((i) => i.itemId === fx.fgB.id)
+    if (!fgB) throw new Error("ZT5-SO-001 에 ZT5-FG-B 품목 행이 없습니다.")
+    await prisma.$executeRawUnsafe(`update "SalesOrderItem" set qty = qty where id = $1`, fgB.id)
+    if (attempt === 2) throw new Error("ZT5-SO-001 품목 행 순서를 FG-A 우선으로 맞추지 못했습니다(화면 행 순서 가정 불충족).")
+  }
   const shipCount = () => prisma.shipmentOrder.count({ where: { tenantId: TENANT_ID } })
   const balSum = async () => (await prisma.inventoryBalance.aggregate({ where: { tenantId: TENANT_ID, itemId: { in: [fx.fgA.id, fx.fgB.id] } }, _sum: { qtyOnHand: true, qtyAvailable: true } }))._sum
 

@@ -4,7 +4,7 @@
  *  K-D 출고 중 LOT 상태 변경 경합(불변식), K-E 격리 LOT 출고 거부·롤백.
  * 모든 대기에는 시간 제한을 둔다(withTimeout / lock_timeout).
  */
-import { assertTarget, check, fixtures, info, loginAs, prisma, sleep, summary, TENANT_ID, uniq, withTimeout } from "./lib"
+import { assertTarget, check, fixtures, info, loginAs, preflight, prisma, sleep, summary, TENANT_ID, uniq, withTimeout } from "./lib"
 
 const mod = {
   rcv: () => require("../../src/lib/actions/receiving.actions") as typeof import("../../src/lib/actions/receiving.actions"),
@@ -41,6 +41,7 @@ const issueTxCount = (lotId: string) => prisma.inventoryTransaction.count({ wher
 
 async function main() {
   assertTarget()
+  await preflight("자재출고 동시성 테스트(05)")
   const fx = await fixtures()
   // 기준 LOT: RM-B 는 충분히 크게(각 시나리오가 소비)
   const lotBig = await receiveLot(fx, fx.rmB.id, 2000)

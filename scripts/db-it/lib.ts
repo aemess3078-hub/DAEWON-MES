@@ -125,6 +125,40 @@ export async function fixtures() {
 export const sleep =(ms: number) => new Promise((r) => setTimeout(r, ms))
 export const uniq = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`.toUpperCase()
 
+/**
+ * 동시성·트랜잭션 테스트 시작 전 DB 상태 점검(읽기 전용, 쓰기 요청을 재시도하지 않는다).
+ * 앱 트랜잭션 기본 제한(5초) 안에서 도는 테스트는 DB 가 일시적으로 정체(왕복 지연 급증, 이전 실행이 남긴 idle-in-transaction 세션,
+ * 잠금 대기)일 때 "테스트 실패"처럼 보이는 시간 초과를 낸다. 그런 상태에서는 쓰기를 시작하지 않고 원인을 알려 준다.
+ *   - 왕복 지연 중앙값이 PREFLIGHT_MAX_RTT_MS(기본 250ms) 초과
+ *   - 20초 넘게 열려 있는 idle in transaction 세션 / 승인되지 않은(대기 중인) 잠금이 있음
+ * 운영 업무 로직의 타임아웃은 건드리지 않는다. 점검을 끄려면 DB_IT_SKIP_PREFLIGHT=1.
+ */
+export async function preflight(label: string): Promise<void> {
+  if (process.env.DB_IT_SKIP_PREFLIGHT === "1") return
+  const maxRtt = Number(process.env.PREFLIGHT_MAX_RTT_MS ?? 250)
+  const samples: number[] = []
+  await prisma.$queryRaw`select 1`
+  for (let i = 0; i < 7; i++) {
+    const t0 = Date.now()
+    await prisma.$queryRaw`select 1`
+    samples.push(Date.now() - t0)
+  }
+  samples.sort((x, y) => x - y)
+  const median = samples[3]
+  const stale = await prisma.$queryRawUnsafe<Array<{ n: number }>>(
+    `select count(*)::int n from pg_stat_activity where datname = current_database() and state = 'idle in transaction' and now() - state_change > interval '20 seconds'`,
+  )
+  const waiting = await prisma.$queryRawUnsafe<Array<{ n: number }>>(`select count(*)::int n from pg_locks l join pg_stat_activity a on a.pid = l.pid where not l.granted and a.datname = current_database()`)
+  const problems: string[] = []
+  if (median > maxRtt) problems.push(`DB 왕복 지연 중앙값 ${median}ms (기준 ${maxRtt}ms 이하)`)
+  if ((stale[0]?.n ?? 0) > 0) problems.push(`20초 넘게 열린 idle in transaction 세션 ${stale[0].n}개(이전 실행이 남긴 잠금 가능성)`)
+  if ((waiting[0]?.n ?? 0) > 0) problems.push(`잠금 대기 중인 세션 ${waiting[0].n}개`)
+  info("PREFLIGHT", `${label}: 왕복 지연 ${samples[0]}~${samples[6]}ms(중앙값 ${median}ms), 잔류 idle-in-tx ${stale[0]?.n ?? 0}, 잠금 대기 ${waiting[0]?.n ?? 0}`)
+  if (problems.length > 0) {
+    throw new Error(`DB 상태가 불안정해 ${label} 을(를) 시작하지 않습니다(쓰기 없음): ${problems.join("; ")}. 잠시 후 다시 실행하세요.`)
+  }
+}
+
 /** 제한 시간 안에 끝나지 않으면 실패로 보고(연결 장시간 점유 방지). */
 export async function withTimeout<T>(label: string, ms: number, fn: () => Promise<T>): Promise<T> {
   let timer: NodeJS.Timeout | undefined
