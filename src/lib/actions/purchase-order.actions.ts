@@ -8,6 +8,7 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { lockPurchaseOrderItemsForUpdate } from "@/lib/quantity-concurrency"
+import { generalPurchaseOrderWhere } from "@/lib/purchase-order-scope"
 import { allocatePurchaseOrderNumbers } from "@/lib/services/purchase-order-number.service"
 import { failureResult, type ActionResult } from "@/lib/errors/user-error"
 import { safeRevalidate } from "@/lib/revalidate-safe"
@@ -22,10 +23,7 @@ export async function getPurchaseOrders(tenantId: string) {
   const rows = await prisma.purchaseOrder.findMany({
     where: {
       tenantId,
-      NOT: [
-        { orderNo: { startsWith: "OS-" } },
-        { note: { contains: "[OUTSOURCING]" } },
-      ],
+      ...generalPurchaseOrderWhere,
     },
     include: {
       supplier: true,
@@ -67,10 +65,7 @@ export async function getPendingPurchaseOrdersForReceipt(tenantId: string, siteI
       tenantId,
       siteId,
       status: { in: ["ORDERED", "PARTIAL_RECEIVED"] },
-      NOT: [
-        { orderNo: { startsWith: "OS-" } },
-        { note: { contains: "[OUTSOURCING]" } },
-      ],
+      ...generalPurchaseOrderWhere,
     },
     include: {
       supplier: true,

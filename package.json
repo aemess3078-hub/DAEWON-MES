@@ -33,6 +33,7 @@
     "test:quality-release-gate": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-quality-release-gate.ts",
     "test:equipment-result-attribution": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-equipment-result-attribution.ts",
     "test:daewon-lot-rule": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-daewon-lot-rule.ts",
+    "test:purchase-order-scope": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-purchase-order-scope.ts",
     "test:mrp-security": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-security.ts",
     "test:mrp-period": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-period.ts",
     "test:mrp-simulation": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-mrp-simulation.ts",
