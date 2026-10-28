@@ -2,7 +2,6 @@
 
 import { requireRole } from "@/lib/auth"
 import { prisma } from "@/lib/db/prisma"
-import { generateCnsMaterialReceiptLotNo } from "@/lib/lot-numbering/lot-number-generator"
 import { computeNextMaterialReceiptLotNo } from "@/lib/lot-numbering/lot-reservation"
 import type { CnsItemRuleContext } from "@/lib/lot-numbering/lot-rule-resolver"
 import { Prisma, ReceivingInspectionResult } from "@prisma/client"
@@ -78,7 +77,7 @@ export async function generateReceivingLotNo(
   // 클라이언트가 보낸 tenantId 가 세션과 다르면 거부한다(다른 tenant 의 LOT 채번 순번을 볼 수 없다). 현재 호출처는 없다.
   const actor = await requireResourcePermission("PURCHASE_ORDER", "CREATE")
   if (typeof tenantId !== "string" || tenantId !== actor.tenantId) throw new Error("이 기능을 사용할 권한이 없습니다.")
-  return generateCnsMaterialReceiptLotNo(prisma, actor.tenantId, itemContext, new Date(), sequenceOffset)
+  return computeNextMaterialReceiptLotNo(prisma, actor.tenantId, itemContext, new Date(), sequenceOffset)
 }
 
 const AUTO_LOT_COLLISION = "AUTO_LOT_COLLISION"

@@ -2,6 +2,10 @@ import { Prisma, type PrismaClient } from "@prisma/client"
 import { generateCnsMaterialReceiptLotNo } from "./lot-number-generator"
 import { escapeCnsNumberingRegExp } from "./lot-number-generator"
 import type { CnsItemRuleContext } from "./lot-rule-resolver"
+import { isCnsLotRuleAllowed } from "./lot-brand-guard"
+import { computeNextTenantRuleLotNo } from "./tenant-lot-rule"
+
+type TenantRuleClient = Parameters<typeof computeNextTenantRuleLotNo>[0]
 
 // 자동채번 예약 TTL. 라벨 미리보기 후 실제 입고 확정까지 걸리는 현실적인 시간을 고려해 10분으로 설정.
 // 운영 정책 변경 시 이 상수만 수정하면 된다.
@@ -28,12 +32,16 @@ type LotLookupClient = {
  * 여기서 계속 카운트되어 번호가 영구히 재사용되지 않는다.
  */
 export async function computeNextMaterialReceiptLotNo(
-  db: LotLookupClient & ReservationLookupClient,
+  db: LotLookupClient & ReservationLookupClient & TenantRuleClient,
   tenantId: string,
   context: CnsItemRuleContext,
   date: Date,
   sequenceOffset = 0,
 ): Promise<string> {
+  // 대원정밀(NEXT_PUBLIC_BRAND != newmes): CNS 규칙 대신 번호 규칙 관리에 저장된 LOT 규칙으로 발행한다.
+  if (!isCnsLotRuleAllowed()) {
+    return computeNextTenantRuleLotNo(db, tenantId, context, date, sequenceOffset)
+  }
   const combinedLookup = {
     lot: {
       findMaxSequence: async (args: { tenantId: string; stem: string; numericSuffixDigits?: number }) => {

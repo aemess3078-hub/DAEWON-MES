@@ -222,6 +222,7 @@ async function main() {
   const bomOf = (wo: Row) => ({ bomItems: (wo.componentIds as string[]).map((c) => ({ componentItemId: c })) })
   const fakePrisma = {
     ...txClient({ held: new Set() }),
+    numberingRule: { findUnique: async () => null }, // 대원정밀 LOT 규칙 조회(저장된 규칙 없음)
     item: { findMany: async (a: { where: { id: { in: string[] } } }) => state.items.filter((i) => a.where.id.in.includes(String(i.id))) },
     warehouse: {
       findMany: async (a: { where: { tenantId: string; siteId?: string } }) => {
@@ -796,7 +797,7 @@ async function main() {
     else process.env.NEXT_PUBLIC_BRAND = previousBrand
   }
   ok(lotAnon === "UNAUTHORIZED" && lotDenied === DENIED_MSG && lotSpoof === DENIED_MSG && rawAfterSpoof === rawBefore, "I5 [LOT 채번] 비로그인 UNAUTHORIZED · 생성 권한 없음/다른 tenant 요청은 권한 오류 — 채번 조회 미실행")
-  ok(typeof lotNormal === "string" && lotNormal.length > 0 && rawQueryCount > rawAfterSpoof && String(lotRuleBlocked).includes("LOT 채번 규칙"), "I6 [LOT 채번] 정상 사용자(입고 생성 권한 + 같은 tenant)는 인증을 통과해 기존 채번 로직까지 도달한다(대원정밀 규칙 미확정 정책은 그대로 적용, 허용 브랜드에서는 번호 생성)")
+  ok(typeof lotNormal === "string" && lotNormal.length > 0 && rawQueryCount > rawAfterSpoof && String(lotRuleBlocked).includes("LOT 번호 규칙이 설정되지 않았"), "I6 [LOT 채번] 정상 사용자(입고 생성 권한 + 같은 tenant)는 인증을 통과해 채번 로직까지 도달한다(대원정밀: 저장된 LOT 규칙이 없으면 안내 오류, 허용 브랜드에서는 기존 번호 생성)")
   const recvSrc = read("src/lib/actions/receiving.actions.ts")
   ok(!/\bgetTenantId\b/.test(stripComments(recvSrc)) && recvSrc.indexOf("getWarehousesForSite") < recvSrc.indexOf('requireResourcePermission("PURCHASE_ORDER", "READ")') && recvSrc.includes('requireResourcePermission("PURCHASE_ORDER", "CREATE")'), "I7 소스: 입고 액션에서 개발용 대체값을 쓰는 getTenantId 를 더 이상 쓰지 않는다")
   ok(/getWarehousesForSite\(siteId\)/.test(read("src/app/app/mes/purchase-orders/receiving-dialog.tsx")) && /getWarehousesForSite\(siteId\)/.test(read("src/app/app/mes/material-receipt/receiving-form-dialog.tsx")), "I8 두 호출 화면(자재입고 · 발주 입고)의 호출 방식은 변경 없음(시그니처 유지)")

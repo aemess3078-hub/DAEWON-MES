@@ -32,6 +32,7 @@ async function main() {
   const items: Row[] = [
     { id: "item-a", tenantId: "t1", code: "RM-A", itemType: "RAW_MATERIAL", lotNumberingType: "RAW_DATE_SEQ", lotPrefix: null, manualLotPolicy: null, itemGroup: { code: "G1" }, category: { code: "C1" } },
     { id: "item-manual", tenantId: "t1", code: "RM-M", itemType: "RAW_MATERIAL", lotNumberingType: "MANUAL", lotPrefix: null, manualLotPolicy: null, itemGroup: null, category: null },
+    { id: "item-dw", tenantId: "t1", code: "DW-7", itemType: "RAW_MATERIAL", lotNumberingType: "DEFAULT", lotPrefix: null, manualLotPolicy: "ALLOWED", itemGroup: null, category: null },
     { id: "item-t2", tenantId: "t2", code: "SECRET-T2", itemType: "RAW_MATERIAL", lotNumberingType: "RAW_DATE_SEQ", lotPrefix: null, manualLotPolicy: null, itemGroup: null, category: null },
   ]
   const auth: { mode: "ok" | "anon"; tenantId: string; allowed: Set<string> } = { mode: "ok", tenantId: "t1", allowed: new Set(["LOT:CREATE"]) }
@@ -41,6 +42,19 @@ async function main() {
     auth.allowed = new Set(allowed)
   }
   const calls = { itemFind: 0, sequenceQuery: 0 }
+  const ruleRow: { current: { id: string; isActive: boolean; tokens: unknown } | null } = {
+    current: {
+      id: "rule-1",
+      isActive: true,
+      tokens: [
+        { id: "a", type: "CONTEXT", key: "ITEM_CODE" },
+        { id: "b", type: "DATE", format: "YY" },
+        { id: "c", type: "DATE", format: "MM" },
+        { id: "d", type: "SEPARATOR", value: "-" },
+        { id: "e", type: "SEQ", digits: 3 },
+      ],
+    },
+  }
   const itemWheres: Array<Record<string, unknown>> = []
 
   const fakePrisma = {
@@ -60,6 +74,11 @@ async function main() {
       return [{ maxSeq: 2 }]
     },
     lot: {},
+    // 번호 규칙 관리에 저장된 LOT 규칙(품목코드 + 연도2 + 월2 + "-" + 순번3) — 대원정밀 경로
+    numberingRule: {
+      findUnique: async () => ruleRow.current,
+    },
+    $executeRaw: async () => 0,
   }
   function inject(modulePath: string, exports: Record<string, unknown>) {
     const filename = require.resolve(modulePath)
@@ -155,10 +174,22 @@ async function main() {
   ok(missingItem === NOT_FOUND && emptyItem === NOT_FOUND && nonStringItem === NOT_FOUND && calls.sequenceQuery === 0, "6 [존재하지 않는/잘못된 itemId] 같은 '품목을 찾을 수 없습니다.' 로 거부(이전에는 빈 컨텍스트로 번호를 만들었다)")
   ok(otherTenantItem === missingItem, "6b 다른 tenant 품목과 존재하지 않는 품목의 응답이 완전히 같다 — 품목 존재 여부 비노출")
 
-  // 7. 대원정밀 자동 채번 미확정 정책 유지
-  const policyViaAction = await rejection(() => withBrand(undefined, () => lotActions.generateLotNo("item-a", "t1")))
+  // 7. 대원정밀: CNS 규칙은 여전히 차단하고, 저장된 LOT 규칙으로만 발행한다
   const policyDirect = await rejection(() => withBrand(undefined, () => generator.generateCnsMaterialReceiptLotNo(fakePrisma as never, "t1", ctx as never)))
-  ok(policyViaAction !== null && policyViaAction === policyDirect && policyViaAction.includes("LOT 채번 규칙이 설정되지 않았습니다"), "7b 대원정밀 자동 채번 규칙 미확정 정책은 그대로(인증 통과 후 기존 정책 오류가 그대로 나온다)")
+  ok(policyDirect !== null && policyDirect.includes("LOT 채번 규칙이 설정되지 않았습니다"), "7b 대원정밀에서 CNS 전용 생성기(generateCnsMaterialReceiptLotNo)는 여전히 차단 — CNS 규칙이 대원정밀에 적용되지 않는다")
+  const { kstDateParts } = require("../src/lib/business-numbering") as typeof import("../src/lib/business-numbering")
+  const kst = kstDateParts()
+  reset()
+  const dwViaAction = await withBrand(undefined, () => lotActions.generateLotNo("item-dw", "t1"))
+  ok(dwViaAction === `DW-7${kst.year2}${kst.monthText}-003` && calls.sequenceQuery === 1, "7b2 대원정밀: 저장된 규칙(품목코드+YY+MM+하이픈+순번3)으로 발행 — 최대 순번 2 → DW-7YYMM-003, 순번은 발행 원장에서 계산")
+  const cnsItemOnDaewon = await rejection(() => withBrand(undefined, () => lotActions.generateLotNo("item-a", "t1")))
+  ok(cnsItemOnDaewon !== null && cnsItemOnDaewon.includes("지원하지 않습니다"), "7b3 대원정밀: CNS 전용 방식(RAW_DATE_SEQ) 품목 설정은 CNS 규칙으로 번호를 만들지 않고 안내 오류")
+  ruleRow.current = null
+  const noRule = await rejection(() => withBrand(undefined, () => lotActions.generateLotNo("item-dw", "t1")))
+  ok(noRule !== null && noRule.includes("LOT 번호 규칙이 설정되지 않았거나 사용 중지"), "7b4 대원정밀: 규칙이 없으면 명확한 안내 오류(기본 번호를 만들지 않는다)")
+  ruleRow.current = { id: "rule-1", isActive: false, tokens: [{ id: "e", type: "SEQ", digits: 3 }] }
+  const inactive = await rejection(() => withBrand(undefined, () => lotActions.generateLotNo("item-dw", "t1")))
+  ok(inactive !== null && inactive.includes("LOT 번호 규칙이 설정되지 않았거나 사용 중지"), "7b5 대원정밀: 비활성 규칙도 같은 안내 오류")
   const manualViaAction = await rejection(() => withBrand(undefined, () => lotActions.generateLotNo("item-manual", "t1")))
   const manualDirect = await rejection(() => withBrand(undefined, () => generator.generateCnsMaterialReceiptLotNo(fakePrisma as never, "t1", { ...ctx, itemCode: "RM-M", itemGroupCode: undefined, itemCategoryCode: undefined, lotNumberingType: "MANUAL" } as never)))
   ok(manualViaAction === manualDirect, "7c 수동 입력 품목(MANUAL)의 기존 동작도 생성기 직접 호출과 동일")
@@ -170,7 +201,7 @@ async function main() {
     .flatMap((file) => Array.from(stripComments(readSource(file)).matchAll(/generateLotNo\(([^)]*)\)/g)).map((m) => ({ file, args: m[1] })))
     .filter((c) => c.file !== "src/lib/actions/lot.actions.ts")
   ok(lotActions.generateLotNo.length === 2 && sheet.includes('import { createLot, generateLotNo } from "@/lib/actions/lot.actions"') && callSites.every((c) => c.args.split(",").length === 2), "8 [LOT 등록 화면 호환성] 함수 시그니처(itemId, tenantId)·import 유지, 호출이 있다면 인자 2개 형태 그대로")
-  ok(sheet.includes('generateNumber(tenantId, "LOT"') && sheet.includes("createLot(") && callSites.length === 0, "8b LOT 등록 시트의 실제 번호 생성/등록 흐름(generateNumber · createLot)은 변경 없음 — generateLotNo 는 현재 import 만 있고 호출되지 않는다")
+  ok(sheet.includes('generateLotNumberForItem(tenantId') && sheet.includes("createLot(") && callSites.length === 0, "8b LOT 등록 시트의 실제 번호 생성/등록 흐름(generateNumber · createLot)은 변경 없음 — generateLotNo 는 현재 import 만 있고 호출되지 않는다")
 
   // 9. DEFAULT_TENANT_ID 우회 방지
   setAuth("anon", "t1")

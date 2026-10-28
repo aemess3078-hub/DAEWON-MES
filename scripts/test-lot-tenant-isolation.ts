@@ -25,6 +25,9 @@ function ok(value: unknown, label: string) {
 }
 
 async function main() {
+  // generateNumber 의 기존 NumberingSequence 경로(NMES 개발 브랜드)를 검증하는 테스트다.
+  // 대원정밀 경로(저장된 LOT 규칙 + 발행 원장 순번)는 scripts/test-daewon-lot-rule.ts 에서 검증한다.
+  process.env.NEXT_PUBLIC_BRAND = "newmes"
   type Row = Record<string, unknown>
   const items: Row[] = [
     { id: "item-a", tenantId: "t1", code: "RM-A" },
@@ -296,7 +299,7 @@ async function main() {
   const importers = listFiles("src").filter((f) => /\.(ts|tsx)$/.test(f) && f !== "src/lib/actions/numbering-rule.actions.ts" && readSource(f).includes("numbering-rule.actions"))
   const callSites = importers.flatMap((f) => Array.from(stripComments(readSource(f)).matchAll(/generateNumber\(([^)]*)\)/g)).map((m) => ({ f, args: m[1] })))
   ok(importers.sort().join() === "src/app/app/mes/lot-rules/numbering-rule-builder.tsx,src/app/app/mes/lot-rules/page.tsx,src/app/app/mes/lot/lot-form-sheet.tsx", "N9 [호출처] 번호 규칙 액션을 쓰는 파일은 LOT 등록 시트와 번호 규칙 관리 화면 2곳뿐")
-  ok(callSites.length === 2 && callSites.every((c) => c.f === "src/app/app/mes/lot/lot-form-sheet.tsx" && /^tenantId, "LOT", (autoContext|context)$/.test(c.args.trim())), "N9b generateNumber 호출은 LOT 등록 시트의 2곳(type \"LOT\", ITEM_CODE/ITEM_TYPE 등 문자열 context)이고 호출 형태가 그대로다 — 서명 변경 없음")
+  ok(callSites.length === 0 && (stripComments(readSource("src/app/app/mes/lot/lot-form-sheet.tsx")).match(/generateLotNumberForItem\(tenantId, /g) ?? []).length === 2, "N9b LOT 등록 시트는 결과 객체를 돌려주는 generateLotNumberForItem(tenantId, itemId, context) 2곳으로 호출한다(generateNumber 는 그 내부에서만 호출)")
   const others = ["src/lib/actions/work-order.actions.ts", "src/lib/actions/purchase-order.actions.ts", "src/lib/actions/receiving.actions.ts", "src/lib/actions/finished-goods.actions.ts", "src/lib/actions/shipment.actions.ts"].filter((f) => listFiles(f).length > 0)
   ok(others.length >= 3 && others.every((f) => !readSource(f).includes("numbering-rule.actions") && !/generateNumber\(/.test(stripComments(readSource(f)))), `N10 [다른 업무의 채번] 작업지시·발주·입고·완제품·출하(${others.length}개 확인)는 generateNumber 를 쓰지 않아 이번 변경의 영향이 없다`)
 

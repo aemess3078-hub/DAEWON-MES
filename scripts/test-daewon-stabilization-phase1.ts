@@ -32,7 +32,7 @@ import {
   isInternalErrorMessage,
   toUserErrorMessage,
 } from "../src/lib/errors/user-error"
-import { DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE, isCnsLotRuleAllowed } from "../src/lib/lot-numbering/lot-brand-guard"
+import { DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE, DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE, isCnsLotRuleAllowed } from "../src/lib/lot-numbering/lot-brand-guard"
 import { resolveCnsLotRule } from "../src/lib/lot-numbering/lot-rule-resolver"
 
 // ts-node 는 tsconfig 의 "@/" 별칭을 해석하지 못하므로 src 로 매핑한다(다른 모듈이 "@/lib/..." 를 import 함)
@@ -551,7 +551,7 @@ function testManufacturingPolicy() {
   // 대원정밀(autoAllowed=false)
   for (const t of ["DEFAULT", "RAW_DATE_SEQ", "PREFIX_MONTH_SEQ"]) {
     eq(D(t, "ALLOWED", "M-1"), { kind: "MANUAL", value: "M-1" }, `G2 ${t}/ALLOWED 수동 입력 허용`)
-    eq(D(t, "ALLOWED", ""), { kind: "ERROR", message: DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE }, `G2 ${t}/ALLOWED 미입력 → 규칙 미설정 안내`)
+    eq(D(t, "ALLOWED", ""), { kind: "ERROR", message: DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE }, `G2 ${t}/ALLOWED 미입력 → 제조번호 규칙 미확정 안내(LOT 규칙과 별개)`)
     eq(D(t, "REQUIRED", ""), { kind: "ERROR", message: MANUFACTURING_NO_REQUIRED_MESSAGE }, `G2 ${t}/REQUIRED 미입력 → 직접 입력 요구`)
     eq(D(t, "REQUIRED", "M-1"), { kind: "MANUAL", value: "M-1" }, `G2 ${t}/REQUIRED 입력 → 수동 사용`)
     eq(D(t, "DISABLED", "M-1"), { kind: "ERROR", message: MANUFACTURING_NO_DISABLED_NO_AUTO_MESSAGE }, `G3 ${t}/DISABLED 입력 → 입력이 무시되어 자동 채번을 시도하던 문제를 명확한 안내로 대체`)

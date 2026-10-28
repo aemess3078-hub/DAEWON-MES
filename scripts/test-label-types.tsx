@@ -725,7 +725,7 @@ async function main() {
   ok(rcvTx !== null && fingerprint(rcvTx) === RECEIVING_TX_BASELINE_FINGERPRINT && /type ReceivingResult = \{[^}]*replayed\?: boolean; lotNo\?: string \}/.test(rcvAct) && rcvAct.includes("return confirmedLotNo ? { success: true, lotNo: confirmedLotNo } : { success: true }"), "J6 입고 확정 트랜잭션 본문은 QR 작업 이전과 동일(지문) — 변경은 응답의 lotNo 필드와 최종 return 뿐")
   // J7: LOT 채번 규칙/예약 모듈은 QR/라벨에 결합되지 않았고, 입고 액션의 채번 호출 지점 수도 그대로다.
   const tokenCount = (text: string, token: string) => text.split(token).length - 1
-  ok(tokenCount(rcvAct, "generateCnsMaterialReceiptLotNo") === 2 && tokenCount(rcvAct, "computeNextMaterialReceiptLotNo") === 2 && qrCouplingViolations(["src/lib/lot-numbering", "src/lib/actions/lot-reservation.actions.ts"]).length === 0, "J7 LOT 채번 규칙/예약 로직은 QR/라벨에 결합되지 않았고 입고 액션의 채번 호출 지점도 그대로다")
+  ok(tokenCount(rcvAct, "generateCnsMaterialReceiptLotNo") === 0 && tokenCount(rcvAct, "computeNextMaterialReceiptLotNo") === 3 && qrCouplingViolations(["src/lib/lot-numbering", "src/lib/actions/lot-reservation.actions.ts"]).length === 0, "J7 LOT 채번 규칙/예약 로직은 QR/라벨에 결합되지 않았고 입고 액션의 채번 호출 지점도 그대로다")
   ok(rcvDlg.includes("serverLotNosRef.current[ins.purchaseOrderItemId] = response.lotNo") && rcvDlg.includes("response.success && response.lotNo") && rcvDlg.includes("serverLotNosRef.current[ins.purchaseOrderItemId] ?? ins.lotNo"), "J8 화면: 서버가 확인해 돌려준 LOT 를 우선, 없으면 화면에 입력·예약된 번호(수동 입력 LOT 유지)")
   ok(!/Math\.random|generateLot/.test(rcvDlg), "J9 화면에서 LOT 번호를 만들지 않는다(서버 응답 값만 보관)")
   const allDoneBranch = rcvDlg.slice(rcvDlg.indexOf("if (outcome.allDone)"), rcvDlg.indexOf("if (outcome.stoppedAt)"))

@@ -17,7 +17,6 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { MrpResultTable } from "./mrp-result-table"
-import { AISuggestionPanel } from "./ai-suggestion-panel"
 import { runMRP, createPurchaseOrdersFromMRP } from "@/lib/actions/mrp.actions"
 import type { MRPResult } from "@/lib/services/mrp.service"
 
@@ -106,20 +105,6 @@ export function MrpDashboard({ plans, tenantId, siteId }: Props) {
     } else {
       setMessage(`오류: ${result.error}`)
     }
-  }
-
-  const handleCreateOrder = async (itemId: string, qty: number): Promise<boolean> => {
-    if (!selectedPlan) return false
-    setIsCreatingPO(true)
-    const planSiteId = (selectedPlan as any).siteId ?? siteId
-    const result = await createPurchaseOrdersFromMRP([{ itemId, qty }], tenantId, planSiteId)
-    setIsCreatingPO(false)
-    setMessage(
-      result.success
-        ? `발주 생성 완료: ${result.orderNo}`
-        : `오류: ${result.error}`
-    )
-    return result.success
   }
 
   const summaryCards: SummaryCard[] = mrpResult
@@ -260,11 +245,6 @@ export function MrpDashboard({ plans, tenantId, siteId }: Props) {
           </p>
           <p className="text-[13px] mt-1">BOM에서 자재 구성을 등록해주세요.</p>
         </div>
-      )}
-
-      {/* AI 발주 제안 */}
-      {mrpResult && (
-        <AISuggestionPanel mrpResult={mrpResult} onCreateOrder={handleCreateOrder} />
       )}
     </div>
   )

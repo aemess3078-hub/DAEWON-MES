@@ -311,7 +311,7 @@ async function main() {
 
   // 23. LOT 등록 시트 호출 호환성 + 화면 접근 규칙과의 일치
   const sheet = readSource("src/app/app/mes/lot/lot-form-sheet.tsx")
-  ok(sheet.includes('getRuleContextTokens(tenantId, "LOT")') && sheet.includes('getContextCodeOptions(tenantId, "LOT")') && sheet.includes('generateNumber(tenantId, "LOT"'), "23 [LOT 등록 시트 호출 호환성] 호출 형태(tenantId, \"LOT\")가 그대로")
+  ok(sheet.includes('getRuleContextTokens(tenantId, "LOT")') && sheet.includes('getContextCodeOptions(tenantId, "LOT")') && sheet.includes('generateLotNumberForItem(tenantId'), "23 [LOT 등록 시트 호출 호환성] 호출 형태(tenantId, \"LOT\")가 그대로")
   setSession({ allowed: ["LOT:CREATE"], configured: ["LOT:READ", "LOT:CREATE"] }) // 등록 권한은 있고 조회 권한은 없는 사용자
   reset()
   const createOnlyTokens = await numbering.getRuleContextTokens("t1", "LOT")

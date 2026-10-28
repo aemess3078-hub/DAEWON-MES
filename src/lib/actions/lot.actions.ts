@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { generateCnsMaterialReceiptLotNo } from "@/lib/lot-numbering/lot-number-generator"
+import { computeNextMaterialReceiptLotNo } from "@/lib/lot-numbering/lot-reservation"
 import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { getTenantId } from "@/lib/auth"
@@ -186,7 +186,7 @@ export async function generateLotNo(itemId: string, tenantId: string): Promise<s
     },
   }) : null
   if (!item) throw new Error("품목을 찾을 수 없습니다.")
-  return generateCnsMaterialReceiptLotNo(prisma, actor.tenantId, {
+  return computeNextMaterialReceiptLotNo(prisma, actor.tenantId, {
     itemCode: item.code,
     itemGroupCode: item.itemGroup?.code,
     itemCategoryCode: item.category?.code,
@@ -194,7 +194,7 @@ export async function generateLotNo(itemId: string, tenantId: string): Promise<s
     lotNumberingType: item.lotNumberingType,
     lotPrefix: item.lotPrefix,
     manualLotPolicy: item.manualLotPolicy,
-  })
+  }, new Date())
 }
 
 // ─── 재귀 정추적 헬퍼 ─────────────────────────────────────────────────────────

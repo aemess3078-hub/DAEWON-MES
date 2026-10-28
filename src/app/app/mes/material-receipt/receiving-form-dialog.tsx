@@ -43,6 +43,9 @@ import {
 } from "@/lib/receiving-batch"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
 import { generateReceivingRequestId } from "@/lib/receiving-request-id"
+import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
+
+const AUTO_LOT_FORMAT_HINT = isCnsLotRuleAllowed() ? "26A01-1 형식으로" : "번호 규칙에 따라"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -577,7 +580,9 @@ export function ReceivingFormDialog({
                             ? "공급사 LOT 번호를 입력하세요"
                             : policy === "DISABLED"
                               ? "자동 발행됩니다"
-                              : "자동 생성 예: 26A01-1 / 공급사 LOT 직접 입력 가능"
+                              : isCnsLotRuleAllowed()
+                                ? "자동 생성 예: 26A01-1 / 공급사 LOT 직접 입력 가능"
+                                : "자동채번 또는 공급사 LOT 직접 입력"
                         }
                         className="h-8 text-[13px] font-mono flex-1"
                       />
@@ -612,12 +617,12 @@ export function ReceivingFormDialog({
                         )}
                         {policy === "DISABLED" && (
                           <p className="text-[12px] text-muted-foreground">
-                            26A01-1 형식으로 자동 발행됩니다. 이 품목은 직접 입력을 지원하지 않습니다.
+                            {AUTO_LOT_FORMAT_HINT} 자동 발행됩니다. 이 품목은 직접 입력을 지원하지 않습니다.
                           </p>
                         )}
                         {policy === "AUTO" && !ins.lotNo && (
                           <p className="text-[12px] text-muted-foreground">
-                            미입력 시 26A01-1 형식으로 자동 발행됩니다. 공급사 LOT가 있으면 직접 입력할 수 있습니다.
+                            미입력 시 {AUTO_LOT_FORMAT_HINT} 자동 발행됩니다. 공급사 LOT가 있으면 직접 입력할 수 있습니다.
                           </p>
                         )}
                       </>
