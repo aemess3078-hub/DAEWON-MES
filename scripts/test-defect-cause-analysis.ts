@@ -204,49 +204,55 @@ assertEqual(buildAnalysisStatusWhere("UNANALYZED"), { causeAnalysis: null }, "C1
   )
 }
 
-// ─── C15~C17: deleteQualityInspection tenant 검증 + 삭제 순서 (source-check) ─
+// ─── C15~C17: deleteQualityInspection tenant 검증 + 이력 보존 (source-check) ─
+// 설계 변경(F07 이력 보존): 이전에는 원인분석 → 측정값/불량기록 → 검사 순으로 연쇄 삭제했으나, 지금은 불량 기록(=원인분석/조치/재발방지
+// 하위 이력의 부모)이 하나라도 있는 검사는 삭제 자체를 막는다(assertInspectionHistoryMutable). 하위 이력이 고아가 되거나 RESTRICT FK 에
+// 걸릴 경로가 없다. 아래 단언은 그 현재 보장(tenant 소속 확인 → 이력 보호 → 그 다음에만 삭제)을 검증한다.
 {
   const fnStart = qualityActionsSource.indexOf("export async function deleteQualityInspection")
   const nextFnStart = qualityActionsSource.indexOf("\nexport async function", fnStart + 1)
-  const fnBody = qualityActionsSource.slice(fnStart, nextFnStart > 0 ? nextFnStart : fnStart + 1600)
+  const fnBody = qualityActionsSource.slice(fnStart, nextFnStart > 0 ? nextFnStart : fnStart + 2400)
+  const helperSource = fs.readFileSync("src/lib/actions/quality-inspection-integrity.helpers.ts", "utf8")
+  const helperStart = helperSource.indexOf("export async function assertInspectionHistoryMutable")
+  const helperBody = helperSource.slice(helperStart, helperSource.indexOf("\n}\n", helperStart))
 
-  const idxGetTenantId = fnBody.indexOf("getTenantId()")
-  const idxOwnershipCheck = fnBody.indexOf("tx.qualityInspection.findFirst(")
-  const idxThrow = fnBody.indexOf('throw new Error("검사 기록을 찾을 수 없습니다.")')
-  const idxCauseAnalysis = fnBody.indexOf("defectCauseAnalysis.deleteMany")
+  const idxActorTenant = fnBody.indexOf("const tenantId = actor.tenantId")
+  const idxGuard = fnBody.indexOf("assertInspectionHistoryMutable(tx, id, tenantId)")
   const idxMeasurement = fnBody.indexOf("inspectionMeasurement.deleteMany")
   const idxDefectRecord = fnBody.indexOf("defectRecord.deleteMany")
   const idxInspectionDelete = fnBody.indexOf("qualityInspection.delete(")
 
-  const ownershipWherePattern = /where:\s*\{\s*id,\s*workOrderOperation:\s*\{\s*workOrder:\s*\{\s*tenantId\s*\}\s*\}\s*\}/
-  const hasOwnershipWhere = ownershipWherePattern.test(fnBody)
+  const ownershipWherePattern = /where:\s*\{\s*id:\s*inspectionId,\s*workOrderOperation:\s*\{\s*workOrder:\s*\{\s*tenantId\s*\}\s*\}\s*\}/
+  const idxNotFoundThrow = helperBody.indexOf('throw new Error("검사 기록을 찾을 수 없습니다.")')
+  const idxHistoryThrow = helperBody.indexOf('throw new Error("연결된 품질 이력이 있어 삭제하거나 판정을 변경할 수 없습니다.")')
 
-  // C16: 정상 케이스 — tenant 소속 확인(getTenantId + {id, workOrderOperation.workOrder.tenantId}
-  // 조회)이 실제 삭제들보다 먼저 실행되고, 통과하면 그 뒤로 삭제가 이어지는 구조인지 확인.
+  // C16: tenant 는 세션 사용자(actor)에서 얻고, 소유권 확인+이력 보호가 모든 삭제보다 먼저(같은 트랜잭션) 실행된다.
   assertTrue(
-    idxGetTenantId >= 0 &&
-      idxOwnershipCheck >= 0 &&
-      hasOwnershipWhere &&
-      idxCauseAnalysis >= 0 &&
-      idxOwnershipCheck < idxCauseAnalysis,
-    "C16. tenant 소속 확인(getTenantId + {id, workOrderOperation.workOrder.tenantId} 조회)이 삭제들보다 먼저 실행되고, 통과 시 실제 삭제로 이어짐"
+    idxActorTenant >= 0 &&
+      idxGuard > idxActorTenant &&
+      idxMeasurement > idxGuard &&
+      idxDefectRecord > idxGuard &&
+      idxInspectionDelete > idxGuard &&
+      ownershipWherePattern.test(helperBody),
+    "C16. tenant(actor) 기준 소유권 조회({id, workOrderOperation.workOrder.tenantId})와 이력 보호 검사가 모든 delete 보다 먼저 같은 트랜잭션에서 실행되고, 통과한 경우에만 삭제로 이어짐"
   )
 
-  // C17: cross-tenant 차단 — 소유권 조회 결과가 없으면(다른 tenant의 id) 어떤 delete보다도 먼저 throw한다.
+  // C17: 다른 tenant 의 id 면 조회 결과가 없어 어떤 삭제보다도 먼저 throw 한다.
   assertTrue(
-    idxThrow >= 0 &&
-      idxThrow > idxOwnershipCheck &&
-      idxThrow < idxCauseAnalysis &&
-      idxThrow < idxMeasurement &&
-      idxThrow < idxDefectRecord &&
-      idxThrow < idxInspectionDelete,
-    'C17. 소유권 조회 실패 시 "검사 기록을 찾을 수 없습니다." throw가 모든 delete보다 먼저 실행되어(같은 트랜잭션 내) 다른 tenant의 삭제를 원천 차단'
+    idxNotFoundThrow > helperBody.indexOf("findFirst(") && idxNotFoundThrow >= 0 && idxGuard < idxMeasurement,
+    'C17. 소유권 조회 실패 시 "검사 기록을 찾을 수 없습니다." throw 가 모든 delete 보다 먼저 실행되어 다른 tenant 의 삭제를 원천 차단'
   )
 
-  // C15: defectCauseAnalysis → (measurement/defectRecord) → qualityInspection 순으로 삭제(RESTRICT FK 위반 없이)
+  // C15: 불량 기록(원인분석/조치/재발방지의 부모)이 있으면 삭제 자체를 막으므로 하위 이력 삭제·FK 위반 경로가 없다.
   assertTrue(
-    idxCauseAnalysis >= 0 && idxCauseAnalysis < idxDefectRecord && idxDefectRecord < idxInspectionDelete && idxMeasurement < idxInspectionDelete,
-    "C15. deleteQualityInspection이 defectCauseAnalysis → (measurement/defectRecord) → qualityInspection 순으로 삭제(RESTRICT FK 위반 없이)"
+    helperBody.includes("causeAnalysis:") &&
+      helperBody.includes("correctiveActions:") &&
+      helperBody.includes("recurrencePreventions:") &&
+      helperBody.includes("inspection.defectRecords.length > 0") &&
+      idxHistoryThrow > idxNotFoundThrow &&
+      !fnBody.includes("defectCauseAnalysis.deleteMany") &&
+      !fnBody.includes("defectCorrectiveAction.deleteMany"),
+    "C15. 불량 기록(원인분석/조치/재발방지 부모)이 있는 검사는 삭제가 차단되고, 삭제 함수는 하위 품질 이력을 지우지 않는다(이력 보존, FK 위반 경로 없음)"
   )
 }
 

@@ -109,7 +109,12 @@ async function runActionScenarios() {
     "@/lib/actions/wip-traceability.helpers": { findActiveWipUnitForWorkOrder: async () => null,
       recordProductionResultQualityMovements: async () => { if (failAfterUsage) throw new Error("downstream failure") } },
     "@/lib/actions/self-inspection.helpers": { recordSelfInspectionDefects: noop },
-    "@/lib/actions/production-plan.actions": {},
+    // pop.actions 가 이후에 추가로 import 하게 된 모듈들. 도구 사용 이력 검증과 무관한 경로(PIN 로그인, 계획 상태 동기화)용 대체물이며
+    // 아래 단언(도구 사용 횟수/이력/수명)은 바뀌지 않았다. 계획 상태 동기화는 production-plan.actions 에서 production-plan-sync 로 이동했다.
+    "@/lib/production-plan-sync": { syncProductionPlanStatusForWorkOrder: async () => undefined },
+    "next/headers": { headers: async () => new Map<string, string>() },
+    "@/lib/login-history": { createLoginHistoryLog: async () => undefined },
+    "@/lib/login-lock": { POP_PIN_LOGIN_HISTORY_ID: "pop-pin-login", isAutoLockExpired: () => false },
     "@/lib/operation-status-integrity": { assertOperationResultAllowed: noop },
     "@/lib/pop-worktime-operator": { resolveProductionResultTime: ({ endedAt }: any) => ({ startedAt: new Date(0), endedAt }) },
     "@/lib/bom-material-sufficiency": { getWorkOrderMaterialSufficiency: async () => ({}), assertProductionQuantityWithinMaterialLimit: noop },

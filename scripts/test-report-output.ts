@@ -296,7 +296,7 @@ const equipmentClientSource = fs.readFileSync(
 )
 
 {
-  const wrapsDefectStats = /getQualityReport[\s\S]{0,120}return getDefectStats\(filter\)/.test(reportActionsSource)
+  const wrapsDefectStats = /getQualityReport[\s\S]{0,400}return getDefectStats\(filter\)/.test(reportActionsSource)
   const noOwnDefectMath = !/defectQty\s*\/\s*inspectedQty/.test(reportActionsSource) // 새 불량률 정의를 만들지 않음
   assertTrue(wrapsDefectStats && noOwnDefectMath, "T18. getQualityReport은 getDefectStats(정본)를 그대로 감싸고 불량률을 새로 계산하지 않는다(§ STEP 14/16)")
 }

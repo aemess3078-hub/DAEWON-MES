@@ -443,7 +443,7 @@ async function main() {
       ["src/lib/actions/finished-goods.actions.ts", /lockWorkOrderForUpdate[\s\S]*computeWipReceiptStatus[\s\S]*finishedGoodsReceipt\.create/, "finished goods receipt locks WorkOrder before receipt capacity calculation"],
       ["src/lib/actions/pop.actions.ts", /lockWorkOrderOperationForUpdate[\s\S]*getWorkOrderMaterialSufficiency\(tx[\s\S]*assertProductionQuantityWithinMaterialLimit/, "POP result locks WorkOrderOperation before F10 sufficiency validation"],
       ["src/lib/actions/work-order.actions.ts", /lockProductionPlanItemsForUpdate[\s\S]*assertProductionPlanItemCapacity[\s\S]*workOrder\.create/, "WorkOrder allocation locks ProductionPlanItem before F02 capacity validation"],
-      ["src/lib/actions/receiving.actions.ts", /lockPurchaseOrderItemsForUpdate[\s\S]*lockedRemainingQty[\s\S]*receivingInspection\.create/, "purchase receipt locks PurchaseOrderItem before remaining quantity validation"],
+      ["src/lib/actions/receiving.actions.ts", /lockPurchaseOrderItemsForUpdate[\s\S]*lockedRemainingCheck[\s\S]*receivingInspection\.create/, "purchase receipt locks PurchaseOrderItem before remaining quantity validation"],
       ["src/lib/quantity-concurrency.ts", /ORDER BY id[\s\S]*FOR UPDATE/, "row locks use deterministic id ordering"],
       ["src/lib/quantity-concurrency.ts", /DEFAULT_MAX_ATTEMPTS = 3[\s\S]*CONCURRENT_QUANTITY_CHANGE_MESSAGE/, "retry policy is bounded and masks internal retryable errors"],
     ] as const
