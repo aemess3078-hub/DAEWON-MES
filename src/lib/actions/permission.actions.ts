@@ -6,6 +6,7 @@ import { revalidatePath } from "next/cache"
 import { getTenantId, getCurrentUser, requireRole } from "@/lib/auth"
 import { canAccessFullUserManagement } from "@/lib/developer"
 import { recordAuditLog } from "@/lib/audit-log"
+import { buildDefaultPermissionRows } from "@/lib/auth/permission-catalog"
 
 async function requireFullUserManagementAccess() {
   const user = await getCurrentUser()
@@ -24,162 +25,13 @@ export type PermissionRecord = {
 }
 
 // ─── 기본 권한 카탈로그 ───────────────────────────────────────────────────────
-// nav-config.ts 실제 메뉴 기준으로 리소스를 관리한다.
-// DB의 resource 코드와 화면 표시 label은 permission-matrix.tsx에서 분리한다.
-// skipDuplicates 사용으로 기존 데이터 충돌 없이 신규 리소스만 추가된다.
-
-const ALL_ACTIONS: PermissionAction[] = ["READ", "CREATE", "UPDATE", "DELETE", "APPROVE", "EXPORT"]
-
-// 실제 메뉴 기준 전체 리소스 목록
-const ALL_RESOURCES = [
-  // 기준정보관리
-  "ITEM", "BOM", "ROUTING", "EQUIPMENT", "INSPECTION_SPEC", "WORK_STANDARD", "PARTNER_MANAGEMENT",
-  // 생산관리
-  "PRODUCTION_PLAN", "WORK_ORDER", "WORK_RESULT",
-  "SALES_ORDER", "SHIPMENT", "QUOTATION", "COSTING",
-  "PROJECT_ORDER", "PROJECT_PRICE", "PROJECT_STAGE", "PROJECT_ISSUE",
-  // 재고관리
-  "INVENTORY", "INVENTORY_TXN", "PURCHASE_ORDER", "ITEM_PRICE", "MRP",
-  // 품질관리
-  "QUALITY_INSPECTION", "DEFECT_MANAGEMENT", "ECN", "INSTRUMENT_CALIBRATION",
-  // 설비점검/수리
-  "EQUIPMENT_REPAIR", "EQUIPMENT_MONITOR", "EQUIPMENT_CONNECTION", "TAG_MANAGEMENT",
-  // 시스템/추적성
-  "LOT", "COMMON_CODE", "AUDIT_LOG", "DASHBOARD", "REPORT",
-  // 사용자관리
-  "USER_MANAGEMENT",
-  // 기존 호환 (DB에 이미 존재)
-  "APPROVAL",
-]
-
-const MANAGER_PERMS: Record<string, PermissionAction[]> = {
-  ITEM:               ["READ", "CREATE", "UPDATE"],
-  BOM:                ["READ", "CREATE", "UPDATE"],
-  ROUTING:            ["READ", "CREATE", "UPDATE"],
-  EQUIPMENT:          ["READ", "CREATE", "UPDATE"],
-  INSPECTION_SPEC:    ["READ", "CREATE", "UPDATE"],
-  WORK_STANDARD:      ["READ", "CREATE", "UPDATE"],
-  PARTNER_MANAGEMENT: ["READ", "CREATE", "UPDATE"],
-  PRODUCTION_PLAN:    ["READ", "CREATE", "UPDATE"],
-  WORK_ORDER:         ["READ", "CREATE", "UPDATE"],
-  WORK_RESULT:        ["READ", "CREATE", "UPDATE", "EXPORT"],
-  SALES_ORDER:        ["READ", "CREATE", "UPDATE", "DELETE"],
-  SHIPMENT:           ["READ", "CREATE", "UPDATE", "DELETE"],
-  QUOTATION:          ["READ", "CREATE", "UPDATE", "DELETE"],
-  COSTING:            ["READ", "CREATE", "EXPORT"],
-  INVENTORY:          ["READ", "CREATE", "UPDATE"],
-  INVENTORY_TXN:      ["READ", "EXPORT"],
-  PURCHASE_ORDER:     ["READ", "CREATE", "UPDATE"],
-  ITEM_PRICE:         ["READ", "CREATE", "UPDATE"],
-  MRP:                ["READ", "CREATE", "UPDATE"],
-  PROJECT_ORDER:      ["READ", "CREATE", "UPDATE"],
-  PROJECT_PRICE:      ["READ", "CREATE", "UPDATE"],
-  PROJECT_STAGE:      ["READ", "CREATE", "UPDATE"],
-  PROJECT_ISSUE:      ["READ", "CREATE", "UPDATE"],
-  QUALITY_INSPECTION: ["READ", "CREATE", "UPDATE", "APPROVE"],
-  DEFECT_MANAGEMENT:  ["READ", "CREATE", "UPDATE"],
-  ECN:                ["READ", "CREATE", "UPDATE", "APPROVE"],
-  INSTRUMENT_CALIBRATION: ["READ", "CREATE", "UPDATE", "EXPORT"],
-  EQUIPMENT_REPAIR:   ["READ", "CREATE", "UPDATE", "APPROVE"],
-  EQUIPMENT_MONITOR:  ["READ"],
-  EQUIPMENT_CONNECTION: ["READ", "CREATE", "UPDATE"],
-  TAG_MANAGEMENT:     ["READ", "CREATE", "UPDATE"],
-  LOT:                ["READ", "CREATE", "UPDATE"],
-  COMMON_CODE:        ["READ"],
-  DASHBOARD:          ["READ"],
-  AUDIT_LOG:          ["READ"],
-  USER_MANAGEMENT:    ["READ"],
-  APPROVAL:           ["READ", "CREATE", "APPROVE"],
-  REPORT:             ["READ", "EXPORT"],
-}
-
-const OPERATOR_PERMS: Record<string, PermissionAction[]> = {
-  ITEM:               ["READ"],
-  BOM:                ["READ"],
-  ROUTING:            ["READ"],
-  EQUIPMENT:          ["READ"],
-  INSPECTION_SPEC:    ["READ"],
-  WORK_STANDARD:      ["READ"],
-  PARTNER_MANAGEMENT: ["READ"],
-  PRODUCTION_PLAN:    ["READ"],
-  WORK_ORDER:         ["READ", "UPDATE"],
-  WORK_RESULT:        ["READ", "CREATE"],
-  SALES_ORDER:        ["READ", "CREATE", "UPDATE"],
-  SHIPMENT:           ["READ", "CREATE", "UPDATE"],
-  QUOTATION:          ["READ", "CREATE", "UPDATE"],
-  COSTING:            ["READ", "CREATE"],
-  INVENTORY:          ["READ", "CREATE", "UPDATE"],
-  INVENTORY_TXN:      ["READ"],
-  PURCHASE_ORDER:     ["READ", "CREATE"],
-  ITEM_PRICE:         ["READ"],
-  MRP:                ["READ"],
-  PROJECT_ORDER:      ["READ", "CREATE"],
-  PROJECT_PRICE:      ["READ"],
-  PROJECT_STAGE:      ["READ", "CREATE", "UPDATE"],
-  PROJECT_ISSUE:      ["READ", "CREATE", "UPDATE"],
-  QUALITY_INSPECTION: ["READ", "CREATE"],
-  DEFECT_MANAGEMENT:  ["READ", "CREATE"],
-  ECN:                ["READ", "CREATE"],
-  INSTRUMENT_CALIBRATION: ["READ"],
-  EQUIPMENT_REPAIR:   ["READ", "CREATE"],
-  EQUIPMENT_MONITOR:  ["READ"],
-  EQUIPMENT_CONNECTION: ["READ"],
-  TAG_MANAGEMENT:     ["READ"],
-  LOT:                ["READ"],
-  COMMON_CODE:        ["READ"],
-  DASHBOARD:          ["READ"],
-  APPROVAL:           ["READ", "CREATE"],
-  REPORT:             ["READ"],
-}
-
-const VIEWER_RESOURCES = [
-  "ITEM", "BOM", "ROUTING", "EQUIPMENT", "INSPECTION_SPEC", "WORK_STANDARD",
-  "PARTNER_MANAGEMENT",
-  "PRODUCTION_PLAN", "WORK_ORDER", "WORK_RESULT",
-  "SALES_ORDER", "SHIPMENT", "QUOTATION", "COSTING",
-  "PROJECT_ORDER", "PROJECT_PRICE", "PROJECT_STAGE", "PROJECT_ISSUE",
-  "INVENTORY", "INVENTORY_TXN", "PURCHASE_ORDER", "ITEM_PRICE", "MRP",
-  "QUALITY_INSPECTION", "DEFECT_MANAGEMENT", "ECN", "INSTRUMENT_CALIBRATION",
-  "EQUIPMENT_REPAIR", "LOT",
-  "EQUIPMENT_MONITOR", "DASHBOARD",
-  "APPROVAL", "REPORT",
-]
+// 기본값의 유일한 정의는 src/lib/auth/permission-catalog.ts 이다(seed 스크립트와 공용).
+// createMany({ skipDuplicates: true }) 로만 저장하므로 이미 저장된 설정은 덮어쓰지 않는다.
 
 async function requireSameTenantPermissionAccess(tenantId: string) {
   const user = await requireRole("VIEWER")
   if (user.tenantId !== tenantId) throw new Error("FORBIDDEN")
   return user
-}
-
-function buildDefaultPermissionRows(tenantId: string) {
-  type PermRow = { tenantId: string; role: UserRole; resource: string; action: PermissionAction; isAllowed: boolean }
-  const rows: PermRow[] = []
-
-  for (const role of ["OWNER", "ADMIN"] as UserRole[]) {
-    for (const resource of ALL_RESOURCES) {
-      for (const action of ALL_ACTIONS) {
-        rows.push({ tenantId, role, resource, action, isAllowed: true })
-      }
-    }
-  }
-
-  for (const [resource, actions] of Object.entries(MANAGER_PERMS)) {
-    for (const action of actions) {
-      rows.push({ tenantId, role: "MANAGER", resource, action, isAllowed: true })
-    }
-  }
-
-  for (const [resource, actions] of Object.entries(OPERATOR_PERMS)) {
-    for (const action of actions) {
-      rows.push({ tenantId, role: "OPERATOR", resource, action, isAllowed: true })
-    }
-  }
-
-  for (const resource of VIEWER_RESOURCES) {
-    rows.push({ tenantId, role: "VIEWER", resource, action: "READ", isAllowed: true })
-  }
-
-  return rows
 }
 
 // 1. 전체 권한 조회

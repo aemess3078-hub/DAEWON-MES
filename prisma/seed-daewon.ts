@@ -40,9 +40,10 @@ import {
   SiteType,
   WorkCenterKind,
   DefectCategory,
-  PermissionAction,
 } from '@prisma/client';
 import { FEATURE_CATALOG, FEATURE_DEPENDENCIES } from './seed-data/feature-catalog';
+import { ensureDefaultPermissions } from '../src/lib/auth/permission-init';
+import { DAEWON_OUT_OF_SCOPE_RESOURCES } from '../src/lib/auth/permission-catalog';
 
 const prisma = new PrismaClient();
 
@@ -332,94 +333,13 @@ async function seedCodeGroups() {
   }
 }
 
-// RolePermission: src/lib/actions/permission.actions.ts 의 buildDefaultPermissionRows() 와 동일한 기본 카탈로그.
-// (해당 함수는 'use server' + 세션 의존이라 스크립트에서 import 할 수 없어 값을 옮겨 둠 — 두 곳이 어긋나지 않게 유지할 것)
-// 대원정밀 범위 밖 리소스(QUOTATION, COSTING, PROJECT_*)도 기본 카탈로그에는 포함한다(화면에서 조정 가능).
+// RolePermission: 기본값의 유일한 정의는 src/lib/auth/permission-catalog.ts (사용자관리 화면의 ensurePermissionMatrix 와 공용).
+// 대원정밀 구축 범위 밖 리소스(QUOTATION, COSTING, PROJECT_*, ITEM_PRICE)는 MANAGER/OPERATOR/VIEWER 에 부여하지 않는다
+// (화면은 src/lib/auth/daewon-scope.ts 의 라우트 정책으로도 차단된다. OWNER/ADMIN 행은 호환을 위해 유지).
+// skipDuplicates 라 반복 실행해도 중복 행이 생기지 않고, 이미 저장된 설정은 덮어쓰지 않는다.
 async function seedRolePermissions() {
-  const A = PermissionAction;
-  const ALL_ACTIONS: PermissionAction[] = [A.READ, A.CREATE, A.UPDATE, A.DELETE, A.APPROVE, A.EXPORT];
-  const ALL_RESOURCES = [
-    'ITEM', 'BOM', 'ROUTING', 'EQUIPMENT', 'INSPECTION_SPEC', 'WORK_STANDARD', 'PARTNER_MANAGEMENT',
-    'PRODUCTION_PLAN', 'WORK_ORDER', 'WORK_RESULT',
-    'SALES_ORDER', 'SHIPMENT', 'QUOTATION', 'COSTING',
-    'PROJECT_ORDER', 'PROJECT_PRICE', 'PROJECT_STAGE', 'PROJECT_ISSUE',
-    'INVENTORY', 'INVENTORY_TXN', 'PURCHASE_ORDER', 'ITEM_PRICE', 'MRP',
-    'QUALITY_INSPECTION', 'DEFECT_MANAGEMENT', 'ECN', 'INSTRUMENT_CALIBRATION',
-    'EQUIPMENT_REPAIR', 'EQUIPMENT_MONITOR', 'EQUIPMENT_CONNECTION', 'TAG_MANAGEMENT',
-    'LOT', 'COMMON_CODE', 'AUDIT_LOG', 'DASHBOARD', 'REPORT',
-    'USER_MANAGEMENT', 'APPROVAL',
-  ];
-  const MANAGER: Record<string, PermissionAction[]> = {
-    ITEM: [A.READ, A.CREATE, A.UPDATE], BOM: [A.READ, A.CREATE, A.UPDATE], ROUTING: [A.READ, A.CREATE, A.UPDATE],
-    EQUIPMENT: [A.READ, A.CREATE, A.UPDATE], INSPECTION_SPEC: [A.READ, A.CREATE, A.UPDATE],
-    WORK_STANDARD: [A.READ, A.CREATE, A.UPDATE], PARTNER_MANAGEMENT: [A.READ, A.CREATE, A.UPDATE],
-    PRODUCTION_PLAN: [A.READ, A.CREATE, A.UPDATE], WORK_ORDER: [A.READ, A.CREATE, A.UPDATE],
-    WORK_RESULT: [A.READ, A.CREATE, A.UPDATE, A.EXPORT],
-    SALES_ORDER: [A.READ, A.CREATE, A.UPDATE, A.DELETE], SHIPMENT: [A.READ, A.CREATE, A.UPDATE, A.DELETE],
-    QUOTATION: [A.READ, A.CREATE, A.UPDATE, A.DELETE], COSTING: [A.READ, A.CREATE, A.EXPORT],
-    INVENTORY: [A.READ, A.CREATE, A.UPDATE], INVENTORY_TXN: [A.READ, A.EXPORT],
-    PURCHASE_ORDER: [A.READ, A.CREATE, A.UPDATE], ITEM_PRICE: [A.READ, A.CREATE, A.UPDATE],
-    MRP: [A.READ, A.CREATE, A.UPDATE],
-    PROJECT_ORDER: [A.READ, A.CREATE, A.UPDATE], PROJECT_PRICE: [A.READ, A.CREATE, A.UPDATE],
-    PROJECT_STAGE: [A.READ, A.CREATE, A.UPDATE], PROJECT_ISSUE: [A.READ, A.CREATE, A.UPDATE],
-    QUALITY_INSPECTION: [A.READ, A.CREATE, A.UPDATE, A.APPROVE], DEFECT_MANAGEMENT: [A.READ, A.CREATE, A.UPDATE],
-    ECN: [A.READ, A.CREATE, A.UPDATE, A.APPROVE], INSTRUMENT_CALIBRATION: [A.READ, A.CREATE, A.UPDATE, A.EXPORT], EQUIPMENT_REPAIR: [A.READ, A.CREATE, A.UPDATE, A.APPROVE],
-    EQUIPMENT_MONITOR: [A.READ], EQUIPMENT_CONNECTION: [A.READ, A.CREATE, A.UPDATE],
-    TAG_MANAGEMENT: [A.READ, A.CREATE, A.UPDATE], LOT: [A.READ, A.CREATE, A.UPDATE],
-    COMMON_CODE: [A.READ], DASHBOARD: [A.READ], AUDIT_LOG: [A.READ], USER_MANAGEMENT: [A.READ],
-    APPROVAL: [A.READ, A.CREATE, A.APPROVE], REPORT: [A.READ, A.EXPORT],
-  };
-  const OPERATOR: Record<string, PermissionAction[]> = {
-    ITEM: [A.READ], BOM: [A.READ], ROUTING: [A.READ], EQUIPMENT: [A.READ], INSPECTION_SPEC: [A.READ],
-    WORK_STANDARD: [A.READ], PARTNER_MANAGEMENT: [A.READ], PRODUCTION_PLAN: [A.READ],
-    WORK_ORDER: [A.READ, A.UPDATE], WORK_RESULT: [A.READ, A.CREATE],
-    SALES_ORDER: [A.READ, A.CREATE, A.UPDATE], SHIPMENT: [A.READ, A.CREATE, A.UPDATE],
-    QUOTATION: [A.READ, A.CREATE, A.UPDATE], COSTING: [A.READ, A.CREATE],
-    INVENTORY: [A.READ, A.CREATE, A.UPDATE], INVENTORY_TXN: [A.READ],
-    PURCHASE_ORDER: [A.READ, A.CREATE], ITEM_PRICE: [A.READ], MRP: [A.READ],
-    PROJECT_ORDER: [A.READ, A.CREATE], PROJECT_PRICE: [A.READ],
-    PROJECT_STAGE: [A.READ, A.CREATE, A.UPDATE], PROJECT_ISSUE: [A.READ, A.CREATE, A.UPDATE],
-    QUALITY_INSPECTION: [A.READ, A.CREATE], DEFECT_MANAGEMENT: [A.READ, A.CREATE], ECN: [A.READ, A.CREATE], INSTRUMENT_CALIBRATION: [A.READ],
-    EQUIPMENT_REPAIR: [A.READ, A.CREATE], EQUIPMENT_MONITOR: [A.READ], EQUIPMENT_CONNECTION: [A.READ],
-    TAG_MANAGEMENT: [A.READ], LOT: [A.READ], COMMON_CODE: [A.READ], DASHBOARD: [A.READ],
-    APPROVAL: [A.READ, A.CREATE], REPORT: [A.READ],
-  };
-  const VIEWER_RESOURCES = [
-    'ITEM', 'BOM', 'ROUTING', 'EQUIPMENT', 'INSPECTION_SPEC', 'WORK_STANDARD', 'PARTNER_MANAGEMENT',
-    'PRODUCTION_PLAN', 'WORK_ORDER', 'WORK_RESULT',
-    'SALES_ORDER', 'SHIPMENT', 'QUOTATION', 'COSTING',
-    'PROJECT_ORDER', 'PROJECT_PRICE', 'PROJECT_STAGE', 'PROJECT_ISSUE',
-    'INVENTORY', 'INVENTORY_TXN', 'PURCHASE_ORDER', 'ITEM_PRICE', 'MRP',
-    'QUALITY_INSPECTION', 'DEFECT_MANAGEMENT', 'ECN', 'INSTRUMENT_CALIBRATION', 'EQUIPMENT_REPAIR', 'LOT',
-    'EQUIPMENT_MONITOR', 'DASHBOARD', 'APPROVAL', 'REPORT',
-  ];
-
-  // 대원정밀 구축 범위 밖 기능 전용 리소스(견적/원가/프로젝트/단가): MANAGER/OPERATOR/VIEWER 에는 부여하지 않는다.
-  // (화면은 src/lib/auth/daewon-scope.ts 의 라우트 정책으로도 차단된다. OWNER/ADMIN 행은 호환을 위해 유지)
-  const OUT_OF_SCOPE = new Set([
-    'QUOTATION', 'COSTING', 'PROJECT_ORDER', 'PROJECT_PRICE', 'PROJECT_STAGE', 'PROJECT_ISSUE', 'ITEM_PRICE',
-  ]);
-
-  type Row = { tenantId: string; role: UserRole; resource: string; action: PermissionAction; isAllowed: boolean };
-  const rows: Row[] = [];
-  for (const role of [UserRole.OWNER, UserRole.ADMIN]) {
-    for (const resource of ALL_RESOURCES) {
-      for (const action of ALL_ACTIONS) rows.push({ tenantId: TENANT_ID, role, resource, action, isAllowed: true });
-    }
-  }
-  for (const [resource, actions] of Object.entries(MANAGER)) {
-    if (OUT_OF_SCOPE.has(resource)) continue;
-    for (const action of actions) rows.push({ tenantId: TENANT_ID, role: UserRole.MANAGER, resource, action, isAllowed: true });
-  }
-  for (const [resource, actions] of Object.entries(OPERATOR)) {
-    if (OUT_OF_SCOPE.has(resource)) continue;
-    for (const action of actions) rows.push({ tenantId: TENANT_ID, role: UserRole.OPERATOR, resource, action, isAllowed: true });
-  }
-  for (const resource of VIEWER_RESOURCES) {
-    if (OUT_OF_SCOPE.has(resource)) continue;
-    rows.push({ tenantId: TENANT_ID, role: UserRole.VIEWER, resource, action: A.READ, isAllowed: true });
-  }
-  await prisma.rolePermission.createMany({ data: rows, skipDuplicates: true });
+  const created = await ensureDefaultPermissions(prisma, TENANT_ID, { withheldFromNonAdmin: DAEWON_OUT_OF_SCOPE_RESOURCES });
+  console.log(`    ✓ 신규 권한 행 ${created}개 (기존 행은 유지)`);
 }
 
 // FeatureDefinition 은 전역 카탈로그. 메뉴 코드 매핑(getEnabledMenuCodes)과 하위 호환을 위해 전부 등록하고,

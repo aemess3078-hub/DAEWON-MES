@@ -60,7 +60,14 @@ const MENU_NAME = "계측기 검교정관리"
 const PAGE_PATH = "/app/mes/quality/calibration"
 
 /** 사용자에게 그대로 보여줄 수 있는 오류 */
-class UserFacingError extends Error {}
+class UserFacingError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "UserFacingError"
+    // 컴파일 타깃(ES5 등)에 따라 Error 상속의 prototype 이 끊겨 instanceof 가 실패하는 것을 막는다.
+    Object.setPrototypeOf(this, UserFacingError.prototype)
+  }
+}
 
 function fail(message: string): { ok: false; error: string } {
   return { ok: false, error: message }

@@ -497,10 +497,10 @@ check("서버 격리: 쿼리는 tenantId 로 한정하고, 품질검사·첨부 
 check("권한 등록: 리소스/메뉴 매핑/라우트 허용 목록/메뉴 링크가 연결되어 있다", () => {
   const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8")
   assert.ok(read("src/lib/auth/role-permissions.ts").includes('calibration: "INSTRUMENT_CALIBRATION"'))
-  assert.ok(read("src/lib/actions/permission.actions.ts").includes("INSTRUMENT_CALIBRATION"))
+  assert.ok(read("src/lib/auth/permission-catalog.ts").includes("INSTRUMENT_CALIBRATION"))
   assert.ok(read("src/lib/auth/daewon-scope.ts").includes('"/app/mes/quality/calibration"'))
   assert.ok(read("src/lib/nav-config.ts").includes("href: '/app/mes/quality/calibration'"))
-  assert.ok(read("prisma/seed-daewon.ts").includes("INSTRUMENT_CALIBRATION"))
+  assert.ok(read("prisma/seed-daewon.ts").includes("permission-init")) // seed 는 카탈로그(단일 정의)를 사용한다
 })
 check("범위 제외: 성적서 파일 첨부/품질검사 연동 스키마가 없다", () => {
   const schema = fs.readFileSync(path.join(process.cwd(), "prisma/schema.prisma"), "utf8")

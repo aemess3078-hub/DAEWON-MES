@@ -42,6 +42,7 @@ const rolePermissions = read("src/lib/auth/role-permissions.ts")
 const layout = read("src/app/app/layout.tsx")
 const middleware = read("src/middleware.ts")
 const permissionActions = read("src/lib/actions/permission.actions.ts")
+const permissionCatalog = read("src/lib/auth/permission-catalog.ts")
 const productionPlanActions = read("src/lib/actions/production-plan.actions.ts")
 const productionPlanPage = read("src/app/app/mes/production-plan/page.tsx")
 const productionPlanTable = read("src/app/app/mes/production-plan/plan-data-table.tsx")
@@ -62,7 +63,7 @@ ok(/if\s*\(tenantUser\.role === "OWNER"\)/.test(rolePermissions), "existing OWNE
 ok(/throw new Error\(ROLE_PERMISSION_DENIED_MESSAGE\)/.test(rolePermissions), "server mutation guard fails before mutation when permission is missing")
 ok(/configured\.has\(permissionKey\(resource,\s*"READ"\)\)/.test(rolePermissions), "menu/page READ filtering only applies when a READ row exists")
 ok(rolePermissions.includes('"material-return": "PURCHASE_ORDER"') && rolePermissions.includes('"equipment-tools": "EQUIPMENT"') && rolePermissions.includes('spc: "QUALITY_INSPECTION"'), "menu/page READ mapping covers routed MES resources without creating new resource codes")
-ok(["SALES_ORDER", "SHIPMENT", "QUOTATION", "COSTING"].every((resource) => permissionActions.includes(`"${resource}"`)), "permission catalog includes seeded sales/quotation/costing resources")
+ok(["SALES_ORDER", "SHIPMENT", "QUOTATION", "COSTING"].every((resource) => permissionCatalog.includes(`"${resource}"`)), "permission catalog includes seeded sales/quotation/costing resources")
 
 ok(middleware.includes("x-nmes-pathname"), "middleware forwards pathname to the app layout for direct URL guard")
 ok(layout.includes("getCurrentPermissionSnapshot(user)") && layout.includes("canReadPath(permissionSnapshot, pathname)") && layout.includes("canReadMenuCode(permissionSnapshot, menuCode)"), "app layout applies RolePermission READ to direct URL and Sidebar")
@@ -105,7 +106,7 @@ const expectedMutationGuards: Array<[string, string, string, string]> = [
   ["src/lib/actions/purchase-order.actions.ts", "updatePurchaseOrder", "PURCHASE_ORDER", "UPDATE"],
   ["src/lib/actions/purchase-order.actions.ts", "deletePurchaseOrder", "PURCHASE_ORDER", "DELETE"],
   ["src/lib/actions/receiving.actions.ts", "createReceivingInspection", "PURCHASE_ORDER", "CREATE"],
-  ["src/lib/actions/inventory.actions.ts", "createTransaction", "INVENTORY_TXN", "CREATE"],
+  // (NMES 에서 복제된 목록의 createTransaction 은 대원정밀 저장소에 존재한 적이 없다. 재고 변경 쓰기 액션은 adjustInventoryStock 하나이며 아래에서 검사한다.)
   ["src/lib/actions/inventory.actions.ts", "adjustInventoryStock", "INVENTORY", "UPDATE"],
   ["src/lib/actions/finished-goods.actions.ts", "createFinishedGoodsReceiptAction", "WORK_RESULT", "CREATE"],
   ["src/lib/actions/process-progress.actions.ts", "updateOperationStatusAction", "WORK_RESULT", "UPDATE"],
