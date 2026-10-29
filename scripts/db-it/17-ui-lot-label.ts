@@ -4,7 +4,7 @@
  *   - 실제 프린터 출력은 하지 않는다(window.print 를 빈 함수로 대체 — 인쇄 대화상자 없음).
  *   - 쓰기: ZT7 접두어 테스트 LOT 3개(원자재 입고 3건·수동 LOT 1) + AuditLog(LotLabel). 삭제하지 않는다.
  * 사전: 서버가 UI_BASE(기본 http://localhost:3130)에서 실행 중이어야 한다.
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/17-ui-lot-label.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/17-ui-lot-label.ts
  */
 import { chromium, type Page } from "playwright-core"
 import { assertTarget, check, fixtures, info, loginAs, preflight, prisma, summary, TENANT_ID, uniq } from "./lib"

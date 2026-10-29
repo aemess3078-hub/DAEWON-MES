@@ -84,6 +84,22 @@ check("메시지에 접속 정보(비밀번호/계정)를 싣지 않는다", () 
 
 // ── 2) 실제 스크립트 실행 (DB 연결 전에 중단되는지) ──────────────────────────────
 const tsNode = path.join(root, "node_modules", "ts-node", "dist", "bin.js")
+function minimalEnv(extraEnv: Record<string, string>) {
+  const base: Record<string, string> = {}
+  for (const key of ["PATH", "Path", "SystemRoot", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]) {
+    if (process.env[key]) base[key] = process.env[key] as string
+  }
+  return { ...base, ...extraEnv } as unknown as NodeJS.ProcessEnv
+}
+function runTsScript(script: string, extraEnv: Record<string, string>) {
+  const started = Date.now()
+  const result = spawnSync(
+    process.execPath,
+    [tsNode, "--compiler-options", '{"module":"commonjs","esModuleInterop":true,"target":"es2019"}', "--project", "tsconfig.json", script],
+    { cwd: root, env: minimalEnv(extraEnv), encoding: "utf8", timeout: 120_000 },
+  )
+  return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}`, ms: Date.now() - started }
+}
 function runSmoke(extraEnv: Record<string, string>) {
   const base: Record<string, string> = {}
   for (const key of ["PATH", "Path", "SystemRoot", "TEMP", "TMP", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]) {
@@ -134,6 +150,79 @@ check("소스: 쓰기 전에 연결된 DB 이름을 확인하고, 확인된 경�
   assert.ok(smoke.indexOf("await assertConnectedDatabaseIsTest(prisma)") < smoke.indexOf("const fixture = await createFixture()"))
   assert.ok(/if \(databaseVerified\) await cleanup\(\)/.test(smoke))
   assert.ok(!/^\s*await cleanup\(\)\s*$/m.test(smoke.slice(smoke.indexOf(".finally("))))
+})
+
+// ── 3b) scripts/db-it (운영 Supabase 를 대상으로 설계되어 있던 실제 DB 통합 스위트) ──────────────
+// 옛 방식(운영 프로젝트 식별자 확인 변수 + Supabase 주소 + 운영 테넌트)을 그대로 넣어도 DB 연결 전에 거부되어야 한다. 아래 값은 모두 가짜다.
+const OLD_PROD_STYLE: Record<string, string> = {
+  DAEWON_DB_IT_CONFIRM: "aquqetajewvhyirmewfy",
+  DATABASE_URL: FAKE_PROD,
+  DIRECT_URL: FAKE_PROD,
+  NEXT_PUBLIC_SUPABASE_URL: "https://aquqetajewvhyirmewfy.supabase.co",
+  DEFAULT_TENANT_ID: "daewon-001",
+}
+function assertDbItBlocked(label: string, script: string, extraEnv: Record<string, string>, expectText: string) {
+  const r = runTsScript(script, extraEnv)
+  assert.equal(r.status, 2, `${label}: exit code ${r.status}\n${r.output.slice(0, 400)}`)
+  assert.ok(r.output.includes("ABORT [db-it]") && r.output.includes(expectText), `${label}: 안내 메시지\n${r.output.slice(0, 400)}`)
+  assert.ok(!/Prisma|Can't reach database|ECONNREFUSED|ENOTFOUND|P1001/i.test(r.output), `${label}: DB 연결을 시도한 흔적\n${r.output.slice(0, 400)}`)
+  assert.ok(!r.output.includes("FAKE-PASSWORD-FOR-GUARD-TEST"), `${label}: 접속 정보 노출`)
+}
+const dbItFiles = fs.readdirSync(path.join(root, "scripts/db-it")).filter((n) => n.endsWith(".ts") || n.endsWith(".js"))
+
+check("db-it 실행: 옛 방식(운영 프로젝트 식별자 + Supabase 주소 + daewon-001)의 읽기 전용 점검(00-inspect) → exit 2, 연결 시도 없음", () =>
+  assertDbItBlocked("db-it 00 old-style", "scripts/db-it/00-inspect.ts", OLD_PROD_STYLE, "DAEWON_TEST_DB_CONFIRM"))
+check("db-it 실행: 옛 방식 입력으로 쓰기 스위트(09-lot-rule, lib.ts 경유) → exit 2, 연결 시도 없음", () =>
+  assertDbItBlocked("db-it 09 old-style", "scripts/db-it/09-lot-rule.ts", OLD_PROD_STYLE, "관리형/운영"))
+check("db-it 실행: 환경변수 없음(.env.local 이 있어도 읽지 않음)으로 시드 스위트(01-seed) → exit 2", () =>
+  assertDbItBlocked("db-it 01 no env", "scripts/db-it/01-seed.ts", {}, "DATABASE_URL"))
+check("db-it 실행: 승인 + 가짜 운영 주소(로컬 아님) → exit 2", () =>
+  assertDbItBlocked("db-it 08 remote", "scripts/db-it/08-lot-rule-inspect.ts", { ...CONFIRM, DATABASE_URL: FAKE_REMOTE, DEFAULT_TENANT_ID: "x" }, "로컬"))
+
+check("db-it/with-env.js: 운영 주소면 명령을 실행하지 않고(exit 2), 로컬 *_test 면 실행한다", () => {
+  const run = (extraEnv: Record<string, string>) =>
+    spawnSync(process.execPath, ["scripts/db-it/with-env.js", "node", "-e", "console.log('COMMAND_RAN')"], { // 경로에 공백이 있는 execPath 대신 PATH 의 node 사용(shell 실행)
+      cwd: root,
+      env: minimalEnv(extraEnv),
+      encoding: "utf8",
+      timeout: 120_000,
+    })
+  const blocked = run({ ...OLD_PROD_STYLE, ...CONFIRM })
+  const blockedOut = `${blocked.stdout}${blocked.stderr}`
+  assert.equal(blocked.status, 2, blockedOut.slice(0, 300))
+  assert.ok(!blockedOut.includes("COMMAND_RAN") && !blockedOut.includes("FAKE-PASSWORD-FOR-GUARD-TEST"))
+  const allowed = run({ ...CONFIRM, DATABASE_URL: LOCAL_OK, DEFAULT_TENANT_ID: "t" })
+  assert.equal(allowed.status, 0, `${allowed.stdout}${allowed.stderr}`.slice(0, 300))
+  assert.ok(`${allowed.stdout}`.includes("COMMAND_RAN"))
+})
+
+check("db-it 소스: .env/.env.local 읽기·운영 프로젝트 식별자·tenant 고정값이 코드에 없다", () => {
+  for (const name of dbItFiles) {
+    const code = fs
+      .readFileSync(path.join(root, "scripts/db-it", name), "utf8")
+      .split(/\r?\n/)
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join("\n")
+    assert.ok(!/aquqetajewvhyirmewfy/.test(code), `${name}: 운영 프로젝트 식별자`)
+    assert.ok(!/readFileSync\([^)]*\.env/.test(code) && !/DEFAULT_ENV_FILE|DAEWON_ENV_FILE/.test(code), `${name}: 환경 파일 로딩`)
+    assert.ok(!/process\.env\[[^\]]+\]\s*=\s*m\[/.test(code), `${name}: 파일 값을 환경변수로 올리는 코드`)
+    assert.ok(!/"daewon-001"/.test(code), `${name}: 운영 테넌트 고정`)
+  }
+})
+check("db-it 소스: 모든 스크립트는 가드를 거친다(lib.ts 경유 18개 + 직접 verifyTarget 2개), 가드가 DB 접속 코드보다 먼저", () => {
+  const read = (n: string) => fs.readFileSync(path.join(root, "scripts/db-it", n), "utf8").split("\r\n").join("\n")
+  const viaLib = dbItFiles.filter((n) => /^\d+-.*\.ts$/.test(n) && /from "\.\/lib"/.test(read(n)))
+  const direct = ["00-inspect.ts", "08-lot-rule-inspect.ts"]
+  const numbered = dbItFiles.filter((n) => /^\d+-.*\.ts$/.test(n))
+  assert.equal(viaLib.length + direct.length, numbered.length, "가드를 거치지 않는 db-it 스크립트가 있다: " + numbered.filter((n) => !viaLib.includes(n) && !direct.includes(n)).join(","))
+  const lib = read("lib.ts")
+  const guardAt = lib.indexOf("verifyTarget()\n")
+  const dbAt = Math.min(...["new PrismaClient", 'require("@/lib/db/prisma")', 'require("../../src/lib/db/prisma")', "src/lib/db/prisma"].map((k) => lib.indexOf(k)).filter((i) => i >= 0))
+  assert.ok(guardAt > 0 && guardAt < dbAt, "lib.ts: verifyTarget() 는 DB 모듈 로딩보다 먼저여야 한다")
+  for (const n of direct) {
+    const src = read(n)
+    assert.ok(src.indexOf("verifyTarget()") > 0 && src.indexOf("verifyTarget()") < src.indexOf("new PrismaClient("), `${n}: 가드가 PrismaClient 생성보다 먼저`)
+  }
 })
 
 // ── 4) 실제 .env.local 값으로 시뮬레이션 (메모리에서만, 출력 없음) ─────────────────

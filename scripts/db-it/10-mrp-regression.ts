@@ -1,7 +1,7 @@
 /**
  * MRP 회귀(AI 제거 후) 실제 DB 테스트: AI 서버 액션 부재/외부 AI 호출 0건 + 기존 MRP 기능 정상.
  * 실제 Supabase(대원정밀 테스트 환경) + 앱의 실제 서버 액션. 생성 데이터: 생산계획 ZT6-PP-*, 일반 발주 1건(ZT5-RM-A 품목).
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/10-mrp-regression.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/10-mrp-regression.ts
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"

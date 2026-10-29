@@ -6,7 +6,7 @@ async function main() {
   loadEnv()
   const t = verifyTarget()
   console.log("대상:", JSON.stringify({ projectRef: t.projectRef, database: t.database, tenantId: t.tenantId }))
-  const prisma = new PrismaClient({ datasources: { db: { url: process.env.DIRECT_URL } } })
+  const prisma = new PrismaClient({ datasources: { db: { url: process.env.DIRECT_URL || process.env.DATABASE_URL } } })
   try {
     const tenantId = t.tenantId
     const rules = await prisma.numberingRule.findMany({ where: { tenantId }, include: { sequences: true } })

@@ -1,61 +1,48 @@
 /**
- * 5단계 실제 DB 통합 테스트 공통: 접속 환경 로드와 대상 확인(실행 안전장치).
+ * 실제 DB 통합 테스트(db-it) 공통: 실행 안전장치 — 로컬 테스트 DB 전용.
  *
- * - 접속 정보는 저장소 밖의 .env.local(메인 worktree)에서 프로세스 환경변수로만 읽는다 — 이 worktree 에 복사하거나 출력하지 않는다.
- * - 비밀번호·연결 문자열·키는 어디에도 출력하지 않는다. 호스트/프로젝트 식별자만 요약한다.
- * - 이 스위트는 대원정밀 Supabase 프로젝트에만 실행된다. 아래 세 조건을 모두 만족하지 않으면 실행을 거부한다.
- *     1) DAEWON_DB_IT_CONFIRM 이 기대 프로젝트 식별자와 정확히 같다(명시적 실행 확인 — 설정하지 않으면 DB 에 접근하지 않는다)
- *     2) DATABASE_URL · DIRECT_URL · NEXT_PUBLIC_SUPABASE_URL 이 모두 같은 기대 프로젝트를 가리키고 DB 이름이 postgres 이다
- *     3) DEFAULT_TENANT_ID 가 daewon-001 이다
+ * 이 스위트는 한때 대원정밀 운영(Supabase) DB 에 직접 실행하도록 만들어져 있었다(.env.local 자동 로딩 + 프로젝트 식별자 일치 시 허용).
+ * 실행 확인 값이 비밀이 아니라 스크립트 머리 주석에 그대로 적혀 있어 한 줄만 붙이면 운영 DB 에 시험 데이터를 쓸 수 있는 구조였으므로,
+ * f22-browser-smoke 와 같은 가드(scripts/helpers/local-test-db-guard.ts)로 교체했다.
+ *
+ *  - .env / .env.local 을 읽지 않는다. 접속 정보는 프로세스 환경변수로 직접 지정해야 한다.
+ *  - 아래를 모두 만족하지 않으면 DB 에 연결하기 전에 종료한다(exit 2):
+ *      DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB, DATABASE_URL 이 127.0.0.1/localhost/[::1] 의 `*_test` DB,
+ *      DIRECT_URL 이 있으면 같은 대상, 앱 서버 주소(UI_BASE, 기본 http://localhost:3130)도 로컬, DEFAULT_TENANT_ID 지정.
+ *  - 비밀번호·연결 문자열은 출력하지 않는다.
+ * 운영 DB 에 대해서는 이 스위트를 실행할 수 없다.
  */
-import { readFileSync, existsSync } from "node:fs"
+import { assertLocalTestDbOrExit, checkLocalTestDbUrl } from "../helpers/local-test-db-guard"
 
-export const EXPECTED_PROJECT_REF = "aquqetajewvhyirmewfy"
-export const EXPECTED_DATABASE = "postgres"
-export const EXPECTED_TENANT = "daewon-001"
-export const CONFIRM_VAR = "DAEWON_DB_IT_CONFIRM"
+export const CONFIRM_VAR = "DAEWON_TEST_DB_CONFIRM"
 
-const DEFAULT_ENV_FILE = "C:/Users/Mingrid/Documents/사업/MES/01_REPOS/DAEWON-MES/.env.local"
-
+/** (호환용) 이전에는 .env.local 을 읽었다. 이제는 아무 파일도 읽지 않는다. */
 export function loadEnv(): { file: string } {
-  const file = process.env.DAEWON_ENV_FILE ?? DEFAULT_ENV_FILE
-  if (!existsSync(file)) throw new Error(`환경 파일을 찾을 수 없습니다: ${file}`)
-  for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
-    const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/.exec(line)
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "")
-  }
-  return { file }
+  return { file: "" }
 }
 
-export type DbTarget = { host: string; port: string; database: string; projectRef: string; directProjectRef: string; supabaseHost: string; tenantId: string }
-
-function refOf(url: string | undefined): { host: string; port: string; database: string; projectRef: string } {
-  if (!url) return { host: "", port: "", database: "", projectRef: "" }
-  const u = new URL(url)
-  return { host: u.hostname, port: u.port, database: u.pathname.replace("/", ""), projectRef: decodeURIComponent(u.username).split(".")[1] ?? "" }
-}
+export type DbTarget = { host: string; port: string; database: string; projectRef: string; tenantId: string }
 
 export function describeTarget(): DbTarget {
-  const main = refOf(process.env.DATABASE_URL)
-  const direct = refOf(process.env.DIRECT_URL)
-  const supabaseHost = process.env.NEXT_PUBLIC_SUPABASE_URL ? new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).hostname : ""
-  return { ...main, directProjectRef: direct.projectRef, supabaseHost, tenantId: process.env.DEFAULT_TENANT_ID ?? "" }
+  const main = checkLocalTestDbUrl("DATABASE_URL", process.env.DATABASE_URL)
+  return {
+    host: main.ok ? main.host : "",
+    port: main.ok ? main.port : "",
+    database: main.ok ? main.database : "",
+    projectRef: "local-test-db",
+    tenantId: process.env.DEFAULT_TENANT_ID ?? "",
+  }
 }
 
-/** 대상이 대원정밀 프로젝트가 아니거나 불분명하면 예외를 던진다. 통과해도 접속 정보는 반환하지 않고 식별 정보만 돌려준다. */
+/** 로컬 테스트 DB 가 아니면(또는 승인이 없으면) DB 연결 전에 프로세스를 종료한다. 통과하면 식별 정보만 돌려준다. */
 export function verifyTarget(): DbTarget {
-  if (process.env[CONFIRM_VAR] !== EXPECTED_PROJECT_REF) {
-    throw new Error(`실행 확인이 없어 중단합니다. 대원정밀 DB 에 테스트 데이터를 쓰려면 ${CONFIRM_VAR}=${EXPECTED_PROJECT_REF} 를 명시하세요.`)
+  assertLocalTestDbOrExit("db-it", process.env, { baseUrlVar: "UI_BASE", defaultBaseUrl: "http://localhost:3130" })
+  const target = describeTarget()
+  if (!target.tenantId) {
+    console.error("ABORT [db-it]: DEFAULT_TENANT_ID 가 지정되지 않았습니다.")
+    process.exit(2)
   }
-  const t = describeTarget()
-  const problems: string[] = []
-  if (t.projectRef !== EXPECTED_PROJECT_REF) problems.push("DATABASE_URL 의 프로젝트가 기대값과 다름")
-  if (t.directProjectRef !== EXPECTED_PROJECT_REF) problems.push("DIRECT_URL 의 프로젝트가 기대값과 다르거나 없음")
-  if (t.supabaseHost !== `${EXPECTED_PROJECT_REF}.supabase.co`) problems.push("NEXT_PUBLIC_SUPABASE_URL 이 기대 프로젝트가 아님")
-  if (t.database !== EXPECTED_DATABASE) problems.push("DB 이름이 기대값과 다름")
-  if (t.tenantId !== EXPECTED_TENANT) problems.push("DEFAULT_TENANT_ID 가 기대값과 다름")
-  if (problems.length > 0) throw new Error(`연결 대상이 대원정밀(${EXPECTED_TENANT}) 프로젝트로 확인되지 않아 중단합니다: ${problems.join("; ")}`)
-  return t
+  return target
 }
 
 /** 테스트 POP PIN 은 코드에 두지 않고 환경변수로만 받는다. */

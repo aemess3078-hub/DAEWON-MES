@@ -6,7 +6,7 @@ async function main() {
   loadEnv()
   const t = verifyTarget()
   console.log("대상:", JSON.stringify({ ...t, consistent: true }))
-  const prisma = new PrismaClient({ datasources: { db: { url: process.env.DIRECT_URL } } })
+  const prisma = new PrismaClient({ datasources: { db: { url: process.env.DIRECT_URL || process.env.DATABASE_URL } } })
   try {
     const [info] = await prisma.$queryRaw<Array<{ db: string; schema: string; version: string; user: string }>>`select current_database() as db, current_schema() as schema, version() as version, current_user as user`
     console.log("연결:", JSON.stringify(info))

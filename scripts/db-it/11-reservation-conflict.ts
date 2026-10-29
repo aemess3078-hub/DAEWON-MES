@@ -1,7 +1,7 @@
 /**
  * 예약된 LOT 번호와 수동 LOT 등록 충돌 실제 DB 테스트 (대원정밀 테스트 환경, ZT6 접두 발주/ZT5 품목).
  *  1) 입고 화면에서 자동채번 예약  2) 다른 사용자가 LOT 관리에서 같은 번호를 수동 등록  3) 원래 사용자가 예약 번호로 입고 확정
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/11-reservation-conflict.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/11-reservation-conflict.ts
  */
 import { assertTarget, check, fixtures, loginAs, prisma, summary, TENANT_ID, uniq } from "./lib"
 
