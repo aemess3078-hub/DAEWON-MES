@@ -18,7 +18,8 @@ import {
 } from "@/components/common/form-sheet"
 import { lotFormSchema, LotFormValues } from "./lot-form-schema"
 import { createLot, generateLotNo } from "@/lib/actions/lot.actions"
-import { getRuleContextTokens, generateNumber, getContextCodeOptions } from "@/lib/actions/numbering-rule.actions"
+import { getRuleContextTokens, generateLotNumberForItem, getContextCodeOptions } from "@/lib/actions/numbering-rule.actions"
+import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
 import type { ContextKey } from "@/lib/types/numbering-rule"
 import { CONTEXT_KEY_LABELS } from "@/lib/types/numbering-rule"
 
@@ -97,10 +98,14 @@ export function LotFormSheet({
       if (selectedItem?.code) autoContext.ITEM_CODE = selectedItem.code
       if (selectedItem?.itemType) autoContext.ITEM_TYPE = selectedItem.itemType
 
-      const [contextTokens, codeOptionsMap] = await Promise.all([
+      const [allContextTokens, codeOptionsMap] = await Promise.all([
         getRuleContextTokens(tenantId, "LOT"),
         getContextCodeOptions(tenantId, "LOT"),
       ])
+      // 대원정밀: 품목코드·품목유형은 서버가 선택한 품목의 값으로 채운다 — 입력 단계에서 수정할 수 없다.
+      const contextTokens = isCnsLotRuleAllowed()
+        ? allContextTokens
+        : allContextTokens.filter((t) => t.key !== "ITEM_CODE" && t.key !== "ITEM_TYPE")
 
       if (contextTokens.length > 0) {
         // 컨텍스트 토큰이 있으면 입력 단계 표시
@@ -121,8 +126,12 @@ export function LotFormSheet({
         setContextStep({ tokens: tokensWithAuto, values: initialValues })
       } else {
         // 컨텍스트 토큰 없으면 바로 생성
-        const lotNo = await generateNumber(tenantId, "LOT", autoContext)
-        form.setValue("lotNo", lotNo, { shouldValidate: true })
+        const result = await generateLotNumberForItem(tenantId, itemId, autoContext)
+        if (!result.success) {
+          alert(result.message)
+          return
+        }
+        form.setValue("lotNo", result.lotNo, { shouldValidate: true })
       }
     } catch {
       alert("LOT번호 생성에 실패했습니다.")
@@ -161,8 +170,12 @@ export function LotFormSheet({
       for (const [key, val] of Object.entries(contextStep.values)) {
         if (val.trim()) context[key as ContextKey] = val.trim()
       }
-      const lotNo = await generateNumber(tenantId, "LOT", context)
-      form.setValue("lotNo", lotNo, { shouldValidate: true })
+      const result = await generateLotNumberForItem(tenantId, form.getValues("itemId"), context)
+      if (!result.success) {
+        alert(result.message)
+        return
+      }
+      form.setValue("lotNo", result.lotNo, { shouldValidate: true })
       setContextStep(null)
     } catch {
       alert("LOT번호 생성에 실패했습니다.")

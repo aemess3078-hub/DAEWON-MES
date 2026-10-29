@@ -30,6 +30,7 @@ import {
 import { ReceivingInspectionResult } from "@prisma/client"
 import type { MaterialReceiptOrderRow } from "./material-receipt-data-table"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
+import { buildReceiptLabelPlan, type LabelPlan } from "@/lib/label/label-items"
 import { formatQuantity } from "@/lib/utils"
 import { compareQuantities, isQuantityBalanced, subtractQuantities, toScaledQuantity } from "@/lib/quantity-scale"
 import {
@@ -42,6 +43,9 @@ import {
 } from "@/lib/receiving-batch"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
 import { generateReceivingRequestId } from "@/lib/receiving-request-id"
+import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
+
+const AUTO_LOT_FORMAT_HINT = isCnsLotRuleAllowed() ? "26A01-1 형식으로" : "번호 규칙에 따라"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -123,6 +127,11 @@ export function ReceivingFormDialog({
     return requestIdsRef.current[purchaseOrderItemId]
   }
   const [printOpen, setPrintOpen] = useState(false)
+  // 서버가 입고 성공 응답으로 돌려준 "실제 저장 확인된" LOT 번호(발주품목 id → LOT). 서버가 자동 발행한 LOT 도 여기로 들어온다.
+  // 클라이언트가 번호를 만들지 않는다 — 응답에 lotNo 가 없으면 기존처럼 화면에 입력/예약된 번호만 쓴다.
+  const serverLotNosRef = useRef<Record<string, string>>({})
+  // 입고 확정이 끝난 뒤의 라벨 대상. 이 값이 있어야 실제 인쇄가 가능하다(LOT 가 DB 에 영속화된 뒤에만 QR 라벨 출력).
+  const [confirmedLabels, setConfirmedLabels] = useState<LabelPlan | null>(null)
   const [warehouses, setWarehouses] = useState<Warehouse[]>([])
 
   const [inspections, setInspections] = useState<ItemInspection[]>(() =>
@@ -325,7 +334,7 @@ export function ReceivingFormDialog({
         rowStatus,
         async (row) => {
           const ins = inspections.find((i) => i.purchaseOrderItemId === row.purchaseOrderItemId)!
-          return createReceivingInspection({
+          const response = await createReceivingInspection({
             purchaseOrderItemId: ins.purchaseOrderItemId,
             purchaseOrderId: purchaseOrder.id,
             warehouseId: ins.warehouseId,
@@ -339,6 +348,8 @@ export function ReceivingFormDialog({
             lotNo: ins.lotNo.trim() || undefined,
             lotReservationId: ins.isAutoNumbered ? ins.lotReservationId ?? undefined : undefined,
           })
+          if (response.success && response.lotNo) serverLotNosRef.current[ins.purchaseOrderItemId] = response.lotNo
+          return response
         }
       )
       setRowStatus(outcome.statuses)
@@ -357,6 +368,24 @@ export function ReceivingFormDialog({
       if (outcome.newlyDone.length > 0 || outcome.stoppedAt) router.refresh()
       if (outcome.allDone) {
         releaseAllTrackedReservations()
+        // 확정된 LOT 의 QR 라벨을 바로 출력할 수 있게 한다(LOT 번호가 확정된 품목만). 라벨 창을 닫으면 입고 창도 닫힌다.
+        const plan = buildReceiptLabelPlan(
+          inspections.map((ins) => ({
+            itemCode: ins.itemCode,
+            itemName: ins.itemName,
+            uom: ins.uom,
+            isLotTracked: ins.isLotTracked,
+            // 서버가 확인해 돌려준 LOT 가 있으면 그 번호(서버 자동 발행 포함), 없으면 화면에 입력/예약된 번호(수동 입력 LOT)
+            lotNo: serverLotNosRef.current[ins.purchaseOrderItemId] ?? ins.lotNo,
+            receivedQty: parseFloat(ins.thisReceivedQty) || 0,
+            acceptedQty: parseFloat(ins.thisAcceptedQty) || 0,
+          })),
+        )
+        if (plan.items.length > 0) {
+          setConfirmedLabels(plan)
+          setPrintOpen(true)
+          return
+        }
         onClose()
         return
       }
@@ -384,6 +413,22 @@ export function ReceivingFormDialog({
   // 라벨 출력 대상: 금회 입고수량 > 0인 품목만. LOT 관리 품목은 lotNo가 있어야 출력 가능.
   const printableItems = inspections.filter((ins) => (parseFloat(ins.thisReceivedQty) || 0) > 0)
   const hasMissingLotForPrint = printableItems.some((ins) => ins.isLotTracked && !ins.lotNo.trim())
+  // 확정 전 미리보기: LOT 번호가 있는 LOT 관리 품목만 라벨이 되고, 나머지는 사유와 함께 안내한다(버튼을 막지 않는다).
+  const previewPlan = buildReceiptLabelPlan(
+    printableItems.map((ins) => ({
+      itemCode: ins.itemCode,
+      itemName: ins.itemName,
+      uom: ins.uom,
+      isLotTracked: ins.isLotTracked,
+      lotNo: ins.lotNo,
+      receivedQty: parseFloat(ins.thisReceivedQty) || 0,
+      acceptedQty: parseFloat(ins.thisAcceptedQty) || 0,
+    })),
+  )
+  const labelPlan = confirmedLabels ?? previewPlan
+
+  // LOT QR 라벨의 "실제 출력"은 입고 확정(Lot 행 영속화) 이후에만 가능하다. 확정 전에는 미리보기 전용이다.
+  const isConfirmedPrint = confirmedLabels !== null
 
   // "바코드 라벨 출력" 버튼은 미리보기 다이얼로그만 연다 — 이 시점에는 번호를 소모하지 않는다.
   // 실제 번호 소모(printedAt 기록)는 BarcodePrintDialog 내부의 진짜 "인쇄" 버튼을 누를 때
@@ -535,7 +580,9 @@ export function ReceivingFormDialog({
                             ? "공급사 LOT 번호를 입력하세요"
                             : policy === "DISABLED"
                               ? "자동 발행됩니다"
-                              : "자동 생성 예: 26A01-1 / 공급사 LOT 직접 입력 가능"
+                              : isCnsLotRuleAllowed()
+                                ? "자동 생성 예: 26A01-1 / 공급사 LOT 직접 입력 가능"
+                                : "자동채번 또는 공급사 LOT 직접 입력"
                         }
                         className="h-8 text-[13px] font-mono flex-1"
                       />
@@ -570,12 +617,12 @@ export function ReceivingFormDialog({
                         )}
                         {policy === "DISABLED" && (
                           <p className="text-[12px] text-muted-foreground">
-                            26A01-1 형식으로 자동 발행됩니다. 이 품목은 직접 입력을 지원하지 않습니다.
+                            {AUTO_LOT_FORMAT_HINT} 자동 발행됩니다. 이 품목은 직접 입력을 지원하지 않습니다.
                           </p>
                         )}
                         {policy === "AUTO" && !ins.lotNo && (
                           <p className="text-[12px] text-muted-foreground">
-                            미입력 시 26A01-1 형식으로 자동 발행됩니다. 공급사 LOT가 있으면 직접 입력할 수 있습니다.
+                            미입력 시 {AUTO_LOT_FORMAT_HINT} 자동 발행됩니다. 공급사 LOT가 있으면 직접 입력할 수 있습니다.
                           </p>
                         )}
                       </>
@@ -727,13 +774,13 @@ export function ReceivingFormDialog({
               type="button"
               variant="outline"
               onClick={() => setPrintOpen(true)}
-              disabled={printableItems.length === 0 || hasMissingLotForPrint}
+              disabled={printableItems.length === 0}
             >
-              바코드 라벨 출력
+              LOT 라벨 미리보기
             </Button>
             {hasMissingLotForPrint && (
-              <p className="text-[11px] text-muted-foreground">
-                LOT 번호를 직접 입력하거나 자동채번한 후 라벨을 출력하세요.
+              <p className="text-[12px] text-muted-foreground">
+                LOT 번호가 없는 LOT 관리 품목은 라벨 대상에서 제외됩니다. 번호를 직접 입력하거나 자동채번하세요.
               </p>
             )}
           </div>
@@ -761,16 +808,32 @@ export function ReceivingFormDialog({
       {/* 바코드 라벨 출력 다이얼로그 */}
       <BarcodePrintDialog
         open={printOpen}
-        onOpenChange={setPrintOpen}
-        title={`바코드 라벨 — ${purchaseOrder.orderNo}`}
-        items={printableItems.map((ins) => ({
-          itemCode: ins.itemCode,
-          itemName: ins.itemName,
-          lotNo: ins.isLotTracked ? ins.lotNo.trim() || undefined : undefined,
-          quantity: parseFloat(ins.thisReceivedQty) || ins.pendingQty,
-          uom: ins.uom,
+        onOpenChange={(next) => {
+          setPrintOpen(next)
+          if (!next && isConfirmedPrint) {
+            // 확정 후 라벨 창을 닫으면 입고 창도 닫는다(중복 입고 방지).
+            setConfirmedLabels(null)
+            onClose()
+          }
+        }}
+        title={`LOT 라벨 — ${purchaseOrder.orderNo}`}
+        printBlockedReason={
+          isConfirmedPrint
+            ? undefined
+            : "입고 확정 후 LOT QR 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다(확정 전에 출력한 라벨은 입고 실패/취소 시 현장에 남을 수 있습니다)."
+        }
+        items={labelPlan.items.map((l) => ({
+          labelType: l.labelType, // 원자재 LOT 라벨(RAW_LOT) — 유형 칩 표시
+          itemCode: l.itemCode,
+          itemName: l.itemName,
+          lotNo: l.lotNo,
+          dateLabel: l.dateLabel,
+          quantity: l.quantity,
+          uom: l.uom,
         }))}
-        onBeforePrint={handleBeforePrint}
+        notices={labelPlan.notices}
+        testCandidates={isConfirmedPrint ? undefined : previewPlan.candidates}
+        onBeforePrint={isConfirmedPrint ? undefined : handleBeforePrint}
       />
     </Dialog>
   )

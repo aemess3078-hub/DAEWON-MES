@@ -6,6 +6,15 @@ import type { Token, ContextKey } from "@/lib/types/numbering-rule"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
+import { assertSessionTenant, requireLotEntryReader } from "@/lib/lot-numbering/lot-session-access"
+import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
+import { toUserErrorMessage } from "@/lib/errors/user-error"
+import { computeNextTenantRuleLotNo, parseLotRuleTokens } from "@/lib/lot-numbering/tenant-lot-rule"
+
+/** 번호 규칙 type 검증(지원: LOT, SERIAL). */
+function assertNumberingType(type: unknown): void {
+  if (type !== "LOT" && type !== "SERIAL") throw new Error("지원하지 않는 번호 유형입니다.")
+}
 
 // ─── 규칙 조회 ────────────────────────────────────────────────────────────────
 
@@ -35,6 +44,9 @@ export async function upsertNumberingRule(
 ) {
   await assertDeveloperOnly()
   await requireResourcePermission("LOT", "UPDATE")
+  assertNumberingType(type)
+  // LOT 규칙은 자동 발행에 쓰이므로 순번 토큰이 정확히 하나인 규칙만 저장한다(저장 후에야 발행 오류로 알게 되는 일을 막는다).
+  if (type === "LOT") parseLotRuleTokens(tokens)
   await prisma.numberingRule.upsert({
     where: { tenantId_type: { tenantId, type } },
     update: { tokens: tokens as any },
@@ -57,9 +69,14 @@ export async function getCodeGroupsForBuilder(tenantId: string) {
 // ─── 컨텍스트 토큰 목록 조회 ─────────────────────────────────────────────────
 
 export async function getRuleContextTokens(
-  tenantId: string,
+  clientTenantId: string,
   type: "LOT" | "SERIAL"
 ): Promise<Array<{ key: ContextKey; fallback?: string; codeGroupCode?: string }>> {
+  // LOT 등록 시트의 자동 채번 단계 — 로그인 · LOT 조회/등록 권한 확인, tenant 는 세션 값(클라이언트 값은 일치 여부만 확인).
+  // 개발자 전용 가드는 일반 LOT 사용자의 등록을 막으므로 쓰지 않는다. 조회만 하며 시퀀스는 건드리지 않는다.
+  const { tenantId } = await requireLotEntryReader()
+  assertSessionTenant(clientTenantId, tenantId)
+  assertNumberingType(type)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
@@ -79,9 +96,13 @@ export async function getRuleContextTokens(
 // ─── LOT 등록용 컨텍스트 코드 옵션 조회 ──────────────────────────────────────
 
 export async function getContextCodeOptions(
-  tenantId: string,
+  clientTenantId: string,
   type: "LOT" | "SERIAL"
 ): Promise<Record<string, { code: string; name: string }[]>> {
+  // getRuleContextTokens 와 같은 확인(로그인 · LOT 조회/등록 권한 · 세션 tenant). 규칙과 공통코드는 세션 tenant 의 것만 조회한다.
+  const { tenantId } = await requireLotEntryReader()
+  assertSessionTenant(clientTenantId, tenantId)
+  assertNumberingType(type)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
@@ -148,13 +169,64 @@ function resolveDateToken(format: string, date: Date): string {
 
 // ─── 번호 생성 ────────────────────────────────────────────────────────────────
 
-export async function generateNumber(
-  tenantId: string,
-  type: "LOT" | "SERIAL",
+/**
+ * LOT 등록 화면용 자동생성. Server Action 이 throw 한 메시지는 프로덕션에서 지워지므로
+ * 업무 안내(규칙 미설정 등)가 화면에 보이도록 결과 객체로 돌려준다.
+ */
+export async function generateLotNumberForItem(
+  clientTenantId: string,
+  itemId: string,
   context?: Partial<Record<ContextKey, string>>
+): Promise<{ success: true; lotNo: string } | { success: false; message: string }> {
+  try {
+    const lotNo = await generateNumber(clientTenantId, "LOT", context, itemId)
+    return { success: true, lotNo }
+  } catch (error) {
+    console.error("[generateLotNumberForItem] error:", error)
+    return {
+      success: false,
+      message: toUserErrorMessage(error, { fallback: "LOT번호 생성에 실패했습니다. 잠시 후 다시 시도해 주세요." }),
+    }
+  }
+}
+
+const CONTEXT_KEYS: readonly string[] = ["LINE_CODE", "PROD_CODE", "CLIENT_CODE", "ITEM_CODE", "ITEM_TYPE", "SHIFT"]
+const MAX_CONTEXT_VALUE_LENGTH = 100
+
+/**
+ * 번호 생성 context 검증: 알려진 키만, 값은 문자열(길이 제한). 비어 있는(undefined/null) 값은 없는 것으로 본다.
+ * context 는 번호 토큰(CONTEXT)을 채우는 표시용 문자열일 뿐 tenant·규칙·시퀀스를 고르는 데 쓰이지 않는다 — 식별자(id)를 담지 않는다.
+ */
+function sanitizeNumberContext(context: unknown): Partial<Record<ContextKey, string>> | undefined {
+  if (context === undefined || context === null) return undefined
+  if (typeof context !== "object" || Array.isArray(context)) throw new Error("번호 생성 정보가 올바르지 않습니다.")
+  const result: Partial<Record<ContextKey, string>> = {}
+  for (const [key, value] of Object.entries(context as Record<string, unknown>)) {
+    if (value === undefined || value === null) continue
+    if (!CONTEXT_KEYS.includes(key) || typeof value !== "string" || value.length > MAX_CONTEXT_VALUE_LENGTH) {
+      throw new Error("번호 생성 정보가 올바르지 않습니다.")
+    }
+    result[key as ContextKey] = value
+  }
+  return result
+}
+
+export async function generateNumber(
+  clientTenantId: string,
+  type: "LOT" | "SERIAL",
+  rawContext?: Partial<Record<ContextKey, string>>,
+  /** LOT 등록 화면에서 선택한 품목. 있으면 품목코드·품목유형은 클라이언트 값이 아니라 서버의 품목 데이터를 쓴다. */
+  itemId?: string
 ): Promise<string> {
-  // 시퀀스를 증가시키는 쓰기 동작 — LOT 등록 권한이 있는 사용자만
-  await requireResourcePermission("LOT", "CREATE")
+  // 시퀀스를 증가시키는 쓰기 동작 — LOT 등록 권한이 있는 사용자만(기존 정책 유지: LOT/SERIAL 모두 LOT CREATE).
+  // 현재 호출처는 LOT 등록 시트(type "LOT")뿐이다. SERIAL 은 호출처가 없고 권한 정책이 별도로 확정되지 않아 기존 권한을 그대로 적용한다.
+  const actor = await requireResourcePermission("LOT", "CREATE")
+  // tenant 는 세션 값만 쓰고(getTenantId 의 개발용 대체값은 쓰지 않는다), 클라이언트가 보낸 tenantId 가 다르면 거부한다.
+  if (typeof clientTenantId !== "string" || clientTenantId !== actor.tenantId) throw new Error("이 기능을 사용할 권한이 없습니다.")
+  const tenantId = actor.tenantId
+  // 규칙 조회와 시퀀스 증가 전에 모든 입력 검증을 끝낸다(거부된 요청은 시퀀스를 올리지 않는다).
+  if (type !== "LOT" && type !== "SERIAL") throw new Error("지원하지 않는 번호 유형입니다.")
+  const context = sanitizeNumberContext(rawContext)
   let rule
   try {
     rule = await prisma.numberingRule.findUnique({
@@ -163,6 +235,23 @@ export async function generateNumber(
   } catch (error) {
     if (!isMissingDbObjectError(error)) throw error
     rule = null
+  }
+
+  // 대원정밀: LOT 번호는 입고·완제품 입고와 같은 발행 원장(Lot ∪ LotNumberReservation)에서 순번을 계산한다.
+  // NumberingSequence 카운터를 따로 쓰면 다른 경로가 만든 번호와 중복되고, 미리보기만으로도 순번이 소비된다.
+  // 규칙이 없거나 비활성이면 기본 번호를 만들지 않고 안내 오류를 낸다.
+  if (type === "LOT" && !isCnsLotRuleAllowed()) {
+    if (itemId !== undefined && typeof itemId !== "string") throw new Error("번호 생성 정보가 올바르지 않습니다.")
+    const item = itemId
+      ? await prisma.item.findFirst({ where: { id: itemId, tenantId }, select: { code: true, itemType: true, lotNumberingType: true } })
+      : null
+    if (itemId && !item) throw new Error("품목을 찾을 수 없습니다.")
+    return computeNextTenantRuleLotNo(prisma, tenantId, {
+      itemCode: item?.code,
+      itemType: item?.itemType,
+      lotNumberingType: item?.lotNumberingType,
+      extra: context,
+    })
   }
 
   if (!rule || !rule.isActive) {

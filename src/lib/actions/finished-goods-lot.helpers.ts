@@ -1,6 +1,8 @@
 import { Prisma, type Lot } from "@prisma/client"
 import { generateCnsFinishedGoodsLotNo } from "@/lib/lot-numbering/lot-number-generator"
 import type { CnsItemRuleContext } from "@/lib/lot-numbering/lot-rule-resolver"
+import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
+import { computeNextTenantRuleLotNo } from "@/lib/lot-numbering/tenant-lot-rule"
 
 export type FinishedGoodsLotTx = Prisma.TransactionClient
 
@@ -123,7 +125,10 @@ export async function createFinishedGoodsLot(
           workOrder.itemId,
           forceNewLot ?? false,
         )
-      : await generateCnsFinishedGoodsLotNo(tx, tenantId, itemContext, new Date(), attempt)
+      : isCnsLotRuleAllowed()
+        ? await generateCnsFinishedGoodsLotNo(tx, tenantId, itemContext, new Date(), attempt)
+        // 대원정밀: 제조번호가 없는 완제품 LOT 는 번호 규칙 관리의 LOT 규칙으로 발행한다(CNS 규칙 미적용).
+        : await computeNextTenantRuleLotNo(tx, tenantId, itemContext, new Date(), attempt, { serialize: true })
 
     try {
       return await tx.lot.create({

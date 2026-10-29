@@ -37,7 +37,7 @@ import {
 import { WorkOrderStatus } from "@prisma/client"
 import { formatQuantity } from "@/lib/utils"
 import {
-  DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE,
+  DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE,
   isCnsLotRuleAllowed,
 } from "@/lib/lot-numbering/lot-brand-guard"
 
@@ -481,7 +481,7 @@ export function WorkOrderFormSheet({
                 mode === "create"
                   ? autoManufacturingNoAvailable
                     ? "비워두면 품목 설정에 따라 자동 발행됩니다. 직접 입력도 가능합니다."
-                    : DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE
+                    : DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE
                   : "이미 발행된 제조번호를 비우면 추적성 조회가 어려워질 수 있습니다."
               }
             />

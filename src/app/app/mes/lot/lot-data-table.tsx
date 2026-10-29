@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button"
 import { DataTable } from "@/components/common/data-table"
 import { getColumns } from "./columns"
 import { LotFormSheet } from "./lot-form-sheet"
+import { LotLabelReprintDialog } from "./lot-label-reprint-dialog"
 import { LotWithDetails, updateLotStatus } from "@/lib/actions/lot.actions"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -23,6 +24,8 @@ interface LotDataTableProps {
 export function LotDataTable({ data, items, tenantId }: LotDataTableProps) {
   const router = useRouter()
   const [formOpen, setFormOpen] = useState(false)
+  const [labelLot, setLabelLot] = useState<{ id: string; lotNo: string } | null>(null)
+  const [labelOpen, setLabelOpen] = useState(false)
 
   const handleStatusChange = async (lot: LotWithDetails, status: string) => {
     const LOT_STATUS_LABELS: Record<string, string> = {
@@ -47,7 +50,13 @@ export function LotDataTable({ data, items, tenantId }: LotDataTableProps) {
     }
   }
 
-  const columns = getColumns({ onStatusChange: handleStatusChange })
+  const columns = getColumns({
+    onStatusChange: handleStatusChange,
+    onPrintLabel: (lot) => {
+      setLabelLot({ id: lot.id, lotNo: lot.lotNo })
+      setLabelOpen(true)
+    },
+  })
 
   const filterableColumns = [
     {
@@ -101,6 +110,8 @@ export function LotDataTable({ data, items, tenantId }: LotDataTableProps) {
         open={formOpen}
         onOpenChange={setFormOpen}
       />
+
+      <LotLabelReprintDialog lot={labelLot} open={labelOpen} onOpenChange={setLabelOpen} />
     </div>
   )
 }

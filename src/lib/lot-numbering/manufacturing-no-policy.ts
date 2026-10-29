@@ -18,7 +18,7 @@
  *  5. 번호 없음: 자동 발행 대상(blankMeansAuto)이면 가능 시 AUTO, 불가 시 오류 / 아니면 NONE(번호 없이 저장)
  */
 
-import { DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE } from "./lot-brand-guard"
+import { DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE } from "./lot-brand-guard"
 
 export const MANUFACTURING_NO_REQUIRED_MESSAGE = "제조번호를 직접 입력해야 하는 품목입니다."
 export const MANUFACTURING_NO_POLICY_CONFLICT_MESSAGE =
@@ -56,5 +56,5 @@ export function decideManufacturingNo(params: {
   if (!params.blankMeansAuto) return { kind: "NONE" }
   return params.autoAllowed
     ? { kind: "AUTO" }
-    : { kind: "ERROR", message: DAEWON_LOT_RULE_NOT_CONFIGURED_MESSAGE }
+    : { kind: "ERROR", message: DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE }
 }

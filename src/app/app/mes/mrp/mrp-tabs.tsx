@@ -46,7 +46,7 @@ export function MrpTabs({ plans, tenantId, siteId }: Props) {
         <div>
           <h2 className="text-[20px] font-semibold">생산계획 기반 자재소요량</h2>
           <p className="text-[14px] text-muted-foreground mt-1">
-            생산계획 기반 BOM 전개 → 자재 소요량 계산 → AI 발주 제안
+            생산계획 기반 BOM 전개 → 자재 소요량 계산 → 발주 제안
           </p>
         </div>
         <MrpDashboard plans={plans} tenantId={tenantId} siteId={siteId} />

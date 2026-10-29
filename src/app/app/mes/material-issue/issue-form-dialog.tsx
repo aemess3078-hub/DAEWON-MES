@@ -32,8 +32,10 @@ import { formatQuantity } from "@/lib/utils"
 function isLotManaged(item: MaterialRequirement["item"]): boolean {
   return item.isLotTracked || item.itemType === "SEMI_FINISHED"
 }
-import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
+import { buildIssueLabelPlan, type LabelPlan } from "@/lib/label/label-items"
+import { LotQrScanSection } from "./lot-qr-scan-section"
+import { applyScannedLot, type ApplyScannedLotResult } from "@/lib/material-issue/lot-scan"
 
 // ── 다중 LOT 분할 행 타입 ─────────────────────────────────────────────────────
 
@@ -68,8 +70,14 @@ export function IssueFormDialog({
   const [lotStockMap, setLotStockMap] = useState<Record<string, LotStockOption[]>>({})
   const [lotLoadingMap, setLotLoadingMap] = useState<Record<string, boolean>>({})
   const [printOpen, setPrintOpen] = useState(false)
+  // 출고 확정(서버 처리 성공) 직후의 라벨 대상 스냅샷. 이 값이 있어야 실제 LOT 라벨을 출력할 수 있다.
+  // 출고 후 router.refresh() 로 화면 데이터가 바뀌어도 확정 당시의 LOT/수량으로 출력한다.
+  const [confirmedIssuePlan, setConfirmedIssuePlan] = useState<LabelPlan | null>(null)
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  // QR 스캔 결과 반영(비동기 조회 뒤)이 최신 LOT 행을 보도록 ref 로 미러링한다.
+  const lotSplitsRef = useRef(lotSplitsMap)
+  lotSplitsRef.current = lotSplitsMap
 
   const pendingMaterials = workOrder?.materials.filter((material) => material.pendingQty > 0) ?? []
 
@@ -165,15 +173,25 @@ export function IssueFormDialog({
     setWarehouseMap((prev) => ({ ...prev, [itemId]: nextWarehouseId }))
   }
 
-  function handleScan(parsed: ParsedBarcode) {
-    const matched = pendingMaterials.find((material) => material.item.code === parsed.itemCode)
-    if (!matched) {
-      alert(`품목 코드 "${parsed.itemCode}"가 이 작업지시의 출고 원자재에 없습니다.`)
-      return
-    }
-    setHighlightedItemId(matched.itemId)
-    rowRefs.current[matched.itemId]?.scrollIntoView({ behavior: "smooth", block: "center" })
+  /**
+   * QR 스캔으로 서버가 확인한 LOT 를 기존 LOT 선택 행에 반영한다(수동 선택과 같은 lotSplitsMap 구조).
+   * LOT 선택만 반영하고 출고 수량은 정하지 않는다 — 출고는 사용자가 [출고 처리]를 눌러야 수행된다.
+   */
+  const handleScannedLot = (itemId: string, option: LotStockOption): ApplyScannedLotResult => {
+    const makeKey = () => `${itemId}-qr-${Date.now()}`
+    const emptyRow = (): LotSplitRow[] => [{ key: `${itemId}-0`, lotValue: "", qty: "" }]
+    const { outcome, qty } = applyScannedLot(lotSplitsRef.current[itemId] ?? emptyRow(), option, makeKey)
+    if (outcome === "ALREADY_SELECTED") return { outcome, qty }
+    // 수동 선택 UI 의 LOT 목록에도 이 재고가 있어야 선택 상자가 값을 표시한다(이미 있으면 그대로)
+    setLotStockMap((prev) => {
+      const list = prev[itemId] ?? []
+      return list.some((l) => l.lotId === option.lotId && l.warehouseId === option.warehouseId) ? prev : { ...prev, [itemId]: [...list, option] }
+    })
+    setLotSplitsMap((prev) => ({ ...prev, [itemId]: applyScannedLot(prev[itemId] ?? emptyRow(), option, makeKey).splits }))
+    setHighlightedItemId(itemId)
+    rowRefs.current[itemId]?.scrollIntoView({ behavior: "smooth", block: "center" })
     setTimeout(() => setHighlightedItemId(null), 3000)
+    return { outcome, qty }
   }
 
   const handleOpen = (nextOpen: boolean) => {
@@ -183,6 +201,7 @@ export function IssueFormDialog({
       setLotSplitsMap({})
       setLotStockMap({})
       setLotLoadingMap({})
+      setConfirmedIssuePlan(null)
     }
     onOpenChange(nextOpen)
   }
@@ -238,6 +257,10 @@ export function IssueFormDialog({
       for (const row of splits) {
         if (!row.lotValue || !(Number(row.qty) > 0)) continue
         const lot = getLotFromSplitRow(material.itemId, row)
+        if (lot?.issueBlockReason) {
+          alert(`${material.item.name} / ${lot.lotNo}: ${lot.issueBlockReason}`)
+          return
+        }
         if (lot && Number(row.qty) > lot.qtyAvailable) {
           alert(`${material.item.name} / ${lot.lotNo}: 출고수량(${row.qty})이 LOT 가용재고(${lot.qtyAvailable})를 초과합니다.`)
           return
@@ -294,6 +317,12 @@ export function IssueFormDialog({
           return
         }
         router.refresh()
+        // 출고가 확정되었으므로 확정 당시 선택한 LOT 별 QR 라벨을 바로 출력할 수 있게 한다(라벨 창을 닫으면 출고 창도 닫힘).
+        if (issueLabelPlan.items.length > 0) {
+          setConfirmedIssuePlan(issueLabelPlan)
+          setPrintOpen(true)
+          return
+        }
         handleOpen(false)
       })
     } catch (error) {
@@ -334,6 +363,25 @@ export function IssueFormDialog({
       .filter((s): s is { itemName: string; lotNo: string; warehouseName: string; qty: number; unit: string } => s !== null)
   })
 
+  // ── 출고 LOT 라벨 ────────────────────────────────────────────────────────────
+  // 선택한 원자재 LOT 별 QR 라벨. LOT 분할 출고는 분할행마다 그 행의 출고수량으로 1장씩 만든다.
+  // LOT 관리 품목이 아니거나 LOT 가 선택되지 않은 항목은 임의 QR/LOT 번호 없이 사유(notices)로만 안내한다.
+  const issueLabelPlan = buildIssueLabelPlan(
+    pendingMaterials.map((material) => ({
+      itemId: material.itemId,
+      itemCode: material.item.code,
+      itemName: material.item.name,
+      uom: material.item.uom,
+      lotManaged: isLotManaged(material.item),
+      issueQty: Number(qtyMap[material.itemId] ?? material.pendingQty),
+    })),
+    lotSplitsMap,
+    (itemId, lotValue) => {
+      const lot = lotStockMap[itemId]?.find((l) => getLotSelectValue(l) === lotValue)
+      return lot ? { key: lotValue, lotNo: lot.lotNo } : null
+    },
+  )
+
   // ── 렌더 ─────────────────────────────────────────────────────────────────────
 
   return (
@@ -344,14 +392,6 @@ export function IssueFormDialog({
         </DialogHeader>
 
         <div className="max-h-[70vh] space-y-4 overflow-y-auto py-2">
-          <div className="space-y-1">
-            <p className="text-[13px] font-medium text-muted-foreground">바코드 스캔</p>
-            <BarcodeScanInput
-              onScan={handleScan}
-              placeholder="자재 바코드를 스캔하면 해당 행으로 이동합니다."
-            />
-          </div>
-
           <div className="rounded-lg bg-muted/50 p-3">
             <div className="grid grid-cols-1 gap-3 text-[14px] md:grid-cols-3">
               <div>
@@ -373,10 +413,26 @@ export function IssueFormDialog({
           </div>
 
           <div className="space-y-2">
-            <div className="text-[14px] font-medium">출고 자재 목록</div>
+            {pendingMaterials.some((material) => isLotManaged(material.item)) ? (
+              // [QR 스캔]: 기존 LOT 선택(아래 자재별 LOT 행) 옆의 선택적 편의 기능. QR 없이도 모든 출고 업무를 수동으로 할 수 있다.
+              <LotQrScanSection
+                workOrderId={workOrder.id}
+                materials={workOrder.materials.map((material) => ({
+                  itemId: material.itemId,
+                  pendingQty: material.pendingQty,
+                  lotManaged: isLotManaged(material.item),
+                }))}
+                disabled={isPending || confirmedIssuePlan !== null}
+                title="출고 자재 목록"
+                onSelectLot={handleScannedLot}
+                isLotSelected={(itemId, lotId) => (lotSplitsRef.current[itemId] ?? []).some((row) => row.lotValue.startsWith(`${lotId}:`))}
+              />
+            ) : (
+              <div className="text-[14px] font-medium">출고 자재 목록</div>
+            )}
             <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-800">
-              현재 출고 가능한 LOT만 표시됩니다. LOT 미지정 재고는 LOT 추적성 기준상
-              출고 대상에서 제외되며, 관리자에게 재고 정리를 요청하세요.
+              LOT가 지정된 재고만 출고할 수 있습니다. 격리·보류·소진·만료 LOT는 목록에 표시되지만 선택할 수 없습니다.
+              LOT 미지정 재고는 LOT 추적성 기준상 출고 대상에서 제외되며, 관리자에게 재고 정리를 요청하세요.
             </p>
 
             {pendingMaterials.length === 0 ? (
@@ -475,8 +531,16 @@ export function IssueFormDialog({
                                               return val === row.lotValue || !usedLotIds.has(l.lotId)
                                             })
                                             .map((lotStock) => (
-                                              <SelectItem key={getLotSelectValue(lotStock)} value={getLotSelectValue(lotStock)} className="text-[13px]">
+                                              <SelectItem
+                                                key={getLotSelectValue(lotStock)}
+                                                value={getLotSelectValue(lotStock)}
+                                                className="text-[13px]"
+                                                // 격리·보류·소진·만료 LOT 는 선택할 수 없다(서버도 출고 확정에서 같은 규칙으로 거부한다)
+                                                disabled={Boolean(lotStock.issueBlockReason)}
+                                                title={lotStock.issueBlockReason ?? undefined}
+                                              >
                                                 {lotStock.lotNo} / [{lotStock.warehouseCode}] / 가용 {formatQuantity(lotStock.qtyAvailable)} {lotStock.unit}
+                                                {lotStock.issueBlockReason ? ` — 출고 불가(${lotStock.issueBlockLabel ?? "제한"})` : ""}
                                               </SelectItem>
                                             ))
                                         ) : (
@@ -486,6 +550,11 @@ export function IssueFormDialog({
                                         )}
                                       </SelectContent>
                                     </Select>
+                                    {lotOptions.some((l) => l.issueBlockReason) && (
+                                      <p className="mt-0.5 text-[13px] text-amber-700" data-testid="issue-lot-blocked-note">
+                                        격리·보류·소진·만료 LOT 는 출고할 수 없어 선택할 수 없습니다. 항목에 마우스를 올리면 사유가 표시됩니다.
+                                      </p>
+                                    )}
                                     {rowLot && (
                                       <p className="mt-0.5 text-[11px] text-muted-foreground">
                                         [{rowLot.warehouseCode}] {rowLot.warehouseName} · 가용 {formatQuantity(rowLot.qtyAvailable)}
@@ -710,14 +779,14 @@ export function IssueFormDialog({
             className="mr-auto"
             disabled={pendingMaterials.length === 0}
           >
-            바코드 라벨 출력
+            LOT 라벨 출력
           </Button>
           <Button variant="outline" onClick={() => handleOpen(false)} disabled={isPending}>
             취소
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={isPending || pendingMaterials.length === 0}
+            disabled={isPending || pendingMaterials.length === 0 || confirmedIssuePlan !== null}
           >
             {isPending ? "처리 중..." : "출고 처리"}
           </Button>
@@ -726,15 +795,28 @@ export function IssueFormDialog({
 
       <BarcodePrintDialog
         open={printOpen}
-        onOpenChange={setPrintOpen}
-        title={`출고 자재 라벨 - ${workOrder.orderNo}`}
-        items={pendingMaterials.map((material) => ({
-          itemCode: material.item.code,
-          itemName: material.item.name,
-          quantity: isLotManaged(material.item)
-            ? getLotSplitTotal(material.itemId)
-            : Number(qtyMap[material.itemId] ?? material.pendingQty),
-          uom: material.item.uom,
+        onOpenChange={(next) => {
+          setPrintOpen(next)
+          // 출고가 확정된 뒤 라벨 창을 닫으면 출고 창도 닫는다(중복 출고 방지).
+          if (!next && confirmedIssuePlan) handleOpen(false)
+        }}
+        title={`출고 자재 LOT 라벨 - ${workOrder.orderNo}`}
+        purpose="ISSUE"
+        context={`출고 ${workOrder.orderNo}`}
+        printBlockedReason={
+          confirmedIssuePlan
+            ? undefined
+            : "출고 확정 후 LOT 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다(시험용 라벨은 지금도 출력할 수 있습니다)."
+        }
+        notices={(confirmedIssuePlan ?? issueLabelPlan).notices}
+        testCandidates={confirmedIssuePlan ? undefined : issueLabelPlan.candidates}
+        items={(confirmedIssuePlan ?? issueLabelPlan).items.map((l) => ({
+          itemCode: l.itemCode,
+          itemName: l.itemName,
+          lotNo: l.lotNo,
+          dateLabel: l.dateLabel,
+          quantity: l.quantity,
+          uom: l.uom,
         }))}
       />
     </Dialog>

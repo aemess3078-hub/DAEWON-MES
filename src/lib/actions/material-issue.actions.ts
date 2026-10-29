@@ -6,13 +6,18 @@ import { revalidatePath } from "next/cache"
 import type { WipUnit } from "@prisma/client"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import {
+  lockLotForShare,
   lockWorkOrderForUpdate,
   withQuantityTransactionRetry,
 } from "@/lib/quantity-concurrency"
+import { requireMaterialIssueReader, resolveLotStockReader } from "@/lib/material-issue/lot-read-access"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { OUTCOME_UNKNOWN_MESSAGE, isOutcomeUnknownError, toUserErrorMessage } from "@/lib/errors/user-error"
 import { safeRevalidate } from "@/lib/revalidate-safe"
 import { toScaledQuantity, QUANTITY_SCALE } from "@/lib/quantity-scale"
+import { evaluateLotIssueEligibility, lotIssueBlockedMessage } from "@/lib/material-issue/lot-eligibility"
+
+const RESERVATION_MISMATCH_MESSAGE = "자재예약 정보가 올바르지 않습니다. 화면을 새로고침한 뒤 다시 시도해 주세요."
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -34,6 +39,10 @@ export type LotStockOption = {
   warehouseName: string
   qtyAvailable: number
   unit: string
+  /** 출고 제한 사유(격리·보류·소진·만료·유효기간 경과). 없으면 출고 가능. 화면은 제한 LOT 를 선택 불가로 표시한다. */
+  issueBlockReason?: string | null
+  /** 제한 사유의 짧은 표시(예: "격리") */
+  issueBlockLabel?: string | null
 }
 
 export type WorkOrderForIssue = {
@@ -84,8 +93,10 @@ export type IssueMaterialInput = {
 // ─── 자재출고 대상 WorkOrder 조회 ─────────────────────────────────────────────
 
 export async function getWorkOrdersForIssue(
-  tenantId: string
+  clientTenantId: string
 ): Promise<WorkOrderForIssue[]> {
+  // 로그인 · 자재출고 조회 권한 · tenant 확인. tenant 는 세션 값만 쓰고 클라이언트가 보낸 값은 일치 여부 확인에만 쓴다.
+  const { tenantId } = await requireMaterialIssueReader(clientTenantId)
   const workOrders = await prisma.workOrder.findMany({
     where: {
       tenantId,
@@ -170,9 +181,12 @@ export async function getWorkOrdersForIssue(
 // ─── 창고 목록 (재고 포함) ─────────────────────────────────────────────────────
 
 export async function getWarehousesWithStock(
-  tenantId: string,
+  clientTenantId: string,
   itemIds: string[]
 ): Promise<WarehouseStockOption[]> {
+  // getWorkOrdersForIssue 와 같은 로그인·권한·tenant 확인
+  const { tenantId } = await requireMaterialIssueReader(clientTenantId)
+  if (!Array.isArray(itemIds)) throw new Error("잘못된 요청입니다.")
   const warehouses = await prisma.warehouse.findMany({
     where: { tenantId },
     select: { id: true, code: true, name: true },
@@ -203,17 +217,23 @@ export async function getLotStockByItems(
   itemIds: string[],
   tenantId: string
 ): Promise<Record<string, LotStockOption[]>> {
+  // 로그인 · LOT 재고 조회 권한 확인. tenant 는 세션 값만 사용하고, 클라이언트가 보낸 tenantId 가 다르면 조회하지 않는다
+  // (거부 시 빈 목록 — 화면은 기존처럼 "선택 가능한 LOT 없음"으로 표시하고 어떤 재고 정보도 노출하지 않는다).
+  const reader = await resolveLotStockReader()
+  if ("code" in reader || reader.tenantId !== tenantId) return {}
+  if (!Array.isArray(itemIds)) return {}
+  itemIds = itemIds.filter((id): id is string => typeof id === "string")
   if (itemIds.length === 0) return {}
 
   const balances = await prisma.inventoryBalance.findMany({
     where: {
-      tenantId,
+      tenantId: reader.tenantId,
       itemId: { in: itemIds },
       lotId: { not: null },
       qtyAvailable: { gt: 0 },
     },
     include: {
-      lot: { select: { id: true, lotNo: true } },
+      lot: { select: { id: true, lotNo: true, status: true, expiryDate: true } },
       item: { select: { uom: true } },
       warehouse: { select: { id: true, code: true, name: true } },
     },
@@ -224,6 +244,8 @@ export async function getLotStockByItems(
   for (const b of balances) {
     if (!b.lot || Number(b.qtyAvailable) <= 0) continue
     if (!result[b.itemId]) result[b.itemId] = []
+    // 출고 적격성(LOT 상태·유효기간): 출고 확정 서버 액션·QR 조회와 같은 공통 규칙. 제한 LOT 도 목록에 남기되 사유를 붙여 선택 불가로 표시한다.
+    const eligibility = evaluateLotIssueEligibility({ status: b.lot.status, expiryDate: b.lot.expiryDate })
     result[b.itemId].push({
       lotId: b.lot.id,
       lotNo: b.lot.lotNo,
@@ -232,6 +254,8 @@ export async function getLotStockByItems(
       warehouseName: b.warehouse.name,
       qtyAvailable: Number(b.qtyAvailable),
       unit: b.item.uom,
+      issueBlockReason: eligibility.eligible ? null : eligibility.message,
+      issueBlockLabel: eligibility.eligible ? null : eligibility.label,
     })
   }
   return result
@@ -338,6 +362,7 @@ export async function issueMaterialsForWorkOrder(
       itemId: true,
       plannedQty: true,
       manufacturingNo: true,
+      bom: { select: { bomItems: { select: { componentItemId: true } } } },
       operations: {
         select: {
           id: true,
@@ -356,6 +381,33 @@ export async function issueMaterialsForWorkOrder(
     return { ok: false, error: "작업지시를 찾을 수 없습니다." }
   }
 
+  // 이 작업지시에 출고할 수 있는 자재(BOM 구성품)인지 서버에서 확인한다. 수동/QR 선택 모두 같은 검증이다.
+  // 자재출고 화면과 QR 조회는 처음부터 BOM 구성품만 보여 주므로 정상 업무는 영향이 없다(대체자재 ItemSubstitute 는 출고 로직에서 쓰이지 않는다).
+  const bomComponentIds = new Set(workOrder.bom.bomItems.map((b) => b.componentItemId))
+  const notInBom = uniqueItemIds.filter((id) => !bomComponentIds.has(id))
+  if (notInBom.length > 0) {
+    const names = notInBom.map((id) => itemMetaMap.get(id)?.code ?? id).join(", ")
+    return { ok: false, error: `출고 불가: ${names} 품목은 이 작업지시의 BOM 구성품이 아닙니다.` }
+  }
+
+  // 요청에 포함된 자재예약 ID 가 이 작업지시·해당 품목의 예약인지 확인한다(쓰기 전). 예약 ID 가 없는 요청은 기존대로 처리한다.
+  // 예약은 작업지시에 속하고 작업지시는 위에서 tenant 를 확인했으므로, 작업지시가 일치하면 tenant 도 일치한다.
+  // 없는 예약 / 다른 작업지시·다른 tenant 의 예약 / 다른 품목의 예약은 같은 오류로 응답한다(다른 데이터의 존재 여부를 드러내지 않음).
+  const reservationIds = Array.from(new Set(activeItems.map((i) => i.reservationId).filter((id): id is string => !!id)))
+  if (reservationIds.length > 0) {
+    const reservations = await prisma.materialReservation.findMany({
+      where: { id: { in: reservationIds } },
+      select: { id: true, workOrderId: true, itemId: true },
+    })
+    const reservationMap = new Map(reservations.map((r) => [r.id, r]))
+    const invalid = activeItems.some((i) => {
+      if (!i.reservationId) return false
+      const r = reservationMap.get(i.reservationId)
+      return !r || r.workOrderId !== data.workOrderId || r.itemId !== i.itemId
+    })
+    if (invalid) return { ok: false, error: RESERVATION_MISMATCH_MESSAGE }
+  }
+
   const firstOperation = workOrder?.operations[0] ?? null
   if (workOrder && !firstOperation) {
     console.warn(
@@ -370,6 +422,16 @@ export async function issueMaterialsForWorkOrder(
   try {
     await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {
       await lockWorkOrderForUpdate(tx, tenantId, data.workOrderId)
+
+      // LOT 행 공유 잠금(FOR SHARE)은 요청 순서와 무관하게 LOT ID 오름차순으로 한 번에 잡는다(항상 같은 순서).
+      // 이후 루프의 상태 확인은 이미 잠긴 LOT 를 읽기만 한다. 공유 잠금끼리는 충돌하지 않고, 잠금을 기다리는 쪽(LOT 상태 변경)은
+      // 다른 잠금을 쥐지 않는 단일 UPDATE 라 이 순서로 새 교착 경로가 생기지 않는다.
+      const lotIdsToLock = Array.from(
+        new Set(expandedItems.filter((i) => itemMetaMap.get(i.itemId)?.isLotTracked && i.lotId).map((i) => i.lotId as string))
+      ).sort()
+      for (const lockLotId of lotIdsToLock) {
+        await lockLotForShare(tx, tenantId, lockLotId)
+      }
 
       // ── 0. WipUnit 중복/차단 검증 (자재 루프 진입 전) ─────────────────────
       //  - 같은 작업지시의 원본 WipUnit (parent/sourceProductionResult 없음)
@@ -441,6 +503,15 @@ export async function issueMaterialsForWorkOrder(
             )
           }
           lotId = item.lotId
+          // 출고 적격성(LOT 상태·유효기간) — 수동/QR 선택과 같은 공통 규칙으로, 트랜잭션 안에서 DB 의 최신 값을 다시 확인한다.
+          // 이 LOT 는 트랜잭션 시작 시 이미 공유 잠금(FOR SHARE)되어 있어, 이 트랜잭션이 끝날 때까지 LOT 상태 변경(UPDATE)이 끼어들지 못한다
+          // (잠금 대기 후에는 최신 커밋 값을 읽는다). 공유 잠금끼리는 충돌하지 않아 동시 출고는 서로 막지 않는다.
+          // 거부되면 예외로 트랜잭션 전체가 롤백되어 재고·예약·WIP 변경이 남지 않는다. LOT 행이 없으면 기존처럼 아래 재고 조회에서 "재고 없음" 처리.
+          const lotState = await tx.lot.findFirst({ where: { id: lotId, tenantId }, select: { lotNo: true, status: true, expiryDate: true } })
+          if (lotState) {
+            const eligibility = evaluateLotIssueEligibility(lotState)
+            if (!eligibility.eligible) throw new Error(lotIssueBlockedMessage(lotState.lotNo, eligibility))
+          }
           if (warehouseId) {
             balance = await tx.inventoryBalance.findFirst({
               where: {
@@ -618,6 +689,10 @@ export async function issueMaterialsForWorkOrder(
           const res = await tx.materialReservation.findUnique({
             where: { id: item.reservationId },
           })
+          // 트랜잭션 안에서도 소속 재확인(사전 확인 이후 예약이 바뀐/삭제된 경우) — 위반 시 예외로 전체 롤백
+          if (!res || res.workOrderId !== data.workOrderId || res.itemId !== item.itemId) {
+            throw new Error(RESERVATION_MISMATCH_MESSAGE)
+          }
           if (res) {
             const newIssuedQty = Number(res.issuedQty) + item.issueQty
             await tx.materialReservation.update({

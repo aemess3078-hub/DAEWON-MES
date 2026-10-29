@@ -16,9 +16,12 @@
 - **관련 기존 코드:** `InspectionSpec`/`InspectionItem`/`InspectionMeasurement`(측정값+판정), `QualityInspection`(`InspectionStage`), `src/app/app/mes/measurement`, `inspection-measurement.helpers.ts`, `spc-calculations.ts`.
 - **예상 개발 범위:** 우선 검사표준 항목 템플릿(수치형)으로 수용 가능한지 검증 → 부족하면 시험 유형 enum 추가 + 입력 화면(POP 포함) + 성적서 출력.
 
-## 3. 대원정밀 LOT 채번 (자동 채번 차단 중)
+## 3. 대원정밀 LOT 채번
 
-- **현재 상태:** CNS 전용 규칙(`cns-lot-rules.ts`)으로는 번호가 **생성되지 않는다.** 모든 자동 채번 경로의 공통 진입점(`resolveCnsLotRule`)에서 `src/lib/lot-numbering/lot-brand-guard.ts` 가 차단하며, `NEXT_PUBLIC_BRAND=newmes` 가 아니면(대원정밀 포함, 미설정 시에도) "대원정밀 LOT 채번 규칙이 설정되지 않았습니다." 오류가 난다.
+- **적용됨 (LOT 번호):** 번호 규칙 관리(`NumberingRule`, type=LOT, 활성)에 저장한 토큰 규칙으로 자동 발행한다 (`src/lib/lot-numbering/tenant-lot-rule.ts`). 대상: 원자재 입고(예약·AUTO 확정), LOT 등록 화면 자동생성(`generateLotNumberForItem`), 제조번호가 없는 완제품 LOT. 순번은 `NumberingSequence` 가 아니라 발행 원장(`Lot` ∪ `LotNumberReservation`)의 최대 순번 + 1 로 계산하며(품목코드·연월이 stem 에 포함되면 품목별·월별로 001 부터), 미리보기는 순번을 소비하지 않는다. 규칙이 없거나 비활성이면 안내 오류, MANUAL 품목은 직접 입력. 예시 규칙(품목코드+YY+MM+"-"+순번3) → `DW-72610-001`.
+- **여전히 미확정 (제조번호):** 작업지시 제조번호는 LOT 규칙을 쓰지 않고 계속 직접 입력한다(`manufacturing-no-policy.ts`). CNS 규칙(`cns-lot-rules.ts`)은 대원정밀에 적용되지 않는다(`lot-brand-guard.ts`).
+- **아래는 규칙 적용 전 상태(과거 기록) — 제조번호/CNS 가드에 관해서만 유효하다.**
+- **이전 상태:** CNS 전용 규칙(`cns-lot-rules.ts`)으로는 번호가 **생성되지 않는다.** 모든 자동 채번 경로의 공통 진입점(`resolveCnsLotRule`)에서 `src/lib/lot-numbering/lot-brand-guard.ts` 가 차단하며, `NEXT_PUBLIC_BRAND=newmes` 가 아니면(대원정밀 포함, 미설정 시에도) "대원정밀 LOT 채번 규칙이 설정되지 않았습니다." 오류가 난다.
 - **영향 경로:** 자재입고 LOT(`receiving.actions`, LOT 예약 `lot-reservation.actions`), 제조번호(작업지시 생성, `work-order.actions`), 완제품입고 LOT(`finished-goods-lot.helpers`), LOT 화면의 자동 채번 버튼(`lot.actions`).
 - **임시 운영안:** 품목의 LOT 정책을 `MANUAL`(직접 입력)로 두면 입고/제조번호를 수동 입력으로 진행할 수 있다(가드 대상 아님). LOT 계보·추적·재고 구조는 영향 없음.
 - **필요한 결정:** 원자재 입고 LOT, 가공 제조번호(작업지시/공정별), 완제품 LOT, 세척/포장 이후 LOT 승계 여부, 협력사 LOT 보존 방식, 자릿수/날짜 체계.

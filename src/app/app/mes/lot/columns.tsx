@@ -2,7 +2,7 @@
 
 import { ColumnDef } from "@tanstack/react-table"
 import { format } from "date-fns"
-import { MoreHorizontal, ScanLine } from "lucide-react"
+import { MoreHorizontal, Printer, ScanLine } from "lucide-react"
 import Link from "next/link"
 
 import { Badge } from "@/components/ui/badge"
@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { LotWithDetails } from "@/lib/actions/lot.actions"
 import { formatQuantity } from "@/lib/utils"
+import { kstDateString } from "@/lib/material-issue/lot-eligibility"
 
 // ─── 상태 레이블 ─────────────────────────────────────────────────────────────
 
@@ -42,9 +43,11 @@ const ITEM_TYPE_LABELS: Record<string, string> = {
 
 type ColumnActions = {
   onStatusChange: (lot: LotWithDetails, status: string) => void
+  /** 이미 등록된 LOT 의 라벨 출력(미리보기 창 열기). 입고·재고를 바꾸지 않는다. */
+  onPrintLabel: (lot: LotWithDetails) => void
 }
 
-export function getColumns({ onStatusChange }: ColumnActions): ColumnDef<LotWithDetails>[] {
+export function getColumns({ onStatusChange, onPrintLabel }: ColumnActions): ColumnDef<LotWithDetails>[] {
   return [
     {
       accessorKey: "lotNo",
@@ -144,7 +147,8 @@ export function getColumns({ onStatusChange }: ColumnActions): ColumnDef<LotWith
       cell: ({ row }) => {
         const d = row.original.expiryDate
         if (!d) return <span className="text-[13px] text-muted-foreground">—</span>
-        const expired = new Date(d) < new Date()
+        // 자재출고 서버 정책과 같은 기준: 한국 날짜로 유효기한 당일까지는 유효, 다음 날부터 만료 표시
+        const expired = kstDateString(new Date(d)) < kstDateString(new Date())
         return (
           <span
             className={`text-[13px] font-medium ${
@@ -163,6 +167,17 @@ export function getColumns({ onStatusChange }: ColumnActions): ColumnDef<LotWith
         const lot = row.original
         return (
           <div className="flex items-center justify-end gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-[13px]"
+              onClick={() => onPrintLabel(lot)}
+              data-testid="lot-label-print-button"
+              aria-label={`${lot.lotNo} 라벨 출력`}
+            >
+              <Printer className="h-3.5 w-3.5 mr-1" />
+              라벨 출력
+            </Button>
             <Link href={`/app/mes/traceability?lotNo=${lot.lotNo}`}>
               <Button variant="ghost" size="sm" className="h-7 px-2 text-[13px] text-blue-600 hover:text-blue-700">
                 <ScanLine className="h-3.5 w-3.5 mr-1" />

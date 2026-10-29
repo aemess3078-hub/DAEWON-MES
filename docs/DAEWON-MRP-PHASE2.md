@@ -51,7 +51,7 @@ UI  order-mrp-panel.tsx ─▶ Server Action runOrderBasedMrp(params)   [MRP REA
 
 ## Phase 2.5 보안 hardening 메모
 
-- `runMRP`/`getPlansForMRP`/`getAISuggestion`: MRP READ 권한 + 인증 tenant (`services/mrp-plan.service.ts`, 계산 알고리즘 불변, 모든 조회에 tenantId 조건 추가)
+- `runMRP`/`getPlansForMRP`: MRP READ 권한 + 인증 tenant (`services/mrp-plan.service.ts`, 계산 알고리즘 불변, 모든 조회에 tenantId 조건 추가)
 - `createPurchaseOrdersFromMRP`: 클라이언트 tenantId 무시, itemId/siteId 소유 검증 (`services/mrp-purchase.service.ts`)
 - `importValidatedBoms`: 본문을 `services/bom-import.service.ts` 로 이동, 부모/구성품 ID 전체를 tenant 소유로 배치 검증(M4 정책 동일)
 - 테스트: `npm run test:mrp-security` (54 checks)
