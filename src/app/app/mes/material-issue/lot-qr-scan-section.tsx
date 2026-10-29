@@ -8,7 +8,7 @@ import type { QrDecoderMode } from "@/components/common/qr-scanner/qr-decoder"
 import type { QrScanResult } from "@/lib/qr/qr-scan-result"
 import { lookupLotForMaterialIssue, type IssueLotLookupResult } from "@/lib/actions/material-issue-lot-lookup.actions"
 import type { LotStockOption } from "@/lib/actions/material-issue.actions"
-import { checkScanTarget, type ApplyScannedLotOutcome, type ScanTargetMaterial } from "@/lib/material-issue/lot-scan"
+import { checkScanTarget, type ApplyScannedLotResult, type ScanTargetMaterial } from "@/lib/material-issue/lot-scan"
 import { formatQuantity } from "@/lib/utils"
 
 /** QR 스캔 기능 전체를 끄는 스위치(.env: NEXT_PUBLIC_QR_SCAN_DISABLED=true). 꺼도 기존 수동 LOT 선택 업무에는 영향이 없다. */
@@ -29,7 +29,7 @@ export interface LotQrScanSectionProps {
    * 서버가 확인한 LOT 재고 1건을 화면의 LOT 선택(분할 행)에 반영한다. 반영 결과를 돌려준다.
    * 반영은 "LOT 선택"뿐이다 — 출고 수량은 정하지 않는다.
    */
-  onSelectLot: (itemId: string, option: LotStockOption) => ApplyScannedLotOutcome
+  onSelectLot: (itemId: string, option: LotStockOption) => ApplyScannedLotResult
   /** 이 LOT 가 이미 선택되어 있는지(창고 무관). 창고 선택 목록을 띄우기 전에 중복을 알려 준다. */
   isLotSelected?: (itemId: string, lotId: string) => boolean
   /** 서버 조회 함수(기본: 읽기 전용 서버 액션). 점검 화면/테스트에서 가짜를 주입한다. */
@@ -76,12 +76,18 @@ export function LotQrScanSection({ workOrderId, materials, disabled = false, tit
     return `[${found.itemCode}] ${found.itemName} — LOT ${found.lotNo} · ${option.warehouseName} · 가용 ${formatQuantity(option.qtyAvailable)} ${option.unit}`
   }
 
+  /** 선택된 LOT 행의 출고수량 안내. 스캔은 수량을 정하지 않으므로 그 행에 이미 있는 값을 그대로 보여 준다. */
+  function describeQty(qty: string, option: LotStockOption): string {
+    const value = Number(qty)
+    return value > 0 ? `출고수량 ${formatQuantity(value)} ${option.unit}` : "출고수량은 아직 입력되지 않았습니다"
+  }
+
   function apply(found: Extract<IssueLotLookupResult, { ok: true }>, option: LotStockOption) {
-    const outcome = latestRef.current.onSelectLot(found.itemId, option)
+    const { outcome, qty } = latestRef.current.onSelectLot(found.itemId, option)
     if (outcome === "ALREADY_SELECTED") {
-      say("info", `이미 선택된 LOT 입니다. ${describe(found, option)}`)
+      say("info", `이미 선택된 LOT 입니다. ${describe(found, option)} · ${describeQty(qty, option)}.`)
     } else {
-      say("success", `선택했습니다: ${describe(found, option)}. 출고 수량을 확인·입력한 뒤 [출고 처리]를 눌러 주세요.`)
+      say("success", `선택했습니다: ${describe(found, option)} · ${describeQty(qty, option)}. 스캔만으로는 출고되지 않습니다. 수량을 확인한 뒤 [출고 처리]를 눌러 주세요.`)
     }
   }
 

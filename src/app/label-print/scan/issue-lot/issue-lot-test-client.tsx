@@ -79,11 +79,11 @@ export function IssueLotScanTestClient() {
   function onSelectLot(itemId: string, option: LotStockOption) {
     void itemId
     const makeKey = () => `A-qr-${Date.now()}`
-    const { outcome } = applyScannedLot(rowsRef.current, option, makeKey)
-    if (outcome === "ALREADY_SELECTED") return outcome
+    const { outcome, qty } = applyScannedLot(rowsRef.current, option, makeKey)
+    if (outcome === "ALREADY_SELECTED") return { outcome, qty }
     setOptions((prev) => (prev.some((o) => o.lotId === option.lotId && o.warehouseId === option.warehouseId) ? prev : [...prev, option]))
     setRows((prev) => applyScannedLot(prev, option, makeKey).splits)
-    return outcome
+    return { outcome, qty }
   }
 
   return (

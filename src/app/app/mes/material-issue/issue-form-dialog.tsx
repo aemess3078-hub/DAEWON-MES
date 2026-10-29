@@ -32,11 +32,10 @@ import { formatQuantity } from "@/lib/utils"
 function isLotManaged(item: MaterialRequirement["item"]): boolean {
   return item.isLotTracked || item.itemType === "SEMI_FINISHED"
 }
-import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
 import { buildIssueLabelPlan, type LabelPlan } from "@/lib/label/label-items"
 import { LotQrScanSection } from "./lot-qr-scan-section"
-import { applyScannedLot, type ApplyScannedLotOutcome } from "@/lib/material-issue/lot-scan"
+import { applyScannedLot, type ApplyScannedLotResult } from "@/lib/material-issue/lot-scan"
 
 // ── 다중 LOT 분할 행 타입 ─────────────────────────────────────────────────────
 
@@ -174,26 +173,15 @@ export function IssueFormDialog({
     setWarehouseMap((prev) => ({ ...prev, [itemId]: nextWarehouseId }))
   }
 
-  function handleScan(parsed: ParsedBarcode) {
-    const matched = pendingMaterials.find((material) => material.item.code === parsed.itemCode)
-    if (!matched) {
-      alert(`품목 코드 "${parsed.itemCode}"가 이 작업지시의 출고 원자재에 없습니다.`)
-      return
-    }
-    setHighlightedItemId(matched.itemId)
-    rowRefs.current[matched.itemId]?.scrollIntoView({ behavior: "smooth", block: "center" })
-    setTimeout(() => setHighlightedItemId(null), 3000)
-  }
-
   /**
    * QR 스캔으로 서버가 확인한 LOT 를 기존 LOT 선택 행에 반영한다(수동 선택과 같은 lotSplitsMap 구조).
    * LOT 선택만 반영하고 출고 수량은 정하지 않는다 — 출고는 사용자가 [출고 처리]를 눌러야 수행된다.
    */
-  const handleScannedLot = (itemId: string, option: LotStockOption): ApplyScannedLotOutcome => {
+  const handleScannedLot = (itemId: string, option: LotStockOption): ApplyScannedLotResult => {
     const makeKey = () => `${itemId}-qr-${Date.now()}`
     const emptyRow = (): LotSplitRow[] => [{ key: `${itemId}-0`, lotValue: "", qty: "" }]
-    const { outcome } = applyScannedLot(lotSplitsRef.current[itemId] ?? emptyRow(), option, makeKey)
-    if (outcome === "ALREADY_SELECTED") return outcome
+    const { outcome, qty } = applyScannedLot(lotSplitsRef.current[itemId] ?? emptyRow(), option, makeKey)
+    if (outcome === "ALREADY_SELECTED") return { outcome, qty }
     // 수동 선택 UI 의 LOT 목록에도 이 재고가 있어야 선택 상자가 값을 표시한다(이미 있으면 그대로)
     setLotStockMap((prev) => {
       const list = prev[itemId] ?? []
@@ -203,7 +191,7 @@ export function IssueFormDialog({
     setHighlightedItemId(itemId)
     rowRefs.current[itemId]?.scrollIntoView({ behavior: "smooth", block: "center" })
     setTimeout(() => setHighlightedItemId(null), 3000)
-    return outcome
+    return { outcome, qty }
   }
 
   const handleOpen = (nextOpen: boolean) => {
@@ -404,14 +392,6 @@ export function IssueFormDialog({
         </DialogHeader>
 
         <div className="max-h-[70vh] space-y-4 overflow-y-auto py-2">
-          <div className="space-y-1">
-            <p className="text-[13px] font-medium text-muted-foreground">바코드 스캔</p>
-            <BarcodeScanInput
-              onScan={handleScan}
-              placeholder="자재 바코드를 스캔하면 해당 행으로 이동합니다."
-            />
-          </div>
-
           <div className="rounded-lg bg-muted/50 p-3">
             <div className="grid grid-cols-1 gap-3 text-[14px] md:grid-cols-3">
               <div>

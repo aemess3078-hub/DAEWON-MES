@@ -55,6 +55,8 @@ async function main() {
   const r5 = scan.applyScannedLot([{ key: "a", lotValue: "x:y", qty: "5" }, { key: "b", lotValue: "", qty: "7" }], { lotId: "lot-9", warehouseId: "wh-1" }, key)
   ok(r5.outcome === "FILLED_EMPTY_ROW" && r5.splits[1].lotValue === "lot-9:wh-1" && r5.splits[1].qty === "7" && r5.splits[0].lotValue === "x:y", "A6 첫 번째 빈 행에만 채우고 다른 행/수량은 보존")
   ok(scan.lotSelectValue({ lotId: "L", warehouseId: "W" }) === "L:W", "A7 선택 값 형식 lotId:warehouseId (수동 선택 UI 와 동일)")
+  // 스캔 후 작업자가 확인할 출고수량: 스캔은 수량을 정하지 않고, 그 행에 이미 있던 값만 알려 준다
+  ok(r1.qty === "50" && r2.qty === "" && r3.qty === "50" && r5.qty === "7", "A7b 반영 결과가 LOT 가 놓인 행의 출고수량을 알려 준다 — 빈 행 채움은 기존 입력값, 새 행은 빈 값(자동 확정 없음), 중복 선택은 이미 선택된 행의 값")
   const mats = [
     { itemId: "a", pendingQty: 50, lotManaged: true },
     { itemId: "full", pendingQty: 0, lotManaged: true },
@@ -283,6 +285,16 @@ async function main() {
   // 이 단계의 변경 파일에 라벨 디자인/QR 규격이 없고, 규격 상수·QR 데이터 규격이 그대로임을 확인(이전 단계 변경은 아직 미커밋이라 HEAD diff 로는 구분할 수 없다)
   const spec = require("../src/lib/label/label-spec") as typeof import("../src/lib/label/label-spec")
   ok(spec.LABEL_WIDTH_MM === 90 && spec.LABEL_HEIGHT_MM === 29 && spec.LABEL_QR_MM_DEFAULT === 19 && lotLib.encodeLotQr("A") === "DAEWON|LOT|1|A" && lotLib.encodeWipQr("A") === "DAEWON|WIP|1|A", "D16 QR 라벨 규격(90×29mm, QR 19mm)과 QR 데이터 규격(DAEWON|LOT|1|… / DAEWON|WIP|1|…)은 그대로")
+
+  // ─── E. 스캔 UI 정리(기존 바코드 입력창 제거 → QR 스캔으로 통일) ─────────────────
+  const dialogUi = dialog.slice(dialog.indexOf("<Dialog open={open}"))
+  ok(!/BarcodeScanInput|barcode-scan-input|ParsedBarcode|바코드 스캔|handleScan\(/.test(dialog) && !dialogUi.includes("자재 바코드를 스캔"), "E1 자재 LOT 출고 처리 창에서 기존 '바코드 스캔' 입력창·안내 문구·품목코드 이동 핸들러가 제거되었다")
+  ok(["src/app/app/mes/finished-goods-receipt/receipt-dialog.tsx", "src/app/app/mes/shipments/shipment-form-sheet.tsx"].every((f) => read(f).includes("BarcodeScanInput")) && read("src/components/common/barcode/barcode-scan-input.tsx").includes("export function BarcodeScanInput"), "E2 공통 BarcodeScanInput 컴포넌트는 삭제·변경 없이 남아 있고 완제품입고·출하 화면은 그대로 쓴다(다른 화면 스캔 기능 불변)")
+  ok(dialogUi.includes("<LotQrScanSection") && dialogUi.indexOf("<LotQrScanSection") < dialogUi.indexOf("overflow-x-auto rounded-md border") && dialogUi.indexOf("<LotQrScanSection") > dialogUi.indexOf("작업지시번호"), "E3 [QR 스캔]은 작업지시 요약 아래 '출고 자재 목록' 머리에 하나만 있고 목록 표 바로 위에 놓인다")
+  ok(section.includes("flex flex-wrap items-center justify-between") && section.indexOf("{title}") < section.indexOf('data-testid="issue-qr-scan-button"') && section.includes('"QR 스캔"') && !/바코드/.test(section), "E4 버튼은 제목 줄 오른쪽(justify-between)에 있고 명칭은 'QR 스캔'")
+  ok(section.includes("describeQty(") && section.includes("출고수량 ${formatQuantity(value)}") && section.includes("출고수량은 아직 입력되지 않았습니다") && section.includes("스캔만으로는 출고되지 않습니다") && section.includes("[출고 처리]"), "E5 스캔 후 안내에 선택된 LOT 번호·창고·가용재고와 출고수량이 표시되고, 스캔만으로 출고되지 않으며 [출고 처리]로 확정한다는 문구가 있다")
+  ok(/return \{ outcome, qty \}/.test(handler) && !/qty:\s*String\(|setQtyMap|issueQty/.test(handler), "E6 스캔 반영 함수는 수량을 새로 정하지 않고 기존 행 수량만 돌려준다")
+  ok((dialog.match(/issueMaterialsForWorkOrder\(/g) ?? []).length === 1 && submitBlock.includes("issueMaterialsForWorkOrder("), "E7 출고 확정 서버 호출은 handleSubmit 한 곳뿐이다")
 
   console.log(`\n${passed} checks passed`)
 }

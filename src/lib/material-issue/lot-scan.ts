@@ -45,25 +45,29 @@ export type ApplyScannedLotOutcome =
   /** 같은 LOT(다른 창고 포함)가 이미 선택되어 있어 변경하지 않음(서버도 동일 LOT 중복을 거부한다) */
   | "ALREADY_SELECTED"
 
+/** 스캔 반영 결과 — outcome 과, 스캔한 LOT 가 놓인 행의 현재 출고수량(작업자 확인 안내용. 빈 문자열이면 아직 미입력). */
+export type ApplyScannedLotResult = { outcome: ApplyScannedLotOutcome; qty: string }
+
 /**
  * 스캔한 LOT 를 기존 LOT 분할 행에 반영한다. 기존 행/수량/다른 LOT 선택은 건드리지 않는다.
- * 출고 수량은 정하지 않는다(스캔한 LOT 의 재고를 출고 수량으로 자동 확정하지 않는다).
+ * 출고 수량은 정하지 않는다(스캔한 LOT 의 재고를 출고 수량으로 자동 확정하지 않는다) — 돌려주는 qty 는 그 행에 이미 있던 값이다.
  */
 export function applyScannedLot(
   splits: LotSplitRowLike[],
   option: { lotId: string; warehouseId: string },
   makeKey: () => string,
-): { splits: LotSplitRowLike[]; outcome: ApplyScannedLotOutcome } {
+): { splits: LotSplitRowLike[] } & ApplyScannedLotResult {
   const value = lotSelectValue(option)
   // 같은 LOT 는 창고가 달라도 한 자재 안에서 1회만 허용(기존 서버 검증과 동일)
-  if (splits.some((row) => row.lotValue === value || row.lotValue.startsWith(`${option.lotId}:`))) {
-    return { splits, outcome: "ALREADY_SELECTED" }
+  const existing = splits.find((row) => row.lotValue === value || row.lotValue.startsWith(`${option.lotId}:`))
+  if (existing) {
+    return { splits, outcome: "ALREADY_SELECTED", qty: existing.qty }
   }
   const emptyIndex = splits.findIndex((row) => !row.lotValue)
   if (emptyIndex >= 0) {
-    return { splits: splits.map((row, i) => (i === emptyIndex ? { ...row, lotValue: value } : row)), outcome: "FILLED_EMPTY_ROW" }
+    return { splits: splits.map((row, i) => (i === emptyIndex ? { ...row, lotValue: value } : row)), outcome: "FILLED_EMPTY_ROW", qty: splits[emptyIndex].qty }
   }
-  return { splits: [...splits, { key: makeKey(), lotValue: value, qty: "" }], outcome: "ADDED_ROW" }
+  return { splits: [...splits, { key: makeKey(), lotValue: value, qty: "" }], outcome: "ADDED_ROW", qty: "" }
 }
 
 export type ScanTargetMaterial = { itemId: string; pendingQty: number; lotManaged: boolean }
