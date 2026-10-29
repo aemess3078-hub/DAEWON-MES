@@ -164,7 +164,7 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
                 )}
               </span>
               <span style={{ fontWeight: 400 }}>
-                {data.dateLabel} {data.date}
+                {data.date ? `${data.dateLabel} ${data.date}` : ""}
               </span>
             </div>
 

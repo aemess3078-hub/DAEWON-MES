@@ -29,6 +29,8 @@ interface BarcodePrintItem {
   uom?: string
   /** 입고일/생산일 문구 선택 */
   dateLabel?: string
+  /** 라벨에 표시할 일자(YYYY-MM-DD). 지정하지 않으면 출력 당일. 빈 문자열이면 일자를 표시하지 않는다(이미 등록된 LOT 의 원본 입고일을 알 수 없을 때). */
+  date?: string
   /** 라벨 3종 구분: RAW_LOT 원자재 / WIP 공정·재공 통합 / FG_LOT 완제품. 미지정 = 기존 LOT 라벨 모양. */
   labelType?: LabelType
   /** WIP 라벨: 재공 식별값(제안: WipUnit.id). 지정하면 WIP QR(DAEWON|WIP|1|<id>)로 출력되고 WIP 발행 이력이 남는다. */
@@ -147,7 +149,7 @@ export function BarcodePrintDialog({
           lotId: item.lotId ?? null,
           quantity: item.quantity ?? null,
           uom: item.uom ?? null,
-          date: today,
+          date: item.date ?? today,
           dateLabel: item.dateLabel ?? "일자",
         }
       }),

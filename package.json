@@ -59,6 +59,7 @@
     "test:material-issue-qr": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-material-issue-qr.ts",
     "test:qr-scanner": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-qr-scanner.ts",
     "test:label-types": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-label-types.tsx",
+    "test:lot-label-reprint": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-lot-label-reprint.tsx",
     "test:qr-label-print": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"jsx\\\":\\\"react-jsx\\\"}\" --project tsconfig.json scripts/test-qr-label-print.tsx",
     "test:daewon-stabilization-phase1": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-daewon-stabilization-phase1.ts",
     "test:monitor-latest-snapshot": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-monitor-latest-snapshot.ts",
