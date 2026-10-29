@@ -1,4 +1,4 @@
-import { readFileSync } from "fs"
+import { existsSync, readFileSync } from "fs"
 import { join } from "path"
 
 const root = process.cwd()
@@ -100,7 +100,6 @@ const canonicalLabels: Array<[string, string]> = [
   ["nav-item-groups", "품목군관리"],
   ["nav-bom", "BOM관리"],
   ["nav-equipment-master", "설비관리"],
-  ["nav-defects", "불량코드관리"],
   ["nav-routing", "라우팅관리"],
   ["nav-work-centers", "공정관리"],
   ["nav-users", "사용자관리"],
@@ -139,11 +138,35 @@ const hiddenByDaewonPolicy: Array<[string, string]> = [
   ["nav-downtime-reasons", "비가동사유"],
   ["nav-prod-equip-output", "설비별생산현황"],
   ["nav-project-orders", "프로젝트 오더"],
+  ["nav-defects", "불량코드관리"],
+  ["nav-attachments", "첨부파일관리"],
+  ["nav-audit-log", "감사로그"],
 ]
 for (const [id, label] of hiddenByDaewonPolicy) {
   assert(!visibleNavSource.includes(`id: '${id}'`), `${id} must stay out of the visible nav (Daewon policy)`)
   assert(hiddenNavSource.includes(`id: '${id}', label: '${label}'`), `${id} must be listed in DAEWON_HIDDEN_NAV with label ${label}`)
 }
+// 기준정보관리: 불량코드관리·첨부파일관리·감사로그는 메뉴만 숨기고 화면/API/DB/권한은 유지한다. 품목분류관리·품목군관리는 계속 노출한다.
+for (const id of ["nav-item-categories", "nav-item-groups"]) {
+  assert(visibleNavSource.includes(`id: '${id}'`), `${id} must stay in the visible nav`)
+  assertParent(id, "nav-master")
+}
+const masterRetained: Array<[string, string]> = [
+  ["/app/mes/defects", "src/app/app/mes/defects/page.tsx"],
+  ["/app/mes/attachments", "src/app/app/mes/attachments/page.tsx"],
+  ["/app/mes/audit-log", "src/app/app/mes/audit-log/page.tsx"],
+]
+const scopeSource = readFileSync(join(root, "src/lib/auth/daewon-scope.ts"), "utf8")
+const permissionMapSource = readFileSync(join(root, "src/lib/auth/role-permissions.ts"), "utf8")
+for (const [href, pageFile] of masterRetained) {
+  assert(existsSync(join(root, pageFile)), `${pageFile} (screen) must be kept`)
+  assert(!visibleNavSource.includes(`href: '${href}'`), `${href} must not be in the visible nav`)
+  assert(hiddenNavSource.includes(`href: '${href}'`), `${href} must be listed in DAEWON_HIDDEN_NAV`)
+  assert(scopeSource.includes(`"${href}"`), `${href} route must stay allowed in daewon-scope (menu-only hiding)`)
+}
+assert(/defects: "DEFECT_MANAGEMENT"/.test(permissionMapSource), "defects route keeps its RolePermission resource mapping")
+assert(/"audit-log": "AUDIT_LOG"/.test(permissionMapSource), "audit-log route keeps its RolePermission resource mapping")
+assert(permissionMapSource.includes("ATTACHMENT_MENU_CODES = new Set([\"attachments\"])"), "attachments keeps its permission handling")
 assert(!navSource.includes("nav-project-management"), "PMS(프로젝트관리) 메뉴는 대원정밀 범위 밖이라 존재하지 않아야 한다")
 
 assertParent("nav-inventory", "nav-inventory-section")

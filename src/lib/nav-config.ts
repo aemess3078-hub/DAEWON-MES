@@ -40,10 +40,7 @@ export const MES_NAV: NavItem[] = [
           // ── 대원정밀 목표 메뉴 외, 위 기준정보 입력에 필요한 보조 마스터(유지) ──
           { id: 'nav-item-categories', parentId: 'nav-master', label: '품목분류관리', icon: 'Tags', href: '/app/mes/master/item-categories', displayOrder: 12, children: [] },
           { id: 'nav-item-groups', parentId: 'nav-master', label: '품목군관리', icon: 'Layers', href: '/app/mes/master/item-groups', displayOrder: 13, children: [] },
-          { id: 'nav-defects', parentId: 'nav-master', label: '불량코드관리', icon: 'AlertTriangle', href: '/app/mes/defects', displayOrder: 14, children: [] },
           { id: 'nav-common-codes', parentId: 'nav-master', label: '코드관리', icon: 'BookOpen', href: '/app/mes/common-codes', displayOrder: 15, developerOnly: true, children: [] },
-          { id: 'nav-attachments', parentId: 'nav-master', label: '첨부파일관리', icon: 'Paperclip', href: '/app/mes/attachments', displayOrder: 16, children: [] },
-          { id: 'nav-audit-log', parentId: 'nav-master', label: '감사로그', icon: 'History', href: '/app/mes/audit-log', displayOrder: 17, children: [] },
         ],
       },
       // 2. 수주납품관리
@@ -202,6 +199,9 @@ export const DAEWON_HIDDEN_NAV: ReadonlyArray<{ id: string; label: string; href:
   { id: 'nav-corrective-action', label: '조치관리', href: '/app/mes/quality/corrective-action', reason: '목표 메뉴 외' },
   { id: 'nav-recurrence-prevention', label: '재발방지관리', href: '/app/mes/quality/recurrence-prevention', reason: '목표 메뉴 외' },
   // 기준정보 부가
+  { id: 'nav-defects', label: '불량코드관리', href: '/app/mes/defects', reason: '메뉴만 숨김(화면/API/DB/권한 유지) — 불량 데이터는 다른 기능에서 계속 사용' },
+  { id: 'nav-attachments', label: '첨부파일관리', href: '/app/mes/attachments', reason: '메뉴만 숨김(화면/API/DB/권한 유지)' },
+  { id: 'nav-audit-log', label: '감사로그', href: '/app/mes/audit-log', reason: '메뉴만 숨김(화면/API/DB/권한 유지)' },
   { id: 'nav-mold-management', label: '금형·치공구관리', href: '/app/mes/master/molds', reason: '목표 메뉴 외' },
   { id: 'nav-downtime-reasons', label: '비가동사유', href: '/app/mes/master/downtime-reasons', reason: '목표 메뉴 외' },
   { id: 'nav-backups', label: '백업관리', href: '/app/mes/backups', reason: 'Supabase Management 토큰 필요 — 필요 시 재노출' },
