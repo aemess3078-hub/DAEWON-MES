@@ -502,6 +502,9 @@ model Tenant {
   EquipmentMaintenancePlan      EquipmentMaintenancePlan[]
   EquipmentMaintenanceHistory   EquipmentMaintenanceHistory[]
   receivingRequests ReceivingRequest[]
+  measuringInstruments          MeasuringInstrument[]          @relation("TenantMeasuringInstruments")
+  instrumentCalibrations        InstrumentCalibration[]        @relation("TenantInstrumentCalibrations")
+  instrumentStatusHistories     InstrumentStatusHistory[]      @relation("TenantInstrumentStatusHistories")
 }
 
 model Profile {
@@ -564,6 +567,8 @@ model Profile {
   backupGroupsCreated                 BackupGroup[]                 @relation("BackupGroupCreator")
   backupGroupsUpdated                 BackupGroup[]                 @relation("BackupGroupUpdater")
   hiddenBackupsHidden                 HiddenBackup[]                @relation("HiddenBackupHider")
+  instrumentsManaged                  MeasuringInstrument[]         @relation("InstrumentManager")
+  instrumentCalibrationsManaged       InstrumentCalibration[]       @relation("InstrumentCalibrationManager")
 }
 
 model Site {
@@ -3761,4 +3766,124 @@ model NcwatchSyncLog {
   @@index([tenantId, createdAt])
   @@index([result])
   @@map("ncwatch_sync_log")
+}
+
+// ─── 계측기 검교정관리 ────────────────────────────────────────────────────────
+// 계측기 마스터(MeasuringInstrument) 1 : N 검교정 실적/이력(InstrumentCalibration).
+// - 교정상태(정상/임박/초과/미등록/제외)는 저장하지 않고 nextCalibrationDate 와 기준일로 계산한다
+//   (src/lib/instrument-calibration.ts). 마스터의 last/nextCalibrationDate, currentCalibrationId 는
+//   유효한 최신 교정이력에서 재계산한 요약값이다.
+// - 성적서 파일 첨부는 이번 범위에서 제외(성적서 "번호"만 관리). 품질검사 연동도 없다.
+
+enum InstrumentUsageStatus {
+  AVAILABLE
+  SUSPENDED
+  ON_HOLD
+  DISPOSED
+}
+
+enum CalibrationResult {
+  PASS
+  FAIL
+}
+
+enum CalibrationProgressStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum InstrumentDataSource {
+  MANUAL
+  EXCEL_IMPORT
+}
+
+model MeasuringInstrument {
+  id                        String                @id @default(cuid())
+  tenantId                  String
+  managementNo              String
+  name                      String
+  category                  String?
+  specification             String?
+  serialNo                  String?
+  manufacturer              String?
+  calibrationRequired       Boolean               @default(true)
+  calibrationIntervalMonths Int?
+  department                String?
+  location                  String?
+  managerId                 String?
+  usageStatus               InstrumentUsageStatus @default(AVAILABLE)
+  lastCalibrationDate       DateTime?             @db.Date
+  nextCalibrationDate       DateTime?             @db.Date
+  currentCalibrationId      String?               @unique
+  remarks                   String?
+  source                    InstrumentDataSource  @default(MANUAL)
+  sourceRef                 String?
+  createdById               String?
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+  deletedAt                 DateTime?
+
+  tenant             Tenant                    @relation("TenantMeasuringInstruments", fields: [tenantId], references: [id])
+  manager            Profile?                  @relation("InstrumentManager", fields: [managerId], references: [id], onDelete: SetNull)
+  currentCalibration InstrumentCalibration?    @relation("InstrumentCurrentCalibration", fields: [currentCalibrationId], references: [id], onDelete: SetNull)
+  calibrations       InstrumentCalibration[]   @relation("InstrumentCalibrations")
+  statusHistories    InstrumentStatusHistory[]
+
+  @@unique([tenantId, managementNo])
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, usageStatus])
+  @@index([tenantId, nextCalibrationDate])
+}
+
+model InstrumentCalibration {
+  id                   String                    @id @default(cuid())
+  tenantId             String
+  instrumentId         String
+  progressStatus       CalibrationProgressStatus @default(COMPLETED)
+  plannedDate          DateTime?                 @db.Date
+  calibrationDate      DateTime?                 @db.Date
+  calibrationAgency    String?
+  certificateNo        String?
+  result               CalibrationResult?
+  nextCalibrationDate  DateTime?                 @db.Date
+  nextDateOverridden   Boolean                   @default(false)
+  nextDateChangeReason String?
+  calibrationCost      Decimal?                  @db.Decimal(14, 2)
+  managerId            String?
+  remarks              String?
+  source               InstrumentDataSource      @default(MANUAL)
+  sourceRef            String?
+  sourceKey            String?
+  cancelledAt          DateTime?
+  cancelledById        String?
+  cancelReason         String?
+  createdById          String?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+
+  tenant      Tenant               @relation("TenantInstrumentCalibrations", fields: [tenantId], references: [id])
+  instrument  MeasuringInstrument  @relation("InstrumentCalibrations", fields: [instrumentId], references: [id])
+  manager     Profile?             @relation("InstrumentCalibrationManager", fields: [managerId], references: [id], onDelete: SetNull)
+  currentOf   MeasuringInstrument? @relation("InstrumentCurrentCalibration")
+
+  @@unique([tenantId, sourceKey])
+  @@index([tenantId, instrumentId, calibrationDate])
+  @@index([tenantId, progressStatus])
+}
+
+model InstrumentStatusHistory {
+  id             String                 @id @default(cuid())
+  tenantId       String
+  instrumentId   String
+  previousStatus InstrumentUsageStatus?
+  newStatus      InstrumentUsageStatus
+  reason         String?
+  changedById    String?
+  changedAt      DateTime               @default(now())
+
+  tenant     Tenant              @relation("TenantInstrumentStatusHistories", fields: [tenantId], references: [id])
+  instrument MeasuringInstrument @relation(fields: [instrumentId], references: [id])
+
+  @@index([tenantId, instrumentId, changedAt])
 }

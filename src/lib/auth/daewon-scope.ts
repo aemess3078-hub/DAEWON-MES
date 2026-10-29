@@ -67,6 +67,7 @@ export const DAEWON_ALLOWED_ROUTES: readonly string[] = [
   "/app/mes/quality/work-standards",
   "/app/mes/ecn",
   "/app/mes/quality/change-points",
+  "/app/mes/quality/calibration",
   // 이력관리
   "/app/mes/lot",
   "/app/mes/traceability",

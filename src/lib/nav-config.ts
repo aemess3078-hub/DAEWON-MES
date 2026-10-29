@@ -116,9 +116,8 @@ export const MES_NAV: NavItem[] = [
           { id: 'nav-inspection-stages', parentId: 'nav-quality', label: '초중종검사 LIST', icon: 'ClipboardCheck', href: '/app/mes/inspection-stages', displayOrder: 2, children: [] },
           { id: 'nav-work-standards', parentId: 'nav-quality', label: '작업표준서관리', icon: 'BookOpen', href: '/app/mes/quality/work-standards', displayOrder: 3, children: [] },
           { id: 'nav-change-management', parentId: 'nav-quality', label: '변경관리', icon: 'GitPullRequest', href: '/app/mes/ecn', displayOrder: 4, children: [] },
-          // TODO(DAEWON): 계측기 검교정관리는 신규 개발 전. 준비중 배지로만 노출한다(href 없음 → 클릭 비활성).
-          // 노출을 원치 않으면 이 항목만 제거하면 된다. docs/DAEWON-TODO.md 참고.
-          { id: 'nav-calibration', parentId: 'nav-quality', label: '계측기검교정관리', icon: 'Gauge', displayOrder: 5, comingSoon: true, children: [] },
+          // 계측기 검교정관리: 한 화면에서 계측기 관리대장 / 검교정 일정관리 / 검교정 이력관리 탭으로 전환한다.
+          { id: 'nav-calibration', parentId: 'nav-quality', label: '계측기 검교정관리', icon: 'Gauge', href: '/app/mes/quality/calibration', displayOrder: 5, children: [] },
         ],
       },
       // 7. 이력관리

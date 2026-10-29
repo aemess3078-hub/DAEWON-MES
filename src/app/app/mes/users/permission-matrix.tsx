@@ -44,6 +44,7 @@ const RESOURCE_LABELS: Record<string, string> = {
   QUALITY_INSPECTION: "검사결과 관리",
   DEFECT_MANAGEMENT:  "불량/CAPA 관리",
   ECN:                "변경관리",
+  INSTRUMENT_CALIBRATION: "계측기 검교정관리",
   // ── 설비점검/수리 ────────────────────────────────────────────────
   EQUIPMENT_REPAIR:   "설비수리관리",
   EQUIPMENT_MONITOR:  "설비현황 모니터링",
