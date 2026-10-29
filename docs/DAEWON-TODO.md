@@ -5,10 +5,9 @@
 
 ## 1. 계측기 검교정관리
 
-- **현재 상태:** 메뉴만 "준비중" 배지로 노출(`nav-calibration`, `src/lib/nav-config.ts`). 화면/모델 없음.
-- **필요한 결정:** 교정 대상 범위(게이지/마이크로미터/압력계 등), 교정 주기·기관(자체/외부), 성적서 첨부 여부, 만료 알림 방식, 부적합 계측기로 측정한 LOT 처리 정책.
-- **관련 기존 코드:** `Equipment`(`EquipmentType` 에 계측기 유형 추가 검토), `InspectionMeasurement`(측정 이력), `Attachment` + `attachment.actions.ts`(성적서), `EquipmentMaintenancePlan`/`EquipmentMaintenanceHistory`(주기·이력 패턴), `equipment-check` 화면(주기 점검 UI 패턴).
-- **예상 개발 범위:** 신규 모델 1~2개(마스터 + 교정이력) + migration, 목록/상세/등록 화면, 만료 임박 표시, 검사 입력 시 교정 만료 계측기 경고.
+- **현재 상태:** 관리 화면 구현됨(`/app/mes/quality/calibration`, 계측기 관리대장 / 검교정 일정관리 / 검교정 이력관리 3탭). 설계·운영 적용 절차는 `docs/DAEWON-CALIBRATION.md` 참고.
+- **이번 범위에서 제외(미구현):** 교정 성적서 **파일 첨부**(성적서 "번호"만 관리), **품질검사 화면 연동**(검사 입력 시 교정 만료 계측기 경고/차단). 사용 가능 여부 공통 로직(`evaluateInstrumentUsability`, `src/lib/instrument-calibration.ts`)은 만들어 두었으므로 추후 검사 화면에서 재사용한다.
+- **남은 결정:** 만료 알림 방식(메일/푸시 등), 부적합 계측기로 측정한 LOT 처리 정책, 성적서 파일 첨부 도입 여부.
 
 ## 2. 유압 테스트
 

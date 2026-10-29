@@ -1,12 +1,12 @@
 /**
  * 5단계 실제 DB 통합 테스트 하네스.
  *
- *  - 실제 Supabase DB(대원정밀)에 실제 Prisma 로 접속하고, 앱의 실제 서버 액션 코드를 그대로 호출한다.
+ *  - 로컬 테스트 DB(`*_test`)에 실제 Prisma 로 접속하고, 앱의 실제 서버 액션 코드를 그대로 호출한다. (운영 DB 에는 실행할 수 없다)
  *  - 인증: 앱과 같은 JWT(signAuthToken)를 만들어 `next/headers` 의 쿠키로 주입한다 → getCurrentUser/권한 조회는 실제 DB 로 동작한다.
  *  - Next 런타임이 없어서 필요한 두 가지만 대체한다: `next/headers`(쿠키 보관소), `next/cache`(재검증 no-op).
  *  - 테스트 데이터는 모두 ZT5 접두어로 만든다(나중에 SQL 로 식별·삭제 가능). 이 스위트는 DB 행을 삭제하지 않는다.
  *  - 비밀번호·연결 문자열·키는 출력하지 않는다.
- *  - 안전장치(env.ts verifyTarget): DAEWON_DB_IT_CONFIRM=<대원정밀 프로젝트 식별자> 없이는 이 모듈을 불러오는 즉시 중단한다.
+ *  - 안전장치(env.ts verifyTarget → scripts/helpers/local-test-db-guard.ts): DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB 와 로컬 *_test DB 가 아니면 이 모듈을 불러오는 즉시(DB 연결 전) 종료한다.
  */
 import Module from "node:module"
 import { join } from "node:path"

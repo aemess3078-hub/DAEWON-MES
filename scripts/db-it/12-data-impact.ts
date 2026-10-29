@@ -1,6 +1,6 @@
 /**
  * 테스트가 대원정밀 DB 의 기존(비 ZT) 데이터에 영향을 주지 않았는지 읽기 전용 점검. 쓰기 없음.
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/12-data-impact.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/12-data-impact.ts
  */
 import { assertTarget, prisma, TENANT_ID } from "./lib"
 

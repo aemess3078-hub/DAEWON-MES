@@ -2,7 +2,7 @@
  * 발주서 note=NULL 조회 누락 수정 검증 (실제 Supabase 대원정밀 테스트 환경).
  *  - 기존 발주서는 읽기만 한다(변경 없음).
  *  - 경계 사례(NULL / "" / 일반 / OS- / [OUTSOURCING])는 롤백되는 트랜잭션 안에서 만들었다가 폐기한다 — DB 에 남지 않는다.
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/14-po-null-note.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/14-po-null-note.ts
  */
 import { generalPurchaseOrderWhere, isGeneralPurchaseOrder } from "../../src/lib/purchase-order-scope"
 import { assertTarget, check, fixtures, prisma, summary, TENANT_ID, uniq } from "./lib"

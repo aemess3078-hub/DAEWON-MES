@@ -100,7 +100,7 @@ const canonicalLabels: Array<[string, string]> = [
   ["nav-item-groups", "품목군관리"],
   ["nav-bom", "BOM관리"],
   ["nav-equipment-master", "설비관리"],
-  ["nav-defects", "불량관리"],
+  ["nav-defects", "불량코드관리"],
   ["nav-routing", "라우팅관리"],
   ["nav-work-centers", "공정관리"],
   ["nav-users", "사용자관리"],
@@ -109,8 +109,6 @@ const canonicalLabels: Array<[string, string]> = [
   ["nav-customers", "고객사관리"],
   ["nav-vendors", "거래처관리"],
   ["nav-inspection-standards", "검사표준관리"],
-  ["nav-mold-management", "금형·치공구관리"],
-  ["nav-downtime-reasons", "비가동사유"],
   ["nav-purchase-orders", "자재발주현황"],
   ["nav-material-receipt", "자재입고현황"],
   ["nav-material-issue", "자재출고현황"],
@@ -118,10 +116,9 @@ const canonicalLabels: Array<[string, string]> = [
   ["nav-inventory", "재고현황"],
   ["nav-inventory-txns", "전체입출고내역"],
   ["nav-wip-inventory", "재공품재고"],
-  ["nav-prod-equip-output", "설비별생산현황"],
-  ["nav-prod-plan-output", "생산계획별생산현황"],
+  ["nav-prod-plan-output", "생산계획관리"], // 대원정밀 목표 메뉴명(페이지 H1 은 아래 assertH1 참고)
   ["nav-work-orders", "작업지시"],
-  ["nav-production-results", "작업일지(실적)"],
+  ["nav-production-results", "작업일지/실적"], // 대원정밀 목표 메뉴명
   ["nav-finished-goods-receipt", "완제품입고"],
   ["nav-outsourcing", "외주관리"],
   ["nav-sales-orders", "수주등록"],
@@ -129,10 +126,25 @@ const canonicalLabels: Array<[string, string]> = [
   ["nav-shipments", "납품정보등록"],
   ["nav-delivery-status", "납품현황"],
   ["nav-quality", "품질관리"],
-  ["nav-project-management", "PMS(프로젝트관리)"],
 ]
 
 for (const [id, label] of canonicalLabels) assertLabel(id, label)
+
+// 대원정밀 메뉴 정책: 목표 메뉴 외 항목은 MES_NAV 에서 빼고 DAEWON_HIDDEN_NAV 에만 둔다(라벨은 정본 유지).
+const hiddenMarker = "export const DAEWON_HIDDEN_NAV"
+const visibleNavSource = navSource.slice(0, navSource.indexOf(hiddenMarker))
+const hiddenNavSource = navSource.slice(navSource.indexOf(hiddenMarker))
+const hiddenByDaewonPolicy: Array<[string, string]> = [
+  ["nav-mold-management", "금형·치공구관리"],
+  ["nav-downtime-reasons", "비가동사유"],
+  ["nav-prod-equip-output", "설비별생산현황"],
+  ["nav-project-orders", "프로젝트 오더"],
+]
+for (const [id, label] of hiddenByDaewonPolicy) {
+  assert(!visibleNavSource.includes(`id: '${id}'`), `${id} must stay out of the visible nav (Daewon policy)`)
+  assert(hiddenNavSource.includes(`id: '${id}', label: '${label}'`), `${id} must be listed in DAEWON_HIDDEN_NAV with label ${label}`)
+}
+assert(!navSource.includes("nav-project-management"), "PMS(프로젝트관리) 메뉴는 대원정밀 범위 밖이라 존재하지 않아야 한다")
 
 assertParent("nav-inventory", "nav-inventory-section")
 assertParent("nav-material-stock", "nav-material")
@@ -200,7 +212,8 @@ assert(!navSource.includes("/app/mes/master/mold-inventory"), "mold-inventory mu
 assert(!navSource.includes("/app/mes/process-progress"), "process-progress must remain hidden from nav")
 assert(!navSource.includes("/app/mes/quotations"), "quotations must remain hidden from nav")
 assert(!navSource.includes("/app/mes/item-prices"), "item-prices must remain hidden from nav")
-assert(!navSource.includes("/app/mes/mrp"), "mrp must remain hidden from nav")
+assertParent("nav-mrp", "nav-material")
+assertHref("nav-mrp", "/app/mes/mrp") // 대원정밀: 자재소요량계획(MRP)은 자재관리 메뉴에 노출한다
 assert(!navSource.includes("/app/mes/final-inspection"), "final-inspection must remain hidden from nav")
 assert(!navSource.includes("/app/mes/measurement"), "measurement must remain hidden from nav")
 

@@ -57,6 +57,7 @@ const MENU_CODE_RESOURCE_MAP: Record<string, string> = {
   "inspection-stages": "QUALITY_INSPECTION",
   spc: "QUALITY_INSPECTION",
   ecn: "ECN",
+  calibration: "INSTRUMENT_CALIBRATION",
   "equipment-repair": "EQUIPMENT_REPAIR",
   "equipment-check": "EQUIPMENT_REPAIR",
   "equipment-problems": "EQUIPMENT_REPAIR",

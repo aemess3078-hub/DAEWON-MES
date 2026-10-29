@@ -252,17 +252,27 @@ const actionsSource = fs.readFileSync("src/lib/actions/defect-corrective-action.
   assertTrue(!hasDelete, "T20. defect-corrective-action.actions.ts는 delete 함수를 export하지 않음(물리 삭제 미제공, 상태전이/수정만 가능)")
 }
 
-// ─── T21: deleteQualityInspection 정리 순서에 조치이력이 포함됨(source-check) ─
+// ─── T21: 조치이력(DefectCorrectiveAction)이 있는 검사는 삭제가 차단됨(source-check) ─
+// 설계 변경(F07 이력 보존): 예전에는 삭제 시 조치이력을 먼저 지웠지만, 지금은 불량 기록이 있는 검사 삭제 자체를 막는다.
+// 조치이력은 불량 기록의 하위이므로 삭제가 막혀 RESTRICT FK 위반도, 조치이력 유실도 생기지 않는다.
 {
   const qualityActionsSource = fs.readFileSync("src/lib/actions/quality.actions.ts", "utf8")
+  const helperSource = fs.readFileSync("src/lib/actions/quality-inspection-integrity.helpers.ts", "utf8")
   const fnStart = qualityActionsSource.indexOf("export async function deleteQualityInspection")
   const fnBody = qualityActionsSource.slice(fnStart, qualityActionsSource.indexOf("\nexport async function", fnStart + 1))
-  const idxCorrectiveAction = fnBody.indexOf("defectCorrectiveAction.deleteMany")
+  const helperStart = helperSource.indexOf("export async function assertInspectionHistoryMutable")
+  const helperBody = helperSource.slice(helperStart, helperSource.indexOf("\n}\n", helperStart))
+  const idxGuard = fnBody.indexOf("assertInspectionHistoryMutable(tx, id, tenantId)")
   const idxDefectRecord = fnBody.indexOf("defectRecord.deleteMany")
   const idxInspectionDelete = fnBody.indexOf("qualityInspection.delete(")
   assertTrue(
-    idxCorrectiveAction >= 0 && idxCorrectiveAction < idxDefectRecord && idxDefectRecord < idxInspectionDelete,
-    "T21. deleteQualityInspection이 DefectCorrectiveAction(RESTRICT FK)도 DefectRecord보다 먼저 정리해 참조무결성을 지킴"
+    helperBody.includes("correctiveActions: { select") &&
+      helperBody.includes("inspection.defectRecords.length > 0") &&
+      idxGuard >= 0 &&
+      idxGuard < idxDefectRecord &&
+      idxDefectRecord < idxInspectionDelete &&
+      !fnBody.includes("defectCorrectiveAction.deleteMany"),
+    "T21. 조치이력(DefectCorrectiveAction)이 달린 불량 기록이 있는 검사는 삭제가 차단되어(이력 보호 검사가 모든 delete 보다 먼저) 참조무결성과 조치이력이 보존됨"
   )
 }
 

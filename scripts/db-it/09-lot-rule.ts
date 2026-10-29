@@ -4,7 +4,7 @@
  *
  * - 사용자가 저장한 NumberingRule(LOT)을 수정하지 않는다. 규칙 없음/비활성 케이스는 트랜잭션 안에서만 바꾸고 롤백한다.
  * - 기존 업무 데이터(DW-* 품목 등)에는 쓰지 않는다. DW-7 은 번호 "미리보기(계산)"에만 쓴다.
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/09-lot-rule.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/09-lot-rule.ts
  */
 import type { Prisma } from "@prisma/client"
 import { assertTarget, check, fixtures, info, loginAs, logout, prisma, summary, TENANT_ID, uniq } from "./lib"

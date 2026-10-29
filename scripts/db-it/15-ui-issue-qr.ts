@@ -5,7 +5,7 @@
  *           다른 자재/없는 LOT/WIP QR 오류 안내 · 수동 선택 유지 · 출고수량 검증 · QR 스캔만으로 재고 변동 없음 · [출고 처리]로만 출고 확정.
  *   - 쓰기: ZT5 접두어 테스트 LOT 4개(원자재 3 · 완제품 1) + 테스트 작업지시 1건(번호 직접 지정, 채번 소모 없음) + 마지막 [출고 처리] 1회. 삭제는 하지 않는다.
  * 사전: 서버가 UI_BASE(기본 http://localhost:3130)에서 실행 중이어야 한다. 실제 프린터 출력은 하지 않는다. 비밀값은 출력하지 않는다.
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/15-ui-issue-qr.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/15-ui-issue-qr.ts
  */
 import { chromium, type Page } from "playwright-core"
 import { assertTarget, check, fixtures, info, loginAs, preflight, prisma, summary, TENANT_ID, uniq } from "./lib"

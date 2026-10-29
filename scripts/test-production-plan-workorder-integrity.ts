@@ -200,8 +200,10 @@ assert(
   "createWorkOrder와 updateWorkOrder 저장 경로 유지"
 )
 
+// 상태 동기화 로직은 production-plan.actions.ts 에서 src/lib/production-plan-sync.ts 로 이동했다(문자열/동작은 그대로).
+// 검증 대상 파일만 현재 위치로 바꿨고, 호출 경로(pop/work-order 액션이 동기화 함수를 실제로 호출)도 함께 확인한다.
 const planActionSource = readFileSync(
-  join(process.cwd(), "src/lib/actions/production-plan.actions.ts"),
+  join(process.cwd(), "src/lib/production-plan-sync.ts"),
   "utf8"
 )
 assert(
@@ -211,6 +213,11 @@ assert(
 assert(
   planActionSource.includes('const FINAL_PLAN_STATUSES: PlanStatus[] = ["COMPLETED", "CANCELLED"]'),
   "완료·취소 계획의 기존 종결 상태 의미 유지"
+)
+assert(
+  readFileSync(join(process.cwd(), "src/lib/actions/pop.actions.ts"), "utf8").includes("syncProductionPlanStatusForWorkOrder(") &&
+    readFileSync(join(process.cwd(), "src/lib/actions/work-order.actions.ts"), "utf8").includes("production-plan-sync"),
+  "POP 실적/작업지시 액션이 생산계획 상태 동기화 함수를 호출"
 )
 
 const salesLinkTestSource = readFileSync(

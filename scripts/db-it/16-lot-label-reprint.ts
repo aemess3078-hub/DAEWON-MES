@@ -3,7 +3,7 @@
  *  - 입고는 실제 입고 처리(createReceivingInspection)로 만든 뒤, 입고 처리를 다시 하지 않고 LOT 기준으로 라벨 정보를 조회·출력 기록한다.
  *  - 확인: 원본 입고 건의 수량·일자 · 최초 출력(사유 없음) · 재출력(사유 필수) · QR 동일 · 다른 LOT/권한 · 업무 데이터 불변.
  *  - 쓰기: ZT5 테스트 LOT 3개(입고 3건) + AuditLog(LotLabel) 기록. 삭제는 하지 않는다.
- * 실행: DAEWON_DB_IT_CONFIRM=aquqetajewvhyirmewfy npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/16-lot-label-reprint.ts
+ * 실행: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB DATABASE_URL=<로컬 *_test DB 주소> DEFAULT_TENANT_ID=<테넌트> npx ts-node --compiler-options '{"module":"commonjs"}' --project tsconfig.json scripts/db-it/16-lot-label-reprint.ts
  */
 import { assertTarget, check, fixtures, info, loginAs, logout, prisma, summary, TENANT_ID, uniq } from "./lib"
 
