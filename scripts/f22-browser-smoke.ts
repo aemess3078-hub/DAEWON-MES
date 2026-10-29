@@ -1,30 +1,23 @@
+/**
+ * F22 브라우저 스모크 — 로컬 테스트 DB 전용
+ *
+ * 이 스크립트는 DB 에 수주/생산계획/작업지시/출하 등 시험 데이터를 만들고 지운다. 운영 DB 에 연결되지 않도록:
+ *  - 맨 처음에 로컬 테스트 DB 가드(scripts/helpers/local-test-db-guard.ts)를 실행하고, 통과하지 못하면 DB 연결 전에 종료한다(exit 2).
+ *  - .env / .env.local 을 자동으로 읽지 않는다. 필요한 값은 프로세스 환경변수로 직접 지정해야 한다.
+ *
+ * 실행 조건: DAEWON_TEST_DB_CONFIRM=YES_LOCAL_TEST_DB, DATABASE_URL=postgresql://…@127.0.0.1(또는 localhost):포트/<이름>_test,
+ *           F22_SMOKE_BASE_URL(기본 http://localhost:3000)은 같은 DB 에 연결된 로컬 앱 서버, DEFAULT_TENANT_ID 는 그 DB 의 테넌트.
+ */
 import * as fs from "node:fs"
-import { join } from "node:path"
 import { register } from "tsconfig-paths"
 import { chromium, expect } from "@playwright/test"
 import { BOMStatus, ItemType, PartnerType, PlanStatus, RoutingScope, RoutingStatus, ShipmentStatus, SiteType, UOM, WorkCenterKind, WorkOrderStatus } from "@prisma/client"
+import { assertConnectedDatabaseIsTest, assertLocalTestDbOrExit } from "./helpers/local-test-db-guard"
 
 register({ baseUrl: process.cwd(), paths: { "@/*": ["src/*"] } })
 
-function loadLocalEnv() {
-  for (const file of [".env.local", ".env"]) {
-    const path = join(process.cwd(), file)
-    if (!fs.existsSync(path)) continue
-    for (const raw of fs.readFileSync(path, "utf8").split(/\r?\n/)) {
-      const line = raw.trim()
-      if (!line || line.startsWith("#")) continue
-      const idx = line.indexOf("=")
-      if (idx <= 0) continue
-      const key = line.slice(0, idx).trim()
-      if (process.env[key]) continue
-      let value = line.slice(idx + 1).trim()
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1)
-      process.env[key] = value
-    }
-  }
-}
-
-loadLocalEnv()
+// 운영 DB 보호: DB 에 연결하는 모듈(prisma)을 불러오기 전에 반드시 실행한다. 통과하지 못하면 여기서 프로세스가 종료된다.
+assertLocalTestDbOrExit("f22-browser-smoke", process.env, { baseUrlVar: "F22_SMOKE_BASE_URL", defaultBaseUrl: "http://localhost:3000" })
 const { prisma } = require("../src/lib/db/prisma") as typeof import("../src/lib/db/prisma")
 const { hashPassword } = require("../src/lib/password") as typeof import("../src/lib/password")
 
@@ -153,7 +146,11 @@ async function createFixture() {
   return { progressSo, progressPlan, cancelSo, cancelPlan }
 }
 
+let databaseVerified = false
+
 async function main() {
+  await assertConnectedDatabaseIsTest(prisma) // 2차 방어: 실제 연결된 DB 가 *_test 인지 쓰기 전에 확인
+  databaseVerified = true
   const fixture = await createFixture()
   const browser = await chromium.launch({ headless: true, executablePath: BROWSER_EXECUTABLE })
   const page = await browser.newPage()
@@ -236,6 +233,6 @@ main()
     process.exitCode = 1
   })
   .finally(async () => {
-    await cleanup()
+    if (databaseVerified) await cleanup() // 연결된 DB 가 확인된 경우에만 삭제를 시도한다
     await prisma.$disconnect()
   })

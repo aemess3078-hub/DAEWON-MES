@@ -51,6 +51,7 @@
     "test:calibration-permissions": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"esModuleInterop\\\":true}\" --project tsconfig.json scripts/test-calibration-permissions.ts",
     "test:calibration-server-actions": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"esModuleInterop\\\":true}\" --project tsconfig.json scripts/test-calibration-server-actions.ts",
     "test:calibration-import-clean-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"esModuleInterop\\\":true}\" --project tsconfig.json scripts/test-calibration-import-clean-db.ts",
+    "test:local-test-db-guard": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"esModuleInterop\\\":true,\\\"target\\\":\\\"es2019\\\"}\" --project tsconfig.json scripts/test-local-test-db-guard.ts",
     "test:instrument-calibration": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\",\\\"esModuleInterop\\\":true}\" --project tsconfig.json scripts/test-instrument-calibration.ts",
     "test:daewon-stabilization-phase1": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-daewon-stabilization-phase1.ts",
     "test:monitor-latest-snapshot": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-monitor-latest-snapshot.ts",
