@@ -59,7 +59,7 @@ hasSensitiveSanitizer(helper)
 ok(/await db\.auditLog\.create/.test(helper), "recordAuditLog writes through the provided db/transaction client")
 ok(/Prisma\.JsonNull/.test(helper), "recordAuditLog handles JSON null explicitly")
 
-ok(/nav-audit-log/.test(nav) && /\/app\/mes\/audit-log/.test(nav), "AUDIT_LOG has a dedicated menu route")
+ok(/nav-audit-log/.test(nav) && /\/app\/mes\/audit-log/.test(nav), "AUDIT_LOG keeps its dedicated route (menu hidden for Daewon via DAEWON_HIDDEN_NAV)")
 ok(/"audit-log": "AUDIT_LOG"/.test(permissions), "AUDIT_LOG route maps to RolePermission resource")
 ok(/requireResourcePermission\("AUDIT_LOG", "READ"\)/.test(userManagement), "AuditLog query is protected by AUDIT_LOG READ")
 ok(/getAuditLogs\(\{ days: 90/.test(auditPage), "dedicated AuditLog page loads paginated audit rows")
