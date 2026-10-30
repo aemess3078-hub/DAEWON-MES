@@ -141,6 +141,7 @@ const hiddenByDaewonPolicy: Array<[string, string]> = [
   ["nav-defects", "불량코드관리"],
   ["nav-attachments", "첨부파일관리"],
   ["nav-audit-log", "감사로그"],
+  ["nav-common-codes", "코드관리"],
 ]
 for (const [id, label] of hiddenByDaewonPolicy) {
   assert(!visibleNavSource.includes(`id: '${id}'`), `${id} must stay out of the visible nav (Daewon policy)`)
@@ -155,6 +156,7 @@ const masterRetained: Array<[string, string]> = [
   ["/app/mes/defects", "src/app/app/mes/defects/page.tsx"],
   ["/app/mes/attachments", "src/app/app/mes/attachments/page.tsx"],
   ["/app/mes/audit-log", "src/app/app/mes/audit-log/page.tsx"],
+  ["/app/mes/common-codes", "src/app/app/mes/common-codes/page.tsx"],
 ]
 const scopeSource = readFileSync(join(root, "src/lib/auth/daewon-scope.ts"), "utf8")
 const permissionMapSource = readFileSync(join(root, "src/lib/auth/role-permissions.ts"), "utf8")
@@ -164,6 +166,8 @@ for (const [href, pageFile] of masterRetained) {
   assert(hiddenNavSource.includes(`href: '${href}'`), `${href} must be listed in DAEWON_HIDDEN_NAV`)
   assert(scopeSource.includes(`"${href}"`), `${href} route must stay allowed in daewon-scope (menu-only hiding)`)
 }
+// 코드관리: 개발자 전용 경로로 유지(URL 직접 접근 가능)하되, 메뉴에서는 개발자 포함 모두에게 보이지 않는다
+assert(scopeSource.includes('"/app/mes/common-codes"') && scopeSource.indexOf('"/app/mes/common-codes"') > scopeSource.indexOf("DAEWON_DEV_ONLY_ROUTES"), "common-codes stays a developer-only route")
 assert(/defects: "DEFECT_MANAGEMENT"/.test(permissionMapSource), "defects route keeps its RolePermission resource mapping")
 assert(/"audit-log": "AUDIT_LOG"/.test(permissionMapSource), "audit-log route keeps its RolePermission resource mapping")
 assert(permissionMapSource.includes("ATTACHMENT_MENU_CODES = new Set([\"attachments\"])"), "attachments keeps its permission handling")
