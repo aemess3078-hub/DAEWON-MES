@@ -1,5 +1,7 @@
 "use server"
 
+import { requireTenantAccess } from "@/lib/auth"
+
 import { prisma } from "@/lib/db/prisma"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 
@@ -14,6 +16,7 @@ function unique(values: Array<string | null | undefined>): string[] {
 export type LotLineageResult = Awaited<ReturnType<typeof getLotLineageByNo>>
 
 export async function getLotLineageByNo(lotNo: string, tenantId: string) {
+  await requireTenantAccess(tenantId)
   await requireResourcePermission("LOT", "READ")
   const query = lotNo.trim()
   if (!query) return null

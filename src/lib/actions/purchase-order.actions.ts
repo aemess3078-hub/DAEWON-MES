@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { getTenantId, requireRole } from "@/lib/auth"
+import { getTenantId, requireRole, requireTenantAccess } from "@/lib/auth"
 import { Prisma, PurchaseOrderStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
@@ -20,6 +20,7 @@ import {
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
 export async function getPurchaseOrders(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.purchaseOrder.findMany({
     where: {
       tenantId,
@@ -60,6 +61,7 @@ export async function getPurchaseOrders(tenantId: string) {
 //  - 입고 대기 상태(ORDERED / PARTIAL_RECEIVED)만
 //  - 외주발주(OS- / [OUTSOURCING]) 제외 — getPurchaseOrders와 동일 정책
 export async function getPendingPurchaseOrdersForReceipt(tenantId: string, siteId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.purchaseOrder.findMany({
     where: {
       tenantId,
@@ -98,6 +100,7 @@ export async function getPendingPurchaseOrdersForReceipt(tenantId: string, siteI
 }
 
 export async function getSuppliers(tenantId: string) {
+  await requireTenantAccess(tenantId)
   return prisma.businessPartner.findMany({
     where: { tenantId, partnerType: { in: ["SUPPLIER", "BOTH"] } },
     orderBy: { name: "asc" },
@@ -105,6 +108,7 @@ export async function getSuppliers(tenantId: string) {
 }
 
 export async function getRawMaterials(tenantId: string) {
+  await requireTenantAccess(tenantId)
   return prisma.item.findMany({
     where: {
       tenantId,
@@ -119,6 +123,7 @@ export async function getItemCurrentStock(
   itemId: string,
   tenantId: string
 ): Promise<{ qtyOnHand: number; qtyAvailable: number }> {
+  await requireTenantAccess(tenantId)
   const balances = await prisma.inventoryBalance.findMany({
     where: { itemId, tenantId },
   })
@@ -132,6 +137,7 @@ export async function getItemPrice(
   itemId: string,
   partnerId: string
 ) {
+  await requireTenantAccess(tenantId)
   return prisma.itemPrice.findFirst({
     where: {
       tenantId,

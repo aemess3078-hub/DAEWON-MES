@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/db/prisma"
 import { UserRole, PermissionAction } from "@prisma/client"
 import { revalidatePath } from "next/cache"
-import { getTenantId, getCurrentUser, requireRole } from "@/lib/auth"
+import { getTenantId, getCurrentUser, requireRole, requireTenantAccess } from "@/lib/auth"
 import { canAccessFullUserManagement } from "@/lib/developer"
 import { recordAuditLog } from "@/lib/audit-log"
 import { buildDefaultPermissionRows } from "@/lib/auth/permission-catalog"
@@ -36,6 +36,7 @@ async function requireSameTenantPermissionAccess(tenantId: string) {
 
 // 1. 전체 권한 조회
 export async function getPermissions(tenantId: string): Promise<PermissionRecord[]> {
+  await requireTenantAccess(tenantId)
   await requireSameTenantPermissionAccess(tenantId)
 
   return prisma.rolePermission.findMany({
@@ -52,6 +53,7 @@ export type PermissionMatrix = Record<
 >
 
 export async function getPermissionMatrix(tenantId: string): Promise<PermissionMatrix> {
+  await requireTenantAccess(tenantId)
   const permissions = await getPermissions(tenantId)
   const matrix: PermissionMatrix = {}
 
@@ -73,6 +75,7 @@ export async function getPermissionMatrix(tenantId: string): Promise<PermissionM
 // 2-a. 권한 매트릭스 조회 + 없으면 기본값 자동 삽입 (운영 환경용)
 // 업무 더미 데이터 없이 권한 정의만 초기화한다.
 export async function ensurePermissionMatrix(tenantId: string): Promise<PermissionMatrix> {
+  await requireTenantAccess(tenantId)
   const user = await requireSameTenantPermissionAccess(tenantId)
 
   try {

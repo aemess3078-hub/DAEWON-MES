@@ -3,9 +3,10 @@
 import { prisma } from "@/lib/db/prisma"
 import { ECNStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
-import { getCurrentUser, requireRole, type CurrentUser } from "@/lib/auth"
+import { getCurrentUser, requireRole, type CurrentUser, requireTenantAccess } from "@/lib/auth"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { isDeveloperUser } from "@/lib/developer"
 
 export type ECNDetail = {
   id: string
@@ -95,11 +96,16 @@ export async function getECNs(
   profileId: string,
   isAdmin: boolean,
 ): Promise<ECNWithDetails[]> {
+  // 조회 범위(전체/본인)와 본인 식별은 클라이언트 인자가 아니라 세션 기준으로 확정한다.
+  const user = await requireTenantAccess(tenantId)
+  const canSeeAll =
+    isDeveloperUser(user) || user.role === "OWNER" || user.role === "ADMIN" || user.role === "MANAGER"
+  const seeAll = isAdmin && canSeeAll
   try {
     const results = await prisma.engineeringChange.findMany({
       where: {
         tenantId,
-        ...(isAdmin ? {} : { requestedBy: profileId }),
+        ...(seeAll ? {} : { requestedBy: user.profileId }),
       },
       include: ECN_INCLUDE,
       orderBy: { createdAt: "desc" },
@@ -120,6 +126,7 @@ export async function getECNById(id: string): Promise<ECNWithDetails | null> {
 }
 
 export async function getItemsForECN(tenantId: string) {
+  await requireTenantAccess(tenantId)
   try {
     return await prisma.item.findMany({
       where: { tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] }, status: "ACTIVE" },

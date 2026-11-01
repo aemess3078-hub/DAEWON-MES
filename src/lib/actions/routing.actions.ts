@@ -1,6 +1,6 @@
 "use server"
 
-import { getTenantId, requireRole } from "@/lib/auth"
+import { getTenantId, requireRole, requireTenantAccess } from "@/lib/auth"
 import { prisma } from "@/lib/db/prisma"
 import { RoutingScope, RoutingStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
@@ -139,6 +139,7 @@ export async function validateRoutingForItem(params: {
   itemId: string
   routingId: string
 }): Promise<void> {
+  await requireTenantAccess(params.tenantId)
   await validateRoutingForItemContext(prisma, params)
 }
 

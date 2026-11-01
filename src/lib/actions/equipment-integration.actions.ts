@@ -9,7 +9,7 @@ import {
   Prisma,
 } from "@prisma/client"
 import { revalidatePath } from "next/cache"
-import { requireDeveloper } from "@/lib/auth"
+import { requireDeveloper, requireTenantAccess } from "@/lib/auth"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { generateAgentKey, hashAgentKey } from "@/lib/ncwatch/agent-key"
 import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
@@ -179,6 +179,7 @@ export type CopyEquipmentTagResult = {
 // ─── EdgeGateway CRUD ─────────────────────────────────────────────────────────
 
 export async function getGateways(tenantId: string): Promise<EdgeGatewayRow[]> {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   const rows = await prisma.edgeGateway.findMany({
     where: { tenantId },
@@ -275,6 +276,7 @@ export async function deleteGateway(id: string) {
 export async function getConnections(
   tenantId: string
 ): Promise<EquipmentConnectionRow[]> {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   const rows = await prisma.equipmentConnection.findMany({
     where: {
@@ -491,6 +493,7 @@ async function ensureNcwatchConnectionAndDefaultTags(
 export async function getNcwatchMappings(
   tenantId: string
 ): Promise<NcwatchMappingRow[]> {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   const [mappings, statuses, historyRows, syncLogs] = await Promise.all([
     prisma.ncwatchEquipmentMapping.findMany({
@@ -727,6 +730,7 @@ export async function toggleNcwatchMappingActive(id: string, isActive: boolean) 
 // ─── DataTag CRUD ─────────────────────────────────────────────────────────────
 
 export async function getTags(tenantId: string): Promise<DataTagRow[]> {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   const rows = await prisma.dataTag.findMany({
     where: {
@@ -1000,6 +1004,7 @@ export async function copyEquipmentTags(
 // ─── Lookup Helpers ───────────────────────────────────────────────────────────
 
 export async function getSitesForGateway(tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   return prisma.site.findMany({
     where: { tenantId },
@@ -1009,6 +1014,7 @@ export async function getSitesForGateway(tenantId: string) {
 }
 
 export async function getEquipmentsForConnection(tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   return prisma.equipment.findMany({
     where: { tenantId, status: "ACTIVE" },
@@ -1023,6 +1029,7 @@ export async function getEquipmentsForConnection(tenantId: string) {
 }
 
 export async function getGatewaysForConnection(tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   return prisma.edgeGateway.findMany({
     where: { tenantId },
@@ -1032,6 +1039,7 @@ export async function getGatewaysForConnection(tenantId: string) {
 }
 
 export async function getConnectionsForTag(tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   return prisma.equipmentConnection.findMany({
     where: {

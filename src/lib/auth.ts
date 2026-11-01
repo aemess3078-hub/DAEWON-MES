@@ -141,3 +141,20 @@ export async function requireRole(
 
   return currentUser;
 }
+
+// ─── 테넌트 격리 가드 ─────────────────────────────────────────────────────────
+// 서버 액션이 클라이언트가 넘긴 tenantId 를 그대로 쓰면 다른 테넌트 데이터를 읽고 쓸 수 있다.
+// 테넌트는 세션에서만 얻고, 인자로 받은 값은 세션과 일치할 때만 허용한다.
+
+export function assertTenantMatch(user: CurrentUser, tenantId: string): void {
+  if (user.tenantId !== tenantId) throw new Error('FORBIDDEN');
+}
+
+export async function requireTenantAccess(
+  tenantId: string,
+  minRole: UserRole = 'VIEWER',
+): Promise<CurrentUser> {
+  const user = await requireRole(minRole);
+  assertTenantMatch(user, tenantId);
+  return user;
+}

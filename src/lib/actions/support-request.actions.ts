@@ -1,5 +1,7 @@
 "use server"
 
+import { requireTenantAccess } from "@/lib/auth"
+
 import { prisma } from "@/lib/db/prisma"
 import { revalidatePath } from "next/cache"
 import type { SupportType, SupportStatus, SupportPriority } from "@prisma/client"
@@ -102,6 +104,7 @@ export async function getSupportRequests(
   currentProfileId: string,
   isAdmin: boolean,
 ): Promise<SupportRequestItem[]> {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   try {
     const rows = await prisma.supportRequest.findMany({
@@ -145,6 +148,7 @@ export async function createSupportRequest(
   input: CreateSupportRequestInput,
 ): Promise<SupportRequestItem> {
   await assertDaewonFeatureScope()
+  await requireTenantAccess(input.tenantId)
   const row = await prisma.supportRequest.create({
     data: {
       tenantId: input.tenantId,

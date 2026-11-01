@@ -1,5 +1,7 @@
 "use server"
 
+import { requireTenantAccess } from "@/lib/auth"
+
 import { prisma } from "@/lib/db/prisma"
 import { QuotationStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
@@ -126,6 +128,7 @@ async function generateQuotationNo(tenantId: string): Promise<string> {
 }
 
 export async function createQuotation(data: QuotationFormValues, tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   await requireResourcePermission("QUOTATION", "CREATE")
   const quotationNo = await generateQuotationNo(tenantId)
@@ -222,6 +225,7 @@ export async function convertToSalesOrder(
   quotationId: string,
   tenantId: string
 ): Promise<string> {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   await requireResourcePermission("QUOTATION", "UPDATE")
   await requireResourcePermission("SALES_ORDER", "CREATE")

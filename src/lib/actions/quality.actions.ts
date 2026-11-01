@@ -12,7 +12,7 @@ import {
   DefectDisposition,
 } from "@prisma/client"
 import { revalidatePath } from "next/cache"
-import { requireRole, getTenantId } from "@/lib/auth"
+import { requireRole, getTenantId, requireTenantAccess, assertTenantMatch } from "@/lib/auth"
 import { checkDefectCodeReferencesForBulk, requireBulkDeletePermission } from "./reference-check.server"
 import { type CreateMeasurementInput } from "./inspection-measurement.helpers"
 import { assertInspectionHistoryMutable, validateInspectionMutationContext } from "./quality-inspection-integrity.helpers"
@@ -328,6 +328,7 @@ async function getQualityInspectionRecords(tenantId: string) {
 }
 
 export async function getDefectCodes(tenantId: string): Promise<DefectCodeRow[]> {
+  await requireTenantAccess(tenantId)
   return prisma.defectCode.findMany({
     where: { tenantId },
     orderBy: [{ defectCategory: "asc" }, { code: "asc" }],
@@ -335,8 +336,9 @@ export async function getDefectCodes(tenantId: string): Promise<DefectCodeRow[]>
 }
 
 export async function createDefectCode(data: CreateDefectCodeInput, tenantId: string) {
-  await requireResourcePermission("DEFECT_MANAGEMENT", "CREATE")
+  const user = await requireResourcePermission("DEFECT_MANAGEMENT", "CREATE")
   await requireRole("OPERATOR")
+  assertTenantMatch(user, tenantId)
   const existing = await prisma.defectCode.findFirst({
     where: { tenantId, code: data.code },
   })
@@ -469,6 +471,7 @@ export async function bulkDeleteDefectCodes(ids: string[]): Promise<BulkDeleteDe
 }
 
 export async function getInspectionSpecs(tenantId: string): Promise<InspectionSpecWithItems[]> {
+  await requireTenantAccess(tenantId)
   const specs = await prisma.inspectionSpec.findMany({
     where: { tenantId },
     include: {
@@ -485,6 +488,7 @@ export async function createInspectionSpec(
   data: CreateInspectionSpecInput,
   tenantId: string
 ) {
+  await requireTenantAccess(tenantId)
   await requireResourcePermission("INSPECTION_SPEC", "CREATE")
   await requireRole("OPERATOR")
   const existing = await prisma.inspectionSpec.findFirst({
@@ -613,6 +617,7 @@ export async function deleteInspectionItem(id: string) {
 export async function getQualityInspections(
   tenantId: string
 ): Promise<QualityInspectionWithDetails[]> {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   const inspections = await getQualityInspectionRecords(tenantId)
   return inspections.map(serializeQualityInspection)
@@ -768,14 +773,16 @@ export async function deleteQualityInspection(id: string) {
 }
 
 export async function getItemsForQuality() {
+  const user = await requireRole("VIEWER")
   return prisma.item.findMany({
     select: { id: true, code: true, name: true },
-    where: { status: "ACTIVE" },
+    where: { tenantId: user.tenantId, status: "ACTIVE" },
     orderBy: { code: "asc" },
   })
 }
 
 export async function getRoutingOperationsForQuality(tenantId: string) {
+  await requireTenantAccess(tenantId)
   return prisma.routingOperation.findMany({
     where: { routing: { tenantId } },
     select: {
@@ -808,6 +815,7 @@ export async function getWorkOrderOperationsForInspection(
   tenantId: string
 ): Promise<WorkOrderOperationForInspection[]> {
   await assertDaewonFeatureScope()
+  await requireTenantAccess(tenantId)
   const ops = await prisma.workOrderOperation.findMany({
     where: {
       workOrder: { tenantId },
@@ -844,6 +852,7 @@ export async function getInspectionSpecByOperation(
   routingOperationId: string,
   tenantId: string
 ): Promise<InspectionSpecWithItems | null> {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   const spec = await getInspectionSpecRecord(routingOperationId, tenantId)
   return spec ? serializeInspectionSpec(spec) : null
@@ -851,6 +860,7 @@ export async function getInspectionSpecByOperation(
 
 export async function getProfilesForInspection(tenantId: string) {
   await assertDaewonFeatureScope()
+  await requireTenantAccess(tenantId)
   return prisma.profile.findMany({
     where: { tenantUsers: { some: { tenantId, isActive: true } } },
     select: { id: true, name: true, email: true },

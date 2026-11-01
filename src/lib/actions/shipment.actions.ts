@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { requireRole } from "@/lib/auth"
+import { requireRole, requireTenantAccess } from "@/lib/auth"
 import { revalidatePath } from "next/cache"
 import { assertLotQualityReleaseAllowed } from "./quality-release-gate.helpers"
 import type { Prisma } from "@prisma/client"
@@ -15,6 +15,7 @@ import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 
 export async function getShipments(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.shipmentOrder.findMany({
     where: { tenantId },
     include: {
@@ -52,6 +53,7 @@ export async function getShipments(tenantId: string) {
 export type DeliveryStatusRow = Awaited<ReturnType<typeof getDeliveryStatusRows>>[number]
 
 export async function getDeliveryStatusRows(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.shipmentOrder.findMany({
     where: { tenantId },
     select: {
@@ -371,6 +373,7 @@ export async function getAvailableFinishedGoodsLots(
 }
 
 export async function generateShipmentNo(tenantId: string): Promise<string> {
+  await requireTenantAccess(tenantId)
   const { year } = kstDateParts()
   const prefix = `SH-${year}-`
   const last = await prisma.shipmentOrder.findFirst({

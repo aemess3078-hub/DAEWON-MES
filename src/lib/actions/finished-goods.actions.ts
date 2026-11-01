@@ -2,7 +2,7 @@
 
 import { LotGenealogyRelation } from "@prisma/client"
 import { prisma } from "@/lib/db/prisma"
-import { requireRole } from "@/lib/auth"
+import { requireRole, requireTenantAccess } from "@/lib/auth"
 import { revalidatePath } from "next/cache"
 import { createFinishedGoodsLot } from "./finished-goods-lot.helpers"
 import { resolveFinishedGoodsReceiptDestination } from "./finished-goods-location.helpers"
@@ -140,6 +140,7 @@ function calculateReceiptQuantity(source: ReceiptQuantitySource) {
 export async function getWorkOrdersForReceipt(
   tenantId: string
 ): Promise<WorkOrderForReceipt[]> {
+  await requireTenantAccess(tenantId)
   const workOrders = await prisma.workOrder.findMany({
     where: { tenantId, status: "COMPLETED" },
     include: {
@@ -234,6 +235,7 @@ export async function getWorkOrdersForReceipt(
 export async function getFinishedGoodsWarehouses(
   tenantId: string
 ): Promise<WarehouseWithLocations[]> {
+  await requireTenantAccess(tenantId)
   const warehouses = await prisma.warehouse.findMany({
     where: { tenantId },
     select: { id: true, siteId: true, code: true, name: true },

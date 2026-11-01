@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { requireRole } from "@/lib/auth"
+import { requireRole, requireTenantAccess } from "@/lib/auth"
 import { SalesOrderStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { getErrorMessage } from "@/lib/utils"
@@ -13,6 +13,7 @@ import { getSalesOrderProgressForTenant } from "@/lib/sales-order-progress.serve
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
 export async function getSalesOrders(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.salesOrder.findMany({
     where: { tenantId },
     include: {
@@ -38,6 +39,7 @@ export async function getSalesOrders(tenantId: string) {
 export type SalesOrderStatusRow = Awaited<ReturnType<typeof getSalesOrderStatusRows>>[number]
 
 export async function getSalesOrderStatusRows(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.salesOrder.findMany({
     where: { tenantId },
     select: {
@@ -83,6 +85,7 @@ export async function getSalesOrderStatusRows(tenantId: string) {
 }
 
 export async function getCustomers(tenantId: string) {
+  await requireTenantAccess(tenantId)
   return prisma.businessPartner.findMany({
     where: { tenantId, partnerType: { in: ["CUSTOMER", "BOTH"] } },
     orderBy: { name: "asc" },
@@ -90,6 +93,7 @@ export async function getCustomers(tenantId: string) {
 }
 
 export async function getItemsForSales(tenantId: string) {
+  await requireTenantAccess(tenantId)
   return prisma.item.findMany({
     where: { tenantId, status: "ACTIVE", itemType: "FINISHED" },
     orderBy: { name: "asc" },
@@ -99,6 +103,7 @@ export async function getItemsForSales(tenantId: string) {
 // ─── Business Logic ───────────────────────────────────────────────────────────
 
 export async function generateSalesOrderNo(tenantId: string): Promise<string> {
+  await requireTenantAccess(tenantId)
   const { year } = kstDateParts()
   const prefix = `SO-${year}-`
   const last = await prisma.salesOrder.findFirst({
@@ -344,6 +349,7 @@ export async function checkInventoryForSalesOrder(
   salesOrderId: string,
   tenantId: string
 ): Promise<ItemStockStatus[]> {
+  await requireTenantAccess(tenantId)
   const order = await prisma.salesOrder.findUniqueOrThrow({
     where: { id: salesOrderId },
     include: {
@@ -422,6 +428,7 @@ export async function getSalesOrderFulfillmentStatus(
   tenantId: string,
   includeNonConfirmed: boolean
 ): Promise<FulfillmentRow[]> {
+  await requireTenantAccess(tenantId)
   const statusFilter: SalesOrderStatus[] = [
     "CONFIRMED",
     "IN_PRODUCTION",
