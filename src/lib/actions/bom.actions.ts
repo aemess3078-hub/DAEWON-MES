@@ -114,10 +114,30 @@ export type CreateBomInput = {
   bomItems: BOMItemInput[]
 }
 
+/**
+ * BOM 입력 서버 검증 (N-02, S-09 일부)
+ *  - 한 BOM 안에서 같은 구성자재 중복 금지(Excel 업로드 경로와 같은 정책)
+ *  - 상위 품목을 자기 자신의 구성자재로 쓸 수 없음
+ *  - 상위 품목·구성자재가 모두 내 테넌트 소유 품목이어야 함(클라이언트가 보낸 ID 를 신뢰하지 않는다)
+ */
+async function assertBomInputValid(tenantId: string, data: CreateBomInput) {
+  const componentIds = data.bomItems.map((b) => b.componentItemId)
+  const dupIds = componentIds.filter((id, i) => componentIds.indexOf(id) !== i)
+  if (dupIds.length > 0) {
+    const dups = await prisma.item.findMany({ where: { tenantId, id: { in: Array.from(new Set(dupIds)) } }, select: { code: true } })
+    throw new Error(`같은 구성자재를 한 BOM 에 중복해서 등록할 수 없습니다: ${dups.map((d) => d.code).join(", ") || "중복 자재"}`)
+  }
+  if (componentIds.includes(data.itemId)) throw new Error("BOM 의 상위 품목을 구성자재로 등록할 수 없습니다.")
+  const wanted = Array.from(new Set([data.itemId, ...componentIds]))
+  const owned = await prisma.item.count({ where: { tenantId, id: { in: wanted } } })
+  if (owned !== wanted.length) throw new Error("선택한 품목 중 존재하지 않거나 접근 권한이 없는 품목이 있습니다.")
+}
+
 export async function createBom(data: CreateBomInput, _tenantId?: string) {
   await requireResourcePermission("BOM", "CREATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
+  await assertBomInputValid(tenantId, data)
   const { bomItems, ...bomFields } = data
   const bom = await prisma.bOM.create({
     data: {
@@ -154,6 +174,7 @@ export async function updateBom(id: string, data: CreateBomInput) {
   const tenantId = await getTenantId()
   const owned = await prisma.bOM.findFirst({ where: { id, tenantId } })
   if (!owned) throw new Error("NOT_FOUND")
+  await assertBomInputValid(tenantId, data)
 
   const { bomItems, ...bomFields } = data
   const { itemId, version, isDefault, status } = bomFields
@@ -199,6 +220,17 @@ export async function deleteBom(id: string) {
   const tenantId = await getTenantId()
   const owned = await prisma.bOM.findFirst({ where: { id, tenantId } })
   if (!owned) throw new Error("NOT_FOUND")
+
+  // N-04: 생산계획·작업지시가 참조 중인 BOM 은 삭제할 수 없다(계획의 BOM 참조가 조용히 끊기는 것을 방지).
+  const [planItemCount, workOrderCount] = await Promise.all([
+    prisma.productionPlanItem.count({ where: { bomId: id } }),
+    prisma.workOrder.count({ where: { bomId: id } }),
+  ])
+  if (planItemCount > 0 || workOrderCount > 0) {
+    throw new Error(
+      `이 BOM 은 생산계획 ${planItemCount}건, 작업지시 ${workOrderCount}건에서 사용 중이라 삭제할 수 없습니다. 사용을 중단하려면 상태를 '비활성'으로 변경하세요.`
+    )
+  }
 
   await prisma.$transaction([
     prisma.bOMItem.deleteMany({ where: { bomId: id } }),

@@ -13,7 +13,19 @@ export const bomFormSchema = z.object({
   version: z.string().min(1, "버전을 입력하세요"),
   isDefault: z.boolean().default(false),
   status: z.nativeEnum(BOMStatus).default(BOMStatus.DRAFT),
-  bomItems: z.array(bomItemFormSchema).min(1, "자재를 최소 1개 이상 추가하세요"),
+  bomItems: z
+    .array(bomItemFormSchema)
+    .min(1, "자재를 최소 1개 이상 추가하세요")
+    .superRefine((items, ctx) => {
+      const seen = new Set<string>()
+      items.forEach((item, index) => {
+        if (!item.componentItemId) return
+        if (seen.has(item.componentItemId)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: [index, "componentItemId"], message: "같은 자재를 중복해서 선택할 수 없습니다" })
+        }
+        seen.add(item.componentItemId)
+      })
+    }),
 })
 
 export type BOMItemFormValues = z.infer<typeof bomItemFormSchema>

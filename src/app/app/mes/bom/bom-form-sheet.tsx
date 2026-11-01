@@ -89,6 +89,7 @@ export function BomFormSheet({
     control: form.control,
     name: "bomItems",
   })
+  const selectedComponentIds = form.watch("bomItems").map((b) => b.componentItemId)
 
   useEffect(() => {
     if (open) {
@@ -121,6 +122,7 @@ export function BomFormSheet({
       router.refresh()
     } catch (error) {
       console.error("저장 실패:", error)
+      alert(error instanceof Error ? error.message : "저장 중 오류가 발생했습니다.")
     } finally {
       setIsLoading(false)
     }
@@ -248,6 +250,7 @@ export function BomFormSheet({
                                   key={item.id}
                                   value={item.id}
                                   className="text-[13px]"
+                                  disabled={selectedComponentIds.includes(item.id) && item.id !== f.value}
                                 >
                                   [{item.code}] {item.name} ({item.uom})
                                 </SelectItem>

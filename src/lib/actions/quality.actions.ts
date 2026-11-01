@@ -145,6 +145,34 @@ export type UpsertInspectionItemInput = {
   unit?: string | null
 }
 
+/**
+ * 검사항목 입력 검증·정규화 (N-09·N-10)
+ *  - 항목명 필수, 순서(seq)는 1 이상의 정수이며 한 표준 안에서 중복 불가
+ *  - 수치(NUMERIC) 항목은 한쪽 한도만 있어도 되지만(판정 로직은 없는 쪽을 판정하지 않음) 두 한도가 모두 있으면 하한 <= 상한
+ *  - 수치가 아닌 항목의 상·하한은 의미가 없으므로 비운다(화면에서 입력칸이 비활성인 값이 남아 저장되는 것을 방지)
+ */
+function normalizeInspectionItems(items: UpsertInspectionItemInput[]): UpsertInspectionItemInput[] {
+  const seen = new Set<number>()
+  return items.map((item, idx) => {
+    const name = (item.name ?? "").trim()
+    if (!name) throw new Error(`${idx + 1}번째 검사항목의 항목명을 입력해 주세요.`)
+    if (!Number.isInteger(item.seq) || item.seq <= 0) throw new Error(`'${name}' 항목의 순서는 1 이상의 정수여야 합니다.`)
+    if (seen.has(item.seq)) throw new Error(`검사항목 순서가 중복되었습니다(순서 ${item.seq}). 순서를 확인해 주세요.`)
+    seen.add(item.seq)
+    const unit = item.unit ?? null
+    if (item.inputType !== "NUMERIC") return { ...item, name, lowerLimit: null, upperLimit: null, unit }
+    const lower = item.lowerLimit ?? null
+    const upper = item.upperLimit ?? null
+    if ((lower !== null && !Number.isFinite(lower)) || (upper !== null && !Number.isFinite(upper))) {
+      throw new Error(`'${name}' 항목의 상·하한은 숫자여야 합니다.`)
+    }
+    if (lower !== null && upper !== null && lower > upper) {
+      throw new Error(`'${name}' 항목의 하한(${lower})이 상한(${upper})보다 클 수 없습니다.`)
+    }
+    return { ...item, name, lowerLimit: lower, upperLimit: upper, unit }
+  })
+}
+
 export type CreateQualityInspectionInput = {
   workOrderOperationId: string
   inspectionSpecId: string
@@ -563,6 +591,7 @@ export async function upsertInspectionItems(
   const tenantId = await getTenantId()
   const ownedSpec = await prisma.inspectionSpec.findFirst({ where: { id: inspectionSpecId, tenantId }, select: { id: true } })
   if (!ownedSpec) throw new Error("검사표준을 찾을 수 없습니다.")
+  const normalized = normalizeInspectionItems(items)
 
   await prisma.$transaction(async (tx) => {
     const measuredCount = await tx.inspectionMeasurement.count({
@@ -576,9 +605,9 @@ export async function upsertInspectionItems(
 
     await tx.inspectionItem.deleteMany({ where: { inspectionSpecId } })
 
-    if (items.length > 0) {
+    if (normalized.length > 0) {
       await tx.inspectionItem.createMany({
-        data: items.map((item) => ({
+        data: normalized.map((item) => ({
           inspectionSpecId,
           seq: item.seq,
           name: item.name,
@@ -586,6 +615,135 @@ export async function upsertInspectionItems(
           lowerLimit: item.lowerLimit ?? null,
           upperLimit: item.upperLimit ?? null,
           unit: item.unit ?? null,
+        })),
+      })
+    }
+  })
+
+  revalidatePath("/app/mes/measurement")
+  revalidatePath("/app/mes/master/inspection-standards")
+}
+
+/**
+ * 검사표준 + 검사항목을 한 트랜잭션으로 등록한다(N-09). 항목 저장이 실패하면 표준 헤더도 남지 않는다.
+ * 품목·공정이 내 테넌트 소유인지도 서버에서 확인한다.
+ */
+export async function createInspectionSpecWithItems(
+  data: CreateInspectionSpecInput,
+  items: UpsertInspectionItemInput[],
+  tenantId: string
+) {
+  await requireTenantAccess(tenantId)
+  await requireResourcePermission("INSPECTION_SPEC", "CREATE")
+  await requireRole("OPERATOR")
+  const normalized = normalizeInspectionItems(items)
+
+  const [item, operation] = await Promise.all([
+    prisma.item.findFirst({ where: { id: data.itemId, tenantId }, select: { id: true } }),
+    prisma.routingOperation.findFirst({ where: { id: data.routingOperationId, routing: { tenantId } }, select: { id: true } }),
+  ])
+  if (!item) throw new Error("선택한 품목을 찾을 수 없습니다.")
+  if (!operation) throw new Error("선택한 공정을 찾을 수 없습니다.")
+
+  const existing = await prisma.inspectionSpec.findFirst({
+    where: { tenantId, itemId: data.itemId, routingOperationId: data.routingOperationId, version: data.version },
+    select: { id: true },
+  })
+  if (existing) throw new Error("같은 품목·공정·버전의 검사표준이 이미 등록되어 있습니다.")
+
+  const created = await prisma.$transaction(async (tx) => {
+    const spec = await tx.inspectionSpec.create({
+      data: { tenantId, itemId: data.itemId, routingOperationId: data.routingOperationId, version: data.version, status: data.status },
+    })
+    if (normalized.length > 0) {
+      await tx.inspectionItem.createMany({
+        data: normalized.map((it) => ({
+          inspectionSpecId: spec.id,
+          seq: it.seq,
+          name: it.name,
+          inputType: it.inputType,
+          lowerLimit: it.lowerLimit ?? null,
+          upperLimit: it.upperLimit ?? null,
+          unit: it.unit ?? null,
+        })),
+      })
+    }
+    return spec
+  })
+
+  revalidatePath("/app/mes/measurement")
+  revalidatePath("/app/mes/master/inspection-standards")
+  return { id: created.id }
+}
+
+/**
+ * 검사표준 헤더(버전·상태)와 검사항목을 한 트랜잭션으로 수정한다(N-09).
+ * 측정 이력이 있는 표준은 검사항목을 바꿀 수 없다 — 항목이 그대로면 헤더만 수정되고, 항목이 달라지면 전체가 롤백된다.
+ */
+export async function updateInspectionSpecWithItems(
+  id: string,
+  data: UpdateInspectionSpecInput,
+  items: UpsertInspectionItemInput[]
+) {
+  await requireResourcePermission("INSPECTION_SPEC", "UPDATE")
+  await requireRole("OPERATOR")
+  const tenantId = await getTenantId()
+  const normalized = normalizeInspectionItems(items)
+
+  await prisma.$transaction(async (tx) => {
+    const spec = await tx.inspectionSpec.findFirst({
+      where: { id, tenantId },
+      include: { inspectionItems: { orderBy: { seq: "asc" } } },
+    })
+    if (!spec) throw new Error("검사표준을 찾을 수 없습니다.")
+
+    if (data.version !== undefined && data.version !== spec.version) {
+      const dup = await tx.inspectionSpec.findFirst({
+        where: { tenantId, itemId: spec.itemId, routingOperationId: spec.routingOperationId, version: data.version, id: { not: id } },
+        select: { id: true },
+      })
+      if (dup) throw new Error("같은 품목·공정·버전의 검사표준이 이미 등록되어 있습니다.")
+    }
+
+    const sameNum = (a: unknown, b: number | null | undefined) => (a === null || a === undefined ? null : Number(a)) === (b ?? null)
+    const unchanged =
+      spec.inspectionItems.length === normalized.length &&
+      spec.inspectionItems.every((cur, i) => {
+        const nx = normalized[i]
+        return (
+          cur.seq === nx.seq &&
+          cur.name === nx.name &&
+          cur.inputType === nx.inputType &&
+          (cur.unit ?? null) === (nx.unit ?? null) &&
+          sameNum(cur.lowerLimit, nx.lowerLimit) &&
+          sameNum(cur.upperLimit, nx.upperLimit)
+        )
+      })
+
+    await tx.inspectionSpec.update({
+      where: { id },
+      data: {
+        ...(data.version !== undefined && { version: data.version }),
+        ...(data.status !== undefined && { status: data.status }),
+      },
+    })
+    if (unchanged) return
+
+    const measuredCount = await tx.inspectionMeasurement.count({ where: { inspectionItem: { inspectionSpecId: id } } })
+    if (measuredCount > 0) {
+      throw new Error("이 검사표준은 이미 측정 이력이 있어 검사항목을 수정할 수 없습니다. 새 버전을 생성해 주세요.")
+    }
+    await tx.inspectionItem.deleteMany({ where: { inspectionSpecId: id } })
+    if (normalized.length > 0) {
+      await tx.inspectionItem.createMany({
+        data: normalized.map((it) => ({
+          inspectionSpecId: id,
+          seq: it.seq,
+          name: it.name,
+          inputType: it.inputType,
+          lowerLimit: it.lowerLimit ?? null,
+          upperLimit: it.upperLimit ?? null,
+          unit: it.unit ?? null,
         })),
       })
     }
