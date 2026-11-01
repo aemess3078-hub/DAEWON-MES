@@ -39,6 +39,19 @@ async function remove() {
     await prisma.userCredential.delete({ where: { id: cred.id } })
     await prisma.profile.deleteMany({ where: { id: cred.profileId } })
   }
+  // 테넌트 2 업무 샘플(수주/발주/계획/작업지시) — 참조 순서대로 삭제
+  await prisma.workOrderOperation.deleteMany({ where: { workOrder: { tenantId: T2 } } })
+  await prisma.workOrder.deleteMany({ where: { tenantId: T2 } })
+  await prisma.productionPlanItem.deleteMany({ where: { plan: { tenantId: T2 } } })
+  await prisma.productionPlan.deleteMany({ where: { tenantId: T2 } })
+  await prisma.purchaseOrderItem.deleteMany({ where: { purchaseOrder: { tenantId: T2 } } })
+  await prisma.purchaseOrder.deleteMany({ where: { tenantId: T2 } })
+  await prisma.salesOrderItem.deleteMany({ where: { salesOrder: { tenantId: T2 } } })
+  await prisma.salesOrder.deleteMany({ where: { tenantId: T2 } })
+  await prisma.routingOperation.deleteMany({ where: { routing: { tenantId: T2 } } })
+  await prisma.routing.deleteMany({ where: { tenantId: T2 } })
+  await prisma.bOMItem.deleteMany({ where: { bom: { tenantId: T2 } } })
+  await prisma.bOM.deleteMany({ where: { tenantId: T2 } })
   await prisma.equipment.deleteMany({ where: { tenantId: T2 } })
   await prisma.item.deleteMany({ where: { tenantId: T2 } })
   await prisma.itemCategory.deleteMany({ where: { tenantId: T2 } })
@@ -104,6 +117,32 @@ async function create() {
   const wcId = wc?.id ?? (await prisma.workCenter.create({ data: { siteId: site.id, code: "E2E-T2-WC", name: "E2E-T2 타테넌트 공정" } })).id
   const eq = await prisma.equipment.findFirst({ where: { tenantId: T2, code: "E2E-T2-EQ" } })
   if (!eq) await prisma.equipment.create({ data: { tenantId: T2, siteId: site.id, workCenterId: wcId, code: "E2E-T2-EQ", name: "E2E-T2 타테넌트 설비", equipmentType: "MACHINE" } })
+
+  // ── 테넌트 2 업무 샘플: 수주/발주/생산계획/작업지시(진행 중) — 타 테넌트 화면에 노출되면 안 된다
+  const t2Rm = await prisma.item.findFirst({ where: { tenantId: T2, code: "E2E-T2-ITEM" } })
+  const t2Cus = await prisma.businessPartner.findFirst({ where: { tenantId: T2, code: "E2E-T2-CUS" } })
+  const t2Vnd = await prisma.businessPartner.findFirst({ where: { tenantId: T2, code: "E2E-T2-VND" } })
+  const t2Fg = await prisma.item.upsert({
+    where: { tenantId_code: { tenantId: T2, code: "E2E-T2-FG" } }, update: {},
+    create: { tenantId: T2, code: "E2E-T2-FG", name: "E2E-T2 타테넌트 완제품", itemType: "FINISHED", categoryId: cat.id },
+  })
+  if (t2Rm && t2Cus && t2Vnd) {
+    let bom = await prisma.bOM.findFirst({ where: { tenantId: T2, itemId: t2Fg.id, version: "E2E-T2-V1" } })
+    if (!bom) bom = await prisma.bOM.create({ data: { tenantId: T2, itemId: t2Fg.id, version: "E2E-T2-V1", status: "ACTIVE", isDefault: true, bomItems: { create: [{ componentItemId: t2Rm.id, seq: 1, qtyPer: 2, scrapRate: 0 }] } } })
+    let rt = await prisma.routing.findFirst({ where: { tenantId: T2, code: "E2E-T2-RT" }, include: { operations: true } })
+    if (!rt) rt = await prisma.routing.create({ data: { tenantId: T2, code: "E2E-T2-RT", name: "E2E-T2 타테넌트 라우팅", version: "1.0", status: "ACTIVE", scope: "COMMON", operations: { create: [{ seq: 1, operationCode: "E2E-T2-WC", name: "E2E-T2 타테넌트 공정", workCenterId: wcId, standardTime: 1 }] } }, include: { operations: true } })
+    if (!(await prisma.salesOrder.findFirst({ where: { tenantId: T2, orderNo: "E2E-T2-SO-1" } }))) {
+      await prisma.salesOrder.create({ data: { tenantId: T2, siteId: site.id, customerId: t2Cus.id, orderNo: "E2E-T2-SO-1", orderDate: new Date("2026-11-01"), deliveryDate: new Date("2026-11-30"), status: "CONFIRMED", items: { create: [{ itemId: t2Fg.id, qty: 10 }] } } })
+    }
+    if (!(await prisma.purchaseOrder.findFirst({ where: { tenantId: T2, orderNo: "E2E-T2-PO-1" } }))) {
+      await prisma.purchaseOrder.create({ data: { tenantId: T2, siteId: site.id, supplierId: t2Vnd.id, orderNo: "E2E-T2-PO-1", orderDate: new Date("2026-11-01"), expectedDate: new Date("2026-11-15"), status: "ORDERED", items: { create: [{ itemId: t2Rm.id, qty: 5, unitPrice: 100 }] } } })
+    }
+    let plan = await prisma.productionPlan.findFirst({ where: { tenantId: T2, planNo: "E2E-T2-PP-1" } })
+    if (!plan) plan = await prisma.productionPlan.create({ data: { tenantId: T2, siteId: site.id, planNo: "E2E-T2-PP-1", planType: "WEEKLY", status: "CONFIRMED", startDate: new Date("2026-11-02"), endDate: new Date("2026-11-06"), items: { create: [{ itemId: t2Fg.id, bomId: bom.id, routingId: rt.id, plannedQty: 10 }] } } })
+    if (!(await prisma.workOrder.findFirst({ where: { tenantId: T2, orderNo: "E2E-T2-WO-1" } }))) {
+      await prisma.workOrder.create({ data: { tenantId: T2, siteId: site.id, itemId: t2Fg.id, bomId: bom.id, routingId: rt.id, orderNo: "E2E-T2-WO-1", plannedQty: 10, status: "IN_PROGRESS", operations: { create: [{ routingOperationId: rt.operations[0].id, seq: 1, status: "IN_PROGRESS", plannedQty: 10 }] } } })
+    }
+  }
   console.log(`[seed-roles] db=${db} accounts=${ROLES.length} tenant2 data ready`)
 }
 

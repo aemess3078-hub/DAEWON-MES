@@ -63,7 +63,9 @@ const QUOTATION_INCLUDE = {
 
 export async function getQuotations(): Promise<QuotationWithDetails[]> {
   await assertDaewonFeatureScope()
+  const user = await requireResourcePermission("QUOTATION", "READ")
   const results = await prisma.quotation.findMany({
+    where: { tenantId: user.tenantId },
     include: QUOTATION_INCLUDE,
     orderBy: { createdAt: "desc" },
   })
@@ -72,8 +74,9 @@ export async function getQuotations(): Promise<QuotationWithDetails[]> {
 
 export async function getQuotationById(id: string): Promise<QuotationWithDetails | null> {
   await assertDaewonFeatureScope()
-  const result = await prisma.quotation.findUnique({
-    where: { id },
+  const user = await requireResourcePermission("QUOTATION", "READ")
+  const result = await prisma.quotation.findFirst({
+    where: { id, tenantId: user.tenantId },
     include: QUOTATION_INCLUDE,
   })
   return result ? serializeQuotation(result) : null
@@ -81,8 +84,9 @@ export async function getQuotationById(id: string): Promise<QuotationWithDetails
 
 export async function getCustomersForQuotation() {
   await assertDaewonFeatureScope()
+  const user = await requireResourcePermission("QUOTATION", "READ")
   return prisma.businessPartner.findMany({
-    where: { partnerType: { in: ["CUSTOMER", "BOTH"] } },
+    where: { tenantId: user.tenantId, partnerType: { in: ["CUSTOMER", "BOTH"] } },
     select: { id: true, code: true, name: true },
     orderBy: { name: "asc" },
   })
@@ -90,8 +94,9 @@ export async function getCustomersForQuotation() {
 
 export async function getFinishedItems() {
   await assertDaewonFeatureScope()
+  const user = await requireResourcePermission("QUOTATION", "READ")
   return prisma.item.findMany({
-    where: { itemType: { in: ["FINISHED", "SEMI_FINISHED"] }, status: "ACTIVE" },
+    where: { tenantId: user.tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] }, status: "ACTIVE" },
     select: { id: true, code: true, name: true, itemType: true, uom: true },
     orderBy: { name: "asc" },
   })
@@ -102,8 +107,10 @@ export async function getItemPriceForCustomer(
   customerId: string
 ): Promise<number | null> {
   await assertDaewonFeatureScope()
+  const user = await requireResourcePermission("QUOTATION", "READ")
   const result = await prisma.itemPrice.findFirst({
     where: {
+      tenantId: user.tenantId,
       itemId,
       partnerId: customerId,
       priceType: "SALES",
@@ -164,8 +171,8 @@ export async function createQuotation(data: QuotationFormValues, tenantId: strin
 
 export async function updateQuotation(id: string, data: QuotationFormValues) {
   await assertDaewonFeatureScope()
-  await requireResourcePermission("QUOTATION", "UPDATE")
-  const current = await prisma.quotation.findUniqueOrThrow({ where: { id } })
+  const user = await requireResourcePermission("QUOTATION", "UPDATE")
+  const current = await prisma.quotation.findFirstOrThrow({ where: { id, tenantId: user.tenantId } })
   const lockedStatuses: QuotationStatus[] = ["WON", "LOST", "EXPIRED", "CANCELLED"]
   if (lockedStatuses.includes(current.status)) {
     throw new Error("이 상태에서는 수정할 수 없습니다")
@@ -202,8 +209,8 @@ export async function updateQuotation(id: string, data: QuotationFormValues) {
 
 export async function deleteQuotation(id: string) {
   await assertDaewonFeatureScope()
-  await requireResourcePermission("QUOTATION", "DELETE")
-  const current = await prisma.quotation.findUniqueOrThrow({ where: { id } })
+  const user = await requireResourcePermission("QUOTATION", "DELETE")
+  const current = await prisma.quotation.findFirstOrThrow({ where: { id, tenantId: user.tenantId } })
   if (current.status !== "DRAFT") {
     throw new Error("초안(DRAFT) 상태의 견적만 삭제할 수 있습니다")
   }

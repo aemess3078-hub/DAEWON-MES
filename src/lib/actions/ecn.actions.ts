@@ -118,8 +118,10 @@ export async function getECNs(
 }
 
 export async function getECNById(id: string): Promise<ECNWithDetails | null> {
-  const result = await prisma.engineeringChange.findUnique({
-    where: { id },
+  const user = await requireResourcePermission("ECN", "READ")
+  // 다른 테넌트의 ID 는 "없음"과 동일하게 null 로 응답한다.
+  const result = await prisma.engineeringChange.findFirst({
+    where: { id, tenantId: user.tenantId },
     include: ECN_INCLUDE,
   })
   return result as any
@@ -140,8 +142,9 @@ export async function getItemsForECN(tenantId: string) {
 }
 
 export async function getCurrentBOM(itemId: string) {
+  const user = await requireResourcePermission("ECN", "READ")
   return prisma.bOM.findFirst({
-    where: { itemId, status: "ACTIVE" },
+    where: { tenantId: user.tenantId, itemId, status: "ACTIVE" },
     include: {
       bomItems: {
         include: { componentItem: { select: { id: true, code: true, name: true, uom: true } } },
@@ -152,8 +155,10 @@ export async function getCurrentBOM(itemId: string) {
 }
 
 export async function getCurrentRouting(itemId: string) {
+  const user = await requireResourcePermission("ECN", "READ")
   const itemRouting = await prisma.itemRouting.findFirst({
     where: {
+      tenantId: user.tenantId,
       itemId,
       isDefault: true,
       routing: { status: "ACTIVE" },

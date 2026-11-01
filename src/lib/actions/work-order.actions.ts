@@ -225,7 +225,10 @@ export type ProductionPlanItemForWorkOrder = {
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
 export async function getWorkOrders(): Promise<WorkOrderWithDetails[]> {
+  // 테넌트는 세션에서만 결정하고, 작업지시 읽기 권한을 요구한다.
+  const user = await requireResourcePermission("WORK_ORDER", "READ")
   const workOrders = await prisma.workOrder.findMany({
+    where: { tenantId: user.tenantId },
     include: workOrderInclude,
     orderBy: [{ createdAt: "desc" }],
   })
@@ -466,8 +469,10 @@ export async function getWipInventoryRows(tenantId: string) {
 }
 
 export async function getWorkOrderById(id: string): Promise<WorkOrderWithDetails | null> {
-  const workOrder = await prisma.workOrder.findUnique({
-    where: { id },
+  const user = await requireResourcePermission("WORK_ORDER", "READ")
+  // 다른 테넌트의 ID 는 "없음"과 동일하게 null 로 응답한다(존재 여부도 노출하지 않음).
+  const workOrder = await prisma.workOrder.findFirst({
+    where: { id, tenantId: user.tenantId },
     include: workOrderInclude,
   })
 

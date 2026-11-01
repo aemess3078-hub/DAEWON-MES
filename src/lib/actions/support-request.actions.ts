@@ -1,6 +1,6 @@
 "use server"
 
-import { requireTenantAccess } from "@/lib/auth"
+import { requireTenantAccess, requireRole } from "@/lib/auth"
 
 import { prisma } from "@/lib/db/prisma"
 import { revalidatePath } from "next/cache"
@@ -127,9 +127,10 @@ export async function getSupportRequests(
 
 export async function getSupportRequestById(id: string): Promise<SupportRequestItem | null> {
   await assertDaewonFeatureScope()
+  const user = await requireRole("VIEWER")
   try {
-    const row = await prisma.supportRequest.findUnique({
-      where: { id },
+    const row = await prisma.supportRequest.findFirst({
+      where: { id, tenantId: user.tenantId },
       include: {
         author: { select: { name: true, email: true } },
         handledBy: { select: { name: true } },
@@ -175,6 +176,10 @@ export async function updateSupportRequest(
   input: UpdateSupportRequestInput,
 ): Promise<SupportRequestItem> {
   await assertDaewonFeatureScope()
+  const user = await requireRole("VIEWER")
+  // 다른 테넌트의 문의는 존재하지 않는 것으로 취급한다.
+  const owned = await prisma.supportRequest.findFirst({ where: { id: input.id, tenantId: user.tenantId }, select: { id: true } })
+  if (!owned) throw new Error("NOT_FOUND")
   const now = new Date()
   const isResolved =
     input.status === "ANSWERED" ||
