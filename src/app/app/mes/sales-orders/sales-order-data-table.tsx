@@ -24,6 +24,8 @@ interface SalesOrderDataTableProps {
   siteId: string
   customers: CustomerOption[]
   items: ItemOption[]
+  canViewQuantities?: boolean
+  canRequestProduction?: boolean
 }
 
 export function SalesOrderDataTable({
@@ -32,6 +34,8 @@ export function SalesOrderDataTable({
   siteId,
   customers,
   items,
+  canViewQuantities = false,
+  canRequestProduction = false,
 }: SalesOrderDataTableProps) {
   const router = useRouter()
   const canMutate = useUserRole() !== "VIEWER"
@@ -157,6 +161,8 @@ export function SalesOrderDataTable({
         salesOrder={processingOrder}
         tenantId={tenantId}
         siteId={siteId}
+        canViewQuantities={canViewQuantities}
+        canRequestProduction={canRequestProduction}
       />
 
       <SalesOrderDetailSheet

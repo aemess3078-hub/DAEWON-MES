@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef, useTransition } from "react"
+import { useState, useEffect, useTransition } from "react"
 import { useRouter } from "next/navigation"
 import {
   Dialog,
@@ -21,12 +21,12 @@ import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import { Loader2, PackageMinus, Factory, CheckCircle2, AlertTriangle, Info } from "lucide-react"
 import { formatQuantity } from "@/lib/utils"
-import { generateReceivingRequestId } from "@/lib/receiving-request-id"
 import {
   checkInventoryForSalesOrder,
-  requestProductionFromSalesOrder,
   type ItemStockStatus,
 } from "@/lib/actions/sales-order.actions"
+import { getSalesOrderProductionQuantities } from "@/lib/actions/production-quantity.actions"
+import type { OrderItemQuantityView } from "@/lib/production-quantity-model"
 import {
   createShipment,
   getAvailableFinishedGoodsLots,
@@ -34,6 +34,8 @@ import {
   type AvailableFinishedGoodsLot,
 } from "@/lib/actions/shipment.actions"
 import type { SalesOrderRow } from "./columns"
+import { SalesOrderQuantityPanel } from "./sales-order-quantity-panel"
+import { SalesOrderProductionRequestForm } from "./sales-order-production-request-form"
 
 interface SalesOrderProcessDialogProps {
   open: boolean
@@ -41,6 +43,10 @@ interface SalesOrderProcessDialogProps {
   salesOrder: SalesOrderRow | null
   tenantId: string
   siteId: string
+  /** 수주 조회 + 생산계획 조회 권한(생산 수량 조회 모델 사용 조건) */
+  canViewQuantities?: boolean
+  /** 수주 수정 + 생산계획 등록 권한(생산의뢰 조건) */
+  canRequestProduction?: boolean
 }
 
 export function SalesOrderProcessDialog({
@@ -49,6 +55,8 @@ export function SalesOrderProcessDialog({
   salesOrder,
   tenantId,
   siteId,
+  canViewQuantities = false,
+  canRequestProduction = false,
 }: SalesOrderProcessDialogProps) {
   const router = useRouter()
   const [isPending, startTransition] = useTransition()
@@ -60,18 +68,54 @@ export function SalesOrderProcessDialog({
   const [availableLots, setAvailableLots] = useState<Record<string, AvailableFinishedGoodsLot[]>>({})
   const [lotsLoading, setLotsLoading] = useState(false)
   const [shipmentError, setShipmentError] = useState<string | null>(null)
-  // 생산의뢰 요청 ID(멱등 키): 한 번의 의뢰 작업(재시도 포함)에 같은 값을 쓰고, 성공하거나 창을 새로 열 때만 새로 만든다
-  const productionRequestIdRef = useRef<string | null>(null)
+  // 2-A 생산 수량 조회 모델(서버 계산 결과를 그대로 표시)
+  const [quantities, setQuantities] = useState<OrderItemQuantityView[] | null>(null)
+  const [quantityError, setQuantityError] = useState<string | null>(null)
+  const [orderStatusNow, setOrderStatusNow] = useState<string>("")
+
+  const loadQuantities = async (salesOrderId: string) => {
+    if (!canViewQuantities) {
+      setQuantities(null)
+      setQuantityError("생산 수량 현황은 수주 조회와 생산계획 조회 권한이 모두 있어야 볼 수 있습니다. 권한은 임의로 완화하지 않았습니다.")
+      return
+    }
+    try {
+      const res = await getSalesOrderProductionQuantities(salesOrderId)
+      if (!res) {
+        setQuantities(null)
+        setQuantityError("생산 수량 현황을 찾을 수 없습니다.")
+        return
+      }
+      setQuantities(res.items)
+      setOrderStatusNow(res.orderStatus)
+      setQuantityError(null)
+    } catch (e) {
+      setQuantities(null)
+      setQuantityError(e instanceof Error ? e.message : "생산 수량 현황을 조회하지 못했습니다.")
+    }
+  }
+
+  /** 생산의뢰 성공 후: 서버 수량을 다시 읽고 수주 목록(상태)도 갱신 */
+  const reloadAfterRequest = async () => {
+    if (!salesOrder) return
+    const stock = await checkInventoryForSalesOrder(salesOrder.id, tenantId)
+    setStockStatus(stock)
+    await loadQuantities(salesOrder.id)
+    router.refresh()
+  }
 
   // 다이얼로그 오픈 시 재고 + 창고 목록 로드, 기본 창고 자동 선택
   useEffect(() => {
     if (!open || !salesOrder) return
-    productionRequestIdRef.current = null
+    setQuantities(null)
+    setQuantityError(null)
+    setOrderStatusNow(salesOrder.status)
     setLoading(true)
     setWarehouseId("")
     setLotSelections({})
     setAvailableLots({})
     setShipmentError(null)
+    void loadQuantities(salesOrder.id)
     Promise.all([
       checkInventoryForSalesOrder(salesOrder.id, tenantId),
       getWarehouses(tenantId),
@@ -86,7 +130,8 @@ export function SalesOrderProcessDialog({
       }
       setLoading(false)
     })
-  }, [open, salesOrder, tenantId])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- loadQuantities 는 canViewQuantities 외에 의존하지 않는다
+  }, [open, salesOrder, tenantId, canViewQuantities])
 
   // 창고 변경 시 LOT 목록 로드 (LOT 관리 품목만)
   useEffect(() => {
@@ -115,7 +160,7 @@ export function SalesOrderProcessDialog({
   if (!salesOrder) return null
 
   const shippableItems = stockStatus.filter((s) => s.shippableQty > 0)
-  const shortageItems = stockStatus.filter((s) => s.shortageQty > 0)
+  const shortageItems = stockStatus.filter((s) => s.shortageQty > 0) // 기존 계산(참고) — "모든 품목 출하 완료" 안내 판단에만 사용
   const allFulfilled = stockStatus.length > 0 && stockStatus.every((s) => s.shortageQty === 0)
   const lotTrackedShippable = shippableItems.filter((s) => s.isLotTracked)
   const allLotsSelected = lotTrackedShippable.every((s) => !!lotSelections[s.itemId])
@@ -157,35 +202,9 @@ export function SalesOrderProcessDialog({
     })
   }
 
-  const handleProduction = () => {
-    startTransition(async () => {
-      productionRequestIdRef.current ??= generateReceivingRequestId()
-      const res = await requestProductionFromSalesOrder(
-        salesOrder.id,
-        shortageItems.map((s) => ({
-          salesOrderItemId: s.salesOrderItemId,
-          itemId: s.itemId,
-          qty: s.shortageQty,
-        })),
-        tenantId,
-        siteId,
-        productionRequestIdRef.current
-      )
-      if (!res.ok) {
-        alert(res.error ?? "오류가 발생했습니다.")
-        return
-      }
-      productionRequestIdRef.current = null
-      alert(`생산계획 ${res.planNo} 이(가) 생성되었습니다.`)
-      router.refresh()
-      onOpenChange(false)
-      router.push(`/app/mes/production-plan?salesOrderId=${encodeURIComponent(salesOrder.id)}`)
-    })
-  }
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-5xl">
         <DialogHeader>
           <DialogTitle className="text-[18px]">수주 처리</DialogTitle>
         </DialogHeader>
@@ -207,7 +226,7 @@ export function SalesOrderProcessDialog({
 
           {/* 재고 현황 테이블 */}
           <div className="space-y-2">
-            <div className="text-[14px] font-medium">품목별 재고 현황</div>
+            <div className="text-[14px] font-medium">품목별 재고 현황 <span className="text-[13px] font-normal text-muted-foreground">(기존 계산 · 출하요청 기준 · 참고)</span></div>
             {loading ? (
               <div className="flex items-center justify-center py-8 text-muted-foreground gap-2">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -250,6 +269,24 @@ export function SalesOrderProcessDialog({
                     </div>
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* 생산 수량 현황 (2-A 조회 모델) */}
+          <div className="space-y-2">
+            <div className="text-[14px] font-medium">생산 수량 현황 <span className="text-[13px] font-normal text-muted-foreground">(서버 계산 · 수주 충당 / 실제 생산계획 구분)</span></div>
+            {loading ? null : quantityError ? (
+              <div className="flex items-start gap-1.5 rounded-md bg-muted px-3 py-2 text-[13px] text-muted-foreground" data-testid="qty-error">
+                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                {quantityError}
+              </div>
+            ) : quantities ? (
+              <SalesOrderQuantityPanel items={quantities} />
+            ) : (
+              <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                생산 수량 조회 중...
               </div>
             )}
           </div>
@@ -383,30 +420,17 @@ export function SalesOrderProcessDialog({
             </div>
           )}
 
-          {/* 생산의뢰 생성 */}
-          {!loading && shortageItems.length > 0 && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-4 space-y-3">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 text-amber-600" />
-                <span className="text-[14px] font-medium text-amber-800">재고 부족 — 생산의뢰 필요</span>
-                <Badge variant="outline" className="text-[12px] bg-amber-100 text-amber-700 border-amber-200">
-                  {shortageItems.length}개 품목
-                </Badge>
-              </div>
-              <div className="text-[13px] text-amber-700">
-                부족 수량에 대한 생산계획(DRAFT)이 생성되고, 수주 상태가 <strong>생산중</strong>으로 변경됩니다.
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="gap-1.5 border-amber-400 text-amber-800 hover:bg-amber-100"
-                onClick={handleProduction}
-                disabled={isPending}
-              >
-                <Factory className="h-3.5 w-3.5" />
-                생산의뢰 생성
-              </Button>
-            </div>
+          {/* 생산의뢰 입력 (수주 충당 + 여유 생산) */}
+          {!loading && quantities && (
+            <SalesOrderProductionRequestForm
+              salesOrderId={salesOrder.id}
+              orderStatus={orderStatusNow || salesOrder.status}
+              tenantId={tenantId}
+              siteId={siteId}
+              items={quantities}
+              canRequest={canRequestProduction}
+              onRequested={reloadAfterRequest}
+            />
           )}
 
           {/* 처리 완료 */}
