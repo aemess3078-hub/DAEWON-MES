@@ -4,6 +4,7 @@ import { requireTenantAccess } from "@/lib/auth"
 
 import { prisma } from "@/lib/db/prisma"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { buildLotTraceability } from "@/lib/lot-traceability"
 
 function toNumber(value: unknown): number {
   return Number(value ?? 0)
@@ -21,12 +22,18 @@ export async function getLotLineageByNo(lotNo: string, tenantId: string) {
   const query = lotNo.trim()
   if (!query) return null
 
-  const lot = await prisma.lot.findFirst({
-    where: { tenantId, lotNo: { contains: query } },
-    include: { item: { select: { id: true, code: true, name: true, itemType: true, uom: true, isLotTracked: true } } },
-    orderBy: { lotNo: "asc" },
-  })
+  // 정확히 일치하는 LOT 를 우선한다(부분 일치만 있으면 번호순 첫 건 + 후보 목록). 같은 번호는 테넌트 안에서 유일하다.
+  const lotInclude = { item: { select: { id: true, code: true, name: true, itemType: true, uom: true, isLotTracked: true } } } as const
+  const exactLot = await prisma.lot.findFirst({ where: { tenantId, lotNo: query }, include: lotInclude })
+  let candidates: Array<{ id: string; lotNo: string }> = []
+  let lot = exactLot
+  if (!lot) {
+    const partial = await prisma.lot.findMany({ where: { tenantId, lotNo: { contains: query } }, include: lotInclude, orderBy: { lotNo: "asc" }, take: 10 })
+    lot = partial[0] ?? null
+    if (partial.length > 1) candidates = partial.map((p) => ({ id: p.id, lotNo: p.lotNo }))
+  }
   if (!lot) return null
+  const traceability = await buildLotTraceability(prisma, tenantId, lot.id)
 
   const [balances, parentLinks, childLinks, directMaterialIssues, receipts, shipments, directWipUnits, inspections, inventoryTransactions] = await Promise.all([
     prisma.inventoryBalance.findMany({
@@ -208,6 +215,8 @@ export async function getLotLineageByNo(lotNo: string, tenantId: string) {
   const outsourcingOrderItemById = new Map(outsourcingOrderItems.map((item) => [item.id, item]))
 
   return {
+    candidates,
+    traceability,
     lot: {
       id: lot.id,
       lotNo: lot.lotNo,

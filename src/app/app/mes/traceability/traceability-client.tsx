@@ -88,12 +88,15 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
       lineage.receipts.length > 0 ||
       lineage.shipments.length > 0 ||
       lineage.outsourcingHistory.length > 0 ||
-      lineage.inspections.length > 0
+      lineage.inspections.length > 0 ||
+      lineage.traceability.inputMaterialLots.length > 0 ||
+      lineage.traceability.producedLots.length > 0 ||
+      lineage.traceability.consumedInWorkOrders.length > 0
     ),
   ), [lineage])
 
-  const handleSearch = async () => {
-    const q = query.trim()
+  const handleSearch = async () => searchLot(query.trim())
+  const searchLot = async (q: string) => {
     if (!q) return
     setLoading(true)
     setError(null)
@@ -136,6 +139,14 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
           </Button>
         </div>
         {error && <p className="mt-3 text-[14px] text-red-500">{error}</p>}
+        {lineage && lineage.candidates.length > 1 && (
+          <div className="mt-3 text-[13px] text-slate-600">
+            일치하는 LOT 가 여러 개입니다. 아래 중 정확한 번호를 선택하세요:{" "}
+            {lineage.candidates.map((c) => (
+              <button key={c.id} type="button" className="mr-2 font-mono underline" onClick={() => { setQuery(c.lotNo); void searchLot(c.lotNo) }}>{c.lotNo}</button>
+            ))}
+          </div>
+        )}
       </div>
 
       {lineage && <LotSummary lineage={lineage} />}
@@ -146,6 +157,51 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
 
       {lineage && (
         <div className="grid gap-6 lg:grid-cols-2">
+          <Section title="투입 원자재 LOT (역추적 · 작업지시 기준)">
+            {lineage.traceability.inputMaterialLots.length === 0 ? <Empty /> : (
+              <div className="space-y-2">
+                {lineage.traceability.inputMaterialLots.map((m) => (
+                  <div key={`${m.lot.id}|${m.workOrder?.id}`} className="rounded-lg border p-3 text-[14px]">
+                    <div className="font-mono font-semibold">{m.lot.lotNo}</div>
+                    <div className="text-slate-600">{m.lot.item.code} · {m.lot.item.name} · 투입 {formatQuantity(m.qty)} {m.unit ?? m.lot.item.uom}{m.workOrder ? ` · ${m.workOrder.orderNo}` : ""}{m.workOrder?.manufacturingNo ? ` · ${m.workOrder.manufacturingNo}` : ""}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px]">
+                      {m.resolvedBy === "LOT_NO_FALLBACK"
+                        ? <Badge className="bg-amber-100 text-amber-800">과거 데이터 보완 · 수불 참조 없이 LOT 번호·품목 일치로 확인</Badge>
+                        : <Badge className="bg-green-100 text-green-800">DB 참조 확정 · {m.resolvedBy === "INVENTORY_TRANSACTION" ? "출고 수불 거래" : "재공-자재 연결"}</Badge>}
+                      {m.depth > 0 && m.viaLot && <span className="text-slate-500">상위 단계({m.depth}) · 경유 LOT {m.viaLot.lotNo}</span>}
+                    </div>
+                  </div>
+                ))}
+                <p className="text-[12px] text-slate-500">{lineage.traceability.note}</p>
+              </div>
+            )}
+          </Section>
+
+          <Section title="이 LOT로 생산된 LOT / 출하 (정추적 · 작업지시 기준)">
+            {lineage.traceability.producedLots.length === 0 && lineage.traceability.consumedInWorkOrders.length === 0 && lineage.traceability.downstreamShipments.length === 0 ? <Empty /> : (
+              <div className="space-y-2">
+                {lineage.traceability.consumedInWorkOrders.map((c) => (
+                  <div key={`c-${c.lot.id}|${c.workOrder.id}`} className="rounded-lg border p-3 text-[14px]">
+                    <b>투입</b> {c.lot.lotNo} → {c.workOrder.orderNo}{c.workOrder.manufacturingNo ? ` · ${c.workOrder.manufacturingNo}` : ""} · {formatQuantity(c.qty)} {c.unit ?? ""}
+                  </div>
+                ))}
+                {lineage.traceability.producedLots.map((p) => (
+                  <div key={`p-${p.lot.id}|${p.workOrder?.id ?? "-"}`} className="rounded-lg border border-green-200 bg-green-50 p-3 text-[14px]">
+                    <b>산출 LOT</b> <span className="font-mono">{p.lot.lotNo}</span> · {p.lot.item.code} · {formatQuantity(p.qty)}{p.workOrder ? ` · ${p.workOrder.orderNo}` : ""}{p.depth > 0 && p.viaLot ? ` · 경유 ${p.viaLot.lotNo}` : ""}
+                  </div>
+                ))}
+                {lineage.traceability.downstreamShipments.map((s) => (
+                  <div key={`s-${s.lotId}|${s.shipmentNo}`} className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-[14px]">
+                    <b>출하</b> {s.shipmentNo} · {SHIPMENT_STATUS[s.status] ?? s.status} · {s.lotNo} {formatQuantity(s.qty)} · {s.salesOrder.orderNo}{s.customer ? ` · ${s.customer.name}` : ""}
+                  </div>
+                ))}
+                {lineage.traceability.workOrderSummaries.map((w) => (
+                  <div key={`w-${w.id}`} className="text-[13px] text-slate-600">{w.orderNo} · 계획 {formatQuantity(w.plannedQty)} · 양품 {formatQuantity(w.goodQty)} · 불량 {formatQuantity(w.defectQty)}{w.reworkQty > 0 ? ` · 재작업 ${formatQuantity(w.reworkQty)}` : ""}{w.scrappedWipQty > 0 ? ` · 폐기 재공 ${formatQuantity(w.scrappedWipQty)}` : ""}</div>
+                ))}
+              </div>
+            )}
+          </Section>
+
           <Section title="원자재/상위 LOT">
             {lineage.parentLots.length === 0 ? <Empty /> : (
               <div className="space-y-2">
