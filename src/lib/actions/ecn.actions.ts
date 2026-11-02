@@ -7,6 +7,7 @@ import { getCurrentUser, requireRole, type CurrentUser, requireTenantAccess } fr
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { isDeveloperUser } from "@/lib/developer"
+import { assertSingleActiveDefaultBom, lockItemsForBomDefault } from "@/lib/bom-default-guard"
 
 export type ECNDetail = {
   id: string
@@ -362,14 +363,36 @@ async function implementECNLegacy(id: string) {
 
   await prisma.$transaction(async (tx) => {
     if (ecn.changeType === "BOM" || ecn.changeType === "BOTH") {
-      const currentBOM = await tx.bOM.findFirst({
-        where: { itemId: ecn.targetItemId, status: "ACTIVE" },
+      // N-03: 대상 품목이 이 ECN 의 테넌트 소유인지 확인하고, 같은 품목의 기본 BOM 변경을 직렬화한다.
+      const targetItem = await tx.item.findFirst({ where: { id: ecn.targetItemId, tenantId: ecn.tenantId }, select: { id: true, code: true } })
+      if (!targetItem) throw new Error("ECN 대상 품목을 찾을 수 없습니다.")
+      await lockItemsForBomDefault(tx, ecn.tenantId, [ecn.targetItemId])
+
+      // 임의의 ACTIVE BOM 이 아니라 '현재 ACTIVE 기본 BOM' 을 정확히 1건 찾는다. 없거나 둘 이상이면 적용하지 않는다(전체 롤백).
+      const currentDefaults = await tx.bOM.findMany({
+        where: { tenantId: ecn.tenantId, itemId: ecn.targetItemId, status: "ACTIVE", isDefault: true },
         include: { bomItems: true },
       })
-      if (currentBOM) {
-        await tx.bOM.update({ where: { id: currentBOM.id }, data: { status: "INACTIVE" } })
-        const versionNum = parseFloat(currentBOM.version) || 1
-        const newVersion = (versionNum + 1).toFixed(1)
+      if (currentDefaults.length === 0) {
+        throw new Error(`품목 ${targetItem.code} 에 활성 기본 BOM 이 없어 BOM 변경을 적용할 수 없습니다. BOM 화면에서 기본 BOM 을 지정한 뒤 다시 적용하세요.`)
+      }
+      if (currentDefaults.length > 1) {
+        throw new Error(`품목 ${targetItem.code} 에 활성 기본 BOM 이 ${currentDefaults.length}건 지정되어 있어 BOM 변경을 적용할 수 없습니다. 기본 BOM 을 하나로 정리한 뒤 다시 적용하세요.`)
+      }
+      {
+        const currentBOM = currentDefaults[0]
+        // 기존 기본 BOM: 비활성화 + 기본 지정 해제. 같은 품목의 다른 활성 비기본 BOM 은 건드리지 않는다.
+        await tx.bOM.update({ where: { id: currentBOM.id }, data: { status: "INACTIVE", isDefault: false } })
+        // 새 버전: 같은 품목에 이미 있는 버전과 겹치지 않는 다음 번호
+        const existingVersions = new Set(
+          (await tx.bOM.findMany({ where: { tenantId: ecn.tenantId, itemId: ecn.targetItemId }, select: { version: true } })).map((b) => b.version)
+        )
+        let versionNum = parseFloat(currentBOM.version) || 1
+        let newVersion = (versionNum + 1).toFixed(1)
+        while (existingVersions.has(newVersion)) {
+          versionNum += 1
+          newVersion = (versionNum + 1).toFixed(1)
+        }
 
         const afterValueDetails = ecn.details.filter(
           (d) => d.changeTarget === "BOM_ITEM" && d.afterValue
@@ -391,6 +414,13 @@ async function implementECNLegacy(id: string) {
           }))
         }
 
+        // ECN 이 지정한 구성자재도 이 테넌트 소유여야 한다(타 테넌트·존재하지 않는 품목 차단).
+        const componentIds = Array.from(new Set(newBomItems.map((bi) => bi.componentItemId).filter(Boolean))) as string[]
+        const ownedComponents = await tx.item.count({ where: { tenantId: ecn.tenantId, id: { in: componentIds } } })
+        if (componentIds.length !== newBomItems.length || ownedComponents !== componentIds.length) {
+          throw new Error("ECN 의 BOM 구성자재에 중복·누락되었거나 존재하지 않는 품목이 있어 적용할 수 없습니다.")
+        }
+
         await tx.bOM.create({
           data: {
             tenantId: ecn.tenantId,
@@ -401,6 +431,7 @@ async function implementECNLegacy(id: string) {
             bomItems: { create: newBomItems },
           },
         })
+        await assertSingleActiveDefaultBom(tx, ecn.tenantId, [ecn.targetItemId])
       }
     }
 

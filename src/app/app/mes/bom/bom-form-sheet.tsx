@@ -192,7 +192,7 @@ export function BomFormSheet({
               control={form.control}
               name="isDefault"
               label="기본 BOM"
-              description="이 BOM을 해당 품목의 기본 BOM으로 설정합니다."
+              description="이 BOM을 해당 품목의 기본 BOM으로 설정합니다. 활성 상태로 저장하면 같은 품목의 기존 기본 BOM은 기본 지정만 해제되고 활성 상태는 유지됩니다."
             />
           </div>
 

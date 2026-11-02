@@ -204,6 +204,12 @@ test.describe("BOM관리", () => {
     const excl = r.view.excluded.map((e) => `${e.reason}:${e.reasonLabel}`)
     record("BOM-default-policy", T("업무규칙", /소요량/)?.id ?? null, { boms: all.map((b) => ({ v: b.version, def: b.isDefault, st: b.status })), defaults: defaults.length, simExcluded: excl, dialogs })
     expect(defaults.length, `ACTIVE 기본 BOM 은 품목당 1건이어야 함 (현재 ${defaults.length}건; MRP 시뮬레이션 제외 사유=${JSON.stringify(excl)})`).toBe(1)
+    // N-03 정책: 새 기본 BOM 이 기본이 되고, 기존 기본 BOM 은 기본 지정만 해제되며 ACTIVE 상태는 유지된다.
+    expect(defaults[0].version, "새로 지정한 BOM 이 기본").toBe(VER_B)
+    const a = all.find((b) => b.version === VER_A)!
+    expect(a.status, "기존 기본 BOM 의 ACTIVE 상태 유지").toBe("ACTIVE")
+    expect(a.isDefault, "기존 기본 BOM 의 기본 지정 해제").toBe(false)
+    expect(excl.filter((x) => /MULTIPLE_DEFAULT_BOM/.test(x)), "MRP 가 기본 BOM 중복으로 제품을 제외하지 않음").toEqual([])
   })
 
   // ───────── 수정/삭제 ─────────
@@ -225,9 +231,10 @@ test.describe("BOM관리", () => {
     const edited = await findBom(VER_A)
     expect(edited!.id, "수정은 같은 BOM 행").toBe(bomA!.id)
     expect(edited!.bomItems.map((b) => [b.componentItemId, dec(b.qtyPer)]), "수정 반영: RM1=2.5, RM2 제거").toEqual([[RM1.id, 2.5]])
-    // BOM 개정 → MRP 전개 반영. 기본 BOM 중복(앞선 정책 테스트 결과)과 분리해서 판정하려고
-    // 테스트 픽스처만 정리한다: B 버전의 기본 지정을 DB 에서 해제(제품 코드가 아니라 테스트 데이터 조정).
+    // BOM 개정 → MRP 전개 반영. 앞선 정책 테스트에서 기본 BOM 이 B 로 바뀌었으므로(N-03 정책),
+    // 개정한 A 를 MRP 가 쓰도록 기본 지정을 A 로 되돌린다(테스트 데이터 조정; 품목당 기본 1건 유지).
     await db.bOM.updateMany({ where: { tenantId: D.tenantId, itemId: FG.id, version: VER_B }, data: { isDefault: false } })
+    await db.bOM.updateMany({ where: { tenantId: D.tenantId, itemId: FG.id, version: VER_A }, data: { isDefault: true } })
     const r = await sim(10)
     const m = r.view.materials
     record("BOM-revision-mrp", T("업무규칙", /MRP/)?.id ?? null, { materials: m.map((x) => [x.code, x.totalRequirement]), excluded: r.view.excluded.map((e) => e.reason) })
@@ -250,6 +257,7 @@ test.describe("BOM관리", () => {
     await login(page)
     await gotoMenu(page, PATH)
     await db.bOM.updateMany({ where: { tenantId: D.tenantId, itemId: FG.id, version: { not: VER_A } }, data: { isDefault: false } })
+    await db.bOM.updateMany({ where: { tenantId: D.tenantId, itemId: FG.id, version: VER_A }, data: { isDefault: true } })
     const before = (await sim(10)).view.materials.find((m) => m.code === RM1.code)?.totalRequirement
     await openRowAction(page, VER_A, "수정")
     await expect(dialog(page)).toBeVisible()
