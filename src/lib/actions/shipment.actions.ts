@@ -13,6 +13,7 @@ import {
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
+import { SHIPPABLE_STATUSES, salesOrderNotShippableMessage, type SalesOrderStatusValue } from "@/lib/sales-order-status"
 
 export async function getShipments(tenantId: string) {
   await requireTenantAccess(tenantId)
@@ -497,6 +498,11 @@ export async function createShipment(
     )
     await lockSalesOrderItemsForUpdate(tx, tenantId, salesOrderItemIds)
 
+    // 잠금 이후 수주 상태를 다시 확인한다(수주 취소와 동시에 실행돼도 취소된 수주에 출하가 남지 않는다)
+    const lockedSalesOrder = await tx.salesOrder.findFirst({ where: { id: data.salesOrderId, tenantId }, select: { status: true } })
+    if (!lockedSalesOrder) throw new Error("수주를 찾을 수 없습니다.")
+    if (!SHIPPABLE_STATUSES.includes(lockedSalesOrder.status as SalesOrderStatusValue)) throw new Error(salesOrderNotShippableMessage(lockedSalesOrder.status))
+
     const salesOrderItems = await tx.salesOrderItem.findMany({
       where: {
         id: { in: salesOrderItemIds },
@@ -774,6 +780,10 @@ export async function confirmShipment(id: string) {
       user.tenantId,
       shipment.items.map((item) => item.salesOrderItemId)
     )
+    // 확정 직전에 수주 상태를 다시 확인한다. 실패하면 위의 PLANNED→SHIPPED 전환을 포함해 트랜잭션 전체가 롤백된다(재고·수불 미생성).
+    const lockedSalesOrder = await tx.salesOrder.findFirst({ where: { id: shipment.salesOrderId, tenantId: user.tenantId }, select: { status: true } })
+    if (!lockedSalesOrder) throw new Error("수주를 찾을 수 없습니다.")
+    if (!SHIPPABLE_STATUSES.includes(lockedSalesOrder.status as SalesOrderStatusValue)) throw new Error(salesOrderNotShippableMessage(lockedSalesOrder.status))
 
     for (const item of shipment.items) {
       if (item.item.isLotTracked && (!item.lotId || !item.lot || item.lot.itemId !== item.itemId || item.lot.status !== "ACTIVE")) {

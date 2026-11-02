@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { requireRole, requireTenantAccess } from "@/lib/auth"
-import { SalesOrderStatus } from "@prisma/client"
+import { Prisma, SalesOrderStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { getErrorMessage } from "@/lib/utils"
 import { hasResourcePermission, getCurrentPermissionSnapshot, requireResourcePermission } from "@/lib/auth/role-permissions"
@@ -10,6 +10,14 @@ import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/au
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { getSalesOrderProgressForTenant } from "@/lib/sales-order-progress.server"
 import { lockSalesOrderItemsForUpdate } from "@/lib/quantity-concurrency"
+import {
+  CREATABLE_STATUSES,
+  SALES_ORDER_STATUS_LABEL,
+  isTerminalSalesOrderStatus,
+  validateSalesOrderStatusChange,
+  type SalesOrderFollowUp,
+  type SalesOrderStatusValue,
+} from "@/lib/sales-order-status"
 import { toScaledQuantity } from "@/lib/quantity-scale"
 import {
   PRODUCTION_REQUEST_CONFLICT_MESSAGE,
@@ -158,6 +166,8 @@ export async function createSalesOrder(
   await requireResourcePermission("SALES_ORDER", "CREATE")
   const actor = await requireRole("OPERATOR")
   if (actor.tenantId !== tenantId) throw new Error("FORBIDDEN")
+  // 수주 등록 시 지정할 수 있는 상태는 초안·확정뿐이다(생산중·부분출하·출하완료는 처리 결과로 자동 변경, 완료·취소는 등록 대상 아님)
+  if (!CREATABLE_STATUSES.includes(data.status as SalesOrderStatusValue)) throw new Error("수주는 초안 또는 확정 상태로만 등록할 수 있습니다.")
   const order = await withUniqueBusinessNumberRetry(async () => {
     const orderNo = await generateSalesOrderNo(tenantId)
     return prisma.$transaction(async (tx) => {
@@ -218,73 +228,132 @@ export type UpdateSalesOrderInput = {
   items?: CreateSalesOrderItemInput[]
 }
 
-export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput) {
+export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput): Promise<{ ok: boolean; error?: string }> {
   await requireResourcePermission("SALES_ORDER", "UPDATE")
   const actor = await requireRole("OPERATOR")
-  const current = await prisma.salesOrder.findUniqueOrThrow({
-    where: { id },
-    include: { items: true },
-  })
-  if (current.tenantId !== actor.tenantId) throw new Error("FORBIDDEN")
-  const canEditItems = current.status === "DRAFT"
+  const tenantId = actor.tenantId
 
-  await prisma.$transaction(async (tx) => {
-    if (canEditItems && data.items) {
-      await tx.salesOrderItem.deleteMany({ where: { salesOrderId: id } })
-    }
-    const updated = await tx.salesOrder.update({
-      where: { id },
-      data: {
-        ...(data.customerId !== undefined && { customerId: data.customerId }),
-        ...(data.orderDate !== undefined && { orderDate: data.orderDate }),
-        ...(data.deliveryDate !== undefined && { deliveryDate: data.deliveryDate }),
-        ...(data.status !== undefined && { status: data.status }),
-        ...(data.totalAmount !== undefined && { totalAmount: data.totalAmount }),
-        ...(data.currency !== undefined && { currency: data.currency }),
-        ...(data.note !== undefined && { note: data.note }),
-        ...(canEditItems && data.items && {
-          items: {
-            create: data.items.map((item) => ({
-              itemId: item.itemId,
-              qty: item.qty,
-              unitPrice: item.unitPrice,
-              deliveryDate: item.deliveryDate,
-              note: item.note,
-            })),
-          },
-        }),
-      },
-      include: { items: true },
+  try {
+    await prisma.$transaction(async (tx) => {
+      const head = await tx.salesOrder.findFirst({ where: { id, tenantId }, select: { items: { select: { id: true } } } })
+      if (!head) throw new Error("수주를 찾을 수 없습니다.")
+      // 같은 수주 품목을 쓰는 생산의뢰·출하 등록·출하 확정과 같은 잠금(수주 품목 행)을 먼저 잡아 직렬화한다.
+      // 잠금 이후의 상태와 이력으로 판정하므로 취소와 출하가 동시에 성공해 모순이 생기지 않는다.
+      await lockSalesOrderItemsForUpdate(tx, tenantId, head.items.map((i) => i.id))
+      const current = await tx.salesOrder.findFirstOrThrow({ where: { id, tenantId }, include: { items: true } })
+      const itemIds = current.items.map((i) => i.id)
+
+      const currentStatus = current.status as SalesOrderStatusValue
+      const target = data.status as SalesOrderStatusValue | undefined
+      if (target !== undefined && !(target in SALES_ORDER_STATUS_LABEL)) throw new Error("올바르지 않은 수주 상태입니다.")
+      if (isTerminalSalesOrderStatus(currentStatus)) {
+        throw new Error(`${SALES_ORDER_STATUS_LABEL[currentStatus]} 수주는 수정할 수 없습니다.`)
+      }
+
+      const followUp = await loadSalesOrderFollowUp(tx, tenantId, current.items)
+      if (target !== undefined) {
+        const reason = validateSalesOrderStatusChange(currentStatus, target, followUp)
+        if (reason) throw new Error(reason)
+      }
+      const canEditItems = current.status === "DRAFT"
+      if (canEditItems && data.items && (followUp.activePlanNos.length > 0 || followUp.workOrderNos.length > 0 || followUp.shipmentNos.length > 0)) {
+        throw new Error("이미 연결된 생산계획·작업지시·출하가 있어 품목·수량을 수정할 수 없습니다.")
+      }
+
+      if (canEditItems && data.items) {
+        await tx.salesOrderItem.deleteMany({ where: { salesOrderId: id } })
+      }
+      const updated = await tx.salesOrder.update({
+        where: { id },
+        data: {
+          ...(data.customerId !== undefined && { customerId: data.customerId }),
+          ...(data.orderDate !== undefined && { orderDate: data.orderDate }),
+          ...(data.deliveryDate !== undefined && { deliveryDate: data.deliveryDate }),
+          ...(data.status !== undefined && { status: data.status }),
+          ...(data.totalAmount !== undefined && { totalAmount: data.totalAmount }),
+          ...(data.currency !== undefined && { currency: data.currency }),
+          ...(data.note !== undefined && { note: data.note }),
+          ...(canEditItems && data.items && {
+            items: {
+              create: data.items.map((item) => ({
+                itemId: item.itemId,
+                qty: item.qty,
+                unitPrice: item.unitPrice,
+                deliveryDate: item.deliveryDate,
+                note: item.note,
+              })),
+            },
+          }),
+        },
+        include: { items: true },
+      })
+      await recordAuditLog(tx, {
+        tenantId: actor.tenantId,
+        actor,
+        entityType: "SalesOrder",
+        entityId: id,
+        action: "UPDATE",
+        beforeData: {
+          orderNo: current.orderNo,
+          customerId: current.customerId,
+          status: current.status,
+          totalAmount: current.totalAmount,
+          itemCount: current.items.length,
+        },
+        afterData: {
+          changes: buildAuditChanges(current as any, updated as any, [
+            "customerId",
+            "orderDate",
+            "deliveryDate",
+            "status",
+            "totalAmount",
+            "currency",
+            "note",
+          ]),
+          itemCount: updated.items.length,
+        },
+        menuName: "수주관리",
+      })
     })
-    await recordAuditLog(tx, {
-      tenantId: actor.tenantId,
-      actor,
-      entityType: "SalesOrder",
-      entityId: id,
-      action: "UPDATE",
-      beforeData: {
-        orderNo: current.orderNo,
-        customerId: current.customerId,
-        status: current.status,
-        totalAmount: current.totalAmount,
-        itemCount: current.items.length,
-      },
-      afterData: {
-        changes: buildAuditChanges(current as any, updated as any, [
-          "customerId",
-          "orderDate",
-          "deliveryDate",
-          "status",
-          "totalAmount",
-          "currency",
-          "note",
-        ]),
-        itemCount: updated.items.length,
-      },
-      menuName: "수주관리",
-    })
-  })
+  } catch (e) {
+    return { ok: false, error: getErrorMessage(e) }
+  }
   revalidatePath("/app/mes/sales-orders")
+  return { ok: true }
+}
+
+/** 수주에 연결된 후속 업무(취소되지 않은 생산계획·작업지시·출하)와 출하 진행 정도를 조회한다. 잠금을 잡은 트랜잭션 안에서 호출한다. */
+async function loadSalesOrderFollowUp(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  items: Array<{ id: string; qty: unknown; shippedQty: unknown }>
+): Promise<SalesOrderFollowUp> {
+  const itemIds = items.map((i) => i.id)
+  if (itemIds.length === 0) return { activePlanNos: [], workOrderNos: [], shipmentNos: [], openShipmentNos: [], fullyShipped: false, hasShippedQty: false }
+  const [planItems, workOrders, shipmentItems] = await Promise.all([
+    tx.productionPlanItem.findMany({
+      where: { salesOrderItemId: { in: itemIds }, plan: { tenantId, status: { not: "CANCELLED" } } },
+      select: { plan: { select: { planNo: true } } },
+    }),
+    tx.workOrder.findMany({
+      where: { tenantId, status: { not: "CANCELLED" }, productionPlanItem: { salesOrderItemId: { in: itemIds } } },
+      select: { orderNo: true },
+    }),
+    tx.shipmentItem.findMany({
+      where: { salesOrderItemId: { in: itemIds }, shipmentOrder: { tenantId, status: { not: "CANCELLED" } } },
+      select: { shipmentOrder: { select: { shipmentNo: true, status: true } } },
+    }),
+  ])
+  const uniq = (a: string[]) => Array.from(new Set(a)).sort()
+  const shipments = new Map(shipmentItems.map((s) => [s.shipmentOrder.shipmentNo, s.shipmentOrder.status]))
+  return {
+    activePlanNos: uniq(planItems.map((p) => p.plan.planNo)),
+    workOrderNos: uniq(workOrders.map((w) => w.orderNo)),
+    shipmentNos: uniq(Array.from(shipments.keys())),
+    openShipmentNos: uniq(Array.from(shipments.entries()).filter(([, st]) => st === "PLANNED" || st === "PICKED").map(([no]) => no)),
+    fullyShipped: items.every((i) => Number(i.shippedQty) >= Number(i.qty)),
+    hasShippedQty: items.some((i) => Number(i.shippedQty) > 0),
+  }
 }
 
 export async function deleteSalesOrder(id: string) {
