@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useTransition } from "react"
+import { useState, useEffect, useRef, useTransition } from "react"
 import { useRouter } from "next/navigation"
 import {
   Dialog,
@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import { Loader2, PackageMinus, Factory, CheckCircle2, AlertTriangle, Info } from "lucide-react"
 import { formatQuantity } from "@/lib/utils"
+import { generateReceivingRequestId } from "@/lib/receiving-request-id"
 import {
   checkInventoryForSalesOrder,
   requestProductionFromSalesOrder,
@@ -59,10 +60,13 @@ export function SalesOrderProcessDialog({
   const [availableLots, setAvailableLots] = useState<Record<string, AvailableFinishedGoodsLot[]>>({})
   const [lotsLoading, setLotsLoading] = useState(false)
   const [shipmentError, setShipmentError] = useState<string | null>(null)
+  // 생산의뢰 요청 ID(멱등 키): 한 번의 의뢰 작업(재시도 포함)에 같은 값을 쓰고, 성공하거나 창을 새로 열 때만 새로 만든다
+  const productionRequestIdRef = useRef<string | null>(null)
 
   // 다이얼로그 오픈 시 재고 + 창고 목록 로드, 기본 창고 자동 선택
   useEffect(() => {
     if (!open || !salesOrder) return
+    productionRequestIdRef.current = null
     setLoading(true)
     setWarehouseId("")
     setLotSelections({})
@@ -155,6 +159,7 @@ export function SalesOrderProcessDialog({
 
   const handleProduction = () => {
     startTransition(async () => {
+      productionRequestIdRef.current ??= generateReceivingRequestId()
       const res = await requestProductionFromSalesOrder(
         salesOrder.id,
         shortageItems.map((s) => ({
@@ -163,12 +168,14 @@ export function SalesOrderProcessDialog({
           qty: s.shortageQty,
         })),
         tenantId,
-        siteId
+        siteId,
+        productionRequestIdRef.current
       )
       if (!res.ok) {
         alert(res.error ?? "오류가 발생했습니다.")
         return
       }
+      productionRequestIdRef.current = null
       alert(`생산계획 ${res.planNo} 이(가) 생성되었습니다.`)
       router.refresh()
       onOpenChange(false)

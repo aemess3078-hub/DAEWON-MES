@@ -9,6 +9,20 @@ import { hasResourcePermission, getCurrentPermissionSnapshot, requireResourcePer
 import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { getSalesOrderProgressForTenant } from "@/lib/sales-order-progress.server"
+import { lockSalesOrderItemsForUpdate } from "@/lib/quantity-concurrency"
+import { toScaledQuantity } from "@/lib/quantity-scale"
+import {
+  PRODUCTION_REQUEST_CONFLICT_MESSAGE,
+  PRODUCTION_REQUEST_ID_INVALID_MESSAGE,
+  PRODUCTION_REQUEST_TERMINAL_ORDER_MESSAGE,
+  findProductionRequestViolation,
+  hashProductionRequest,
+  isValidProductionRequestId,
+  normalizeRequestLines,
+  productionRequestTag,
+  productionRequestTagPrefix,
+  productionRequestViolationMessage,
+} from "@/lib/production-request"
 
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
@@ -612,10 +626,10 @@ export async function getSalesOrderFulfillmentStatus(
 
 // ─── S4: 생산의뢰 생성 ─────────────────────────────────────────────────────────
 
-async function generateSalesRequestPlanNo(tenantId: string): Promise<string> {
+async function generateSalesRequestPlanNo(db: Pick<typeof prisma, "productionPlan">, tenantId: string): Promise<string> {
   const { yyyymmdd } = kstDateParts()
   const prefix = `PP-REQ-${yyyymmdd}`
-  const last = await prisma.productionPlan.findFirst({
+  const last = await db.productionPlan.findFirst({
     where: { tenantId, planNo: { startsWith: prefix } },
     orderBy: { planNo: "desc" },
     select: { planNo: true },
@@ -624,31 +638,75 @@ async function generateSalesRequestPlanNo(tenantId: string): Promise<string> {
   return `${prefix}-${String(seq).padStart(3, "0")}`
 }
 
+/**
+ * 수주 기반 생산의뢰 (N-14).
+ * 수주 품목별 의뢰 가능 잔량(수주 수량 − 취소되지 않은 계획의 연결 수량)을 서버가 계산해 초과 요청을 거부하고,
+ * 같은 수주 품목의 동시 요청은 수주 품목 행 잠금으로 직렬화한다. requestId(선택)가 같은 재전송은 새 계획 없이 처음 결과를 돌려준다.
+ */
 export async function requestProductionFromSalesOrder(
   salesOrderId: string,
   items: { salesOrderItemId: string; itemId: string; qty: number }[],
   tenantId: string,
-  siteId: string
-): Promise<{ ok: boolean; planNo?: string; error?: string }> {
+  siteId: string,
+  requestId?: string
+): Promise<{ ok: boolean; planNo?: string; error?: string; replayed?: boolean }> {
   await requireResourcePermission("SALES_ORDER", "UPDATE")
   await requireResourcePermission("PRODUCTION_PLAN", "CREATE")
   const actor = await requireRole("OPERATOR")
   if (actor.tenantId !== tenantId) return { ok: false, error: "FORBIDDEN" }
-  if (items.length === 0) return { ok: false, error: "생산의뢰 품목이 없습니다." }
+  if (!Array.isArray(items) || items.length === 0) return { ok: false, error: "생산의뢰 품목이 없습니다." }
+  if (requestId !== undefined && !isValidProductionRequestId(requestId)) return { ok: false, error: PRODUCTION_REQUEST_ID_INVALID_MESSAGE }
+  const normalized = normalizeRequestLines(items)
+  if (!normalized.ok) return { ok: false, error: normalized.error }
+  const lines = normalized.lines
+  const requestHash = hashProductionRequest(salesOrderId, lines)
 
   try {
-    const salesOrderForNote = await prisma.salesOrder.findUnique({
-      where: { id: salesOrderId },
-      select: { orderNo: true },
-    })
-    const noteOrderRef = salesOrderForNote?.orderNo ?? ""
-    const planNote = noteOrderRef
-      ? `수주 기반 생산의뢰 (수주번호: ${noteOrderRef})`
-      : "수주 기반 생산의뢰"
+    const result = await withUniqueBusinessNumberRetry(async () => {
+      return prisma.$transaction(async (tx) => {
+        // 같은 수주 품목의 의뢰를 직렬화한다(동시 요청이 서로의 의뢰 수량을 보기 전에 잔량을 판정하지 못하게 함)
+        await lockSalesOrderItemsForUpdate(tx, tenantId, lines.map((l) => l.salesOrderItemId))
 
-    const planNo = await withUniqueBusinessNumberRetry(async () => {
-      const candidatePlanNo = await generateSalesRequestPlanNo(tenantId)
-      await prisma.$transaction(async (tx) => {
+        if (requestId) {
+          const prior = await tx.productionPlan.findFirst({
+            where: { tenantId, note: { contains: productionRequestTagPrefix(requestId) } },
+            select: { planNo: true, note: true },
+          })
+          if (prior) {
+            if ((prior.note ?? "").includes(productionRequestTag(requestId, requestHash))) return { planNo: prior.planNo, replayed: true }
+            throw new Error(PRODUCTION_REQUEST_CONFLICT_MESSAGE)
+          }
+        }
+
+        const salesOrder = await tx.salesOrder.findFirst({
+          where: { id: salesOrderId, tenantId },
+          select: { orderNo: true, status: true, items: { select: { id: true, itemId: true, qty: true, item: { select: { code: true } } } } },
+        })
+        if (!salesOrder) throw new Error("수주를 찾을 수 없습니다.")
+        if (["CANCELLED", "CLOSED", "SHIPPED"].includes(salesOrder.status)) throw new Error(PRODUCTION_REQUEST_TERMINAL_ORDER_MESSAGE)
+
+        const ordered = new Map<string, bigint>()
+        for (const line of lines) {
+          const soi = salesOrder.items.find((i) => i.id === line.salesOrderItemId)
+          if (!soi) throw new Error("해당 수주의 품목이 아닙니다. 화면을 새로고침한 뒤 다시 시도해 주세요.")
+          if (soi.itemId !== line.itemId) throw new Error("수주 품목과 생산의뢰 품목이 일치하지 않습니다.")
+          ordered.set(soi.id, toScaledQuantity(String(soi.qty)) ?? BigInt(0))
+        }
+        // 이미 의뢰된 수량: 취소되지 않은 생산계획(초안·확정·진행·완료)에 연결된 계획 수량
+        const requestedRows = await tx.productionPlanItem.groupBy({
+          by: ["salesOrderItemId"],
+          where: { salesOrderItemId: { in: lines.map((l) => l.salesOrderItemId) }, plan: { tenantId, status: { not: "CANCELLED" } } },
+          _sum: { plannedQty: true },
+        })
+        const already = new Map(requestedRows.map((r) => [r.salesOrderItemId as string, toScaledQuantity(String(r._sum.plannedQty ?? 0)) ?? BigInt(0)]))
+        const violation = findProductionRequestViolation(lines, ordered, already)
+        if (violation) {
+          const code = salesOrder.items.find((i) => i.id === violation.salesOrderItemId)?.item.code ?? violation.salesOrderItemId
+          throw new Error(productionRequestViolationMessage(code, violation))
+        }
+
+        const candidatePlanNo = await generateSalesRequestPlanNo(tx, tenantId)
+        const baseNote = `수주 기반 생산의뢰 (수주번호: ${salesOrder.orderNo})`
         const plan = await tx.productionPlan.create({
           data: {
             tenantId,
@@ -658,7 +716,7 @@ export async function requestProductionFromSalesOrder(
             startDate: new Date(),
             endDate: new Date(),
             status: "DRAFT",
-            note: planNote,
+            note: requestId ? `${baseNote} ${productionRequestTag(requestId, requestHash)}` : baseNote,
             items: {
               create: items.map((item) => ({
                 itemId: item.itemId,
@@ -670,10 +728,7 @@ export async function requestProductionFromSalesOrder(
         })
 
         // 수주 상태를 IN_PRODUCTION으로 전환
-        await tx.salesOrder.update({
-          where: { id: salesOrderId },
-          data: { status: "IN_PRODUCTION" },
-        })
+        await tx.salesOrder.update({ where: { id: salesOrderId }, data: { status: "IN_PRODUCTION" } })
         await recordAuditLog(tx, {
           tenantId,
           actor,
@@ -683,7 +738,8 @@ export async function requestProductionFromSalesOrder(
           afterData: {
             planNo: candidatePlanNo,
             sourceSalesOrderId: salesOrderId,
-            sourceSalesOrderNo: noteOrderRef,
+            sourceSalesOrderNo: salesOrder.orderNo,
+            requestId: requestId ?? null,
             itemCount: items.length,
             items: summarizeAuditItems(items, ["salesOrderItemId", "itemId", "qty"]),
           },
@@ -698,13 +754,14 @@ export async function requestProductionFromSalesOrder(
           afterData: { status: "IN_PRODUCTION", productionPlanId: plan.id, planNo: candidatePlanNo },
           menuName: "수주관리",
         })
+        return { planNo: candidatePlanNo, replayed: false }
       })
-      return candidatePlanNo
     }, { fields: ["tenantId", "planNo"], message: "생산의뢰번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요." })
 
+    if (result.replayed) return { ok: true, planNo: result.planNo, replayed: true } // 같은 요청 ID 의 재전송 — 이번 호출에서는 아무것도 쓰지 않았다
     revalidatePath("/app/mes/sales-orders")
     revalidatePath("/app/mes/production-plan")
-    return { ok: true, planNo }
+    return { ok: true, planNo: result.planNo }
   } catch (e) {
     return { ok: false, error: getErrorMessage(e) }
   }
