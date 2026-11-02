@@ -73,11 +73,13 @@ export function coreIssueFingerprints(issueActionsSource: string): Record<string
 export const CORE_ISSUE_BASELINE_FINGERPRINTS: Record<string, string> = {
   wipReuse: "c5765009ceab20f2",
   qtyChecks: "015b60e1c7f0b59c",
-  invTx: "1a888eb7a294c936",
+  // 갱신 이력(N-17): invTx 1a888eb7a294c936 → 6b12c6afabfa13f1 — 수불 note 에 요청 ID 해시(멱등 키 [rq:…])를 기록. 수량·방향·참조 필드 변경 없음.
+  invTx: "6b12c6afabfa13f1",
   wipCreate: "6a0c10089a2c6438",
   materialLot: "09c9950f88e607b7",
   decrement: "41d5da4f5d2b3223",
-  reservation: "0f33e934c9b2491d",
+  // 갱신 이력(N-17): reservation 0f33e934c9b2491d → ab9e797c47d61a86 — 예약 requiredQty 를 클라이언트 값이 아니라 서버가 BOM 으로 계산한 값으로 저장·판정. issuedQty 누계 방식은 그대로.
+  reservation: "ab9e797c47d61a86",
 }
 
 /** LOT 상태 변경 액션(updateLotStatus) 경계와 기준선 지문. */

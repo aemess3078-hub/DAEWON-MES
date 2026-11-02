@@ -14,8 +14,27 @@ import { requireMaterialIssueReader, resolveLotStockReader } from "@/lib/materia
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { OUTCOME_UNKNOWN_MESSAGE, isOutcomeUnknownError, toUserErrorMessage } from "@/lib/errors/user-error"
 import { safeRevalidate } from "@/lib/revalidate-safe"
-import { toScaledQuantity, QUANTITY_SCALE } from "@/lib/quantity-scale"
+import { toScaledQuantity, fromScaledQuantity, QUANTITY_SCALE } from "@/lib/quantity-scale"
 import { evaluateLotIssueEligibility, lotIssueBlockedMessage } from "@/lib/material-issue/lot-eligibility"
+import { isUniqueConstraintError } from "@/lib/business-numbering"
+import { generateReceivingRequestId } from "@/lib/receiving-request-id"
+import {
+  ISSUE_REQUEST_CONFLICT_MESSAGE,
+  ISSUE_REQUEST_ID_INVALID_MESSAGE,
+  ISSUE_REQUEST_TX_NO_CONFLICT_MESSAGE,
+  computeRequiredMaterialQty,
+  findIssueQuantityViolation,
+  hashIssueRequest,
+  isValidIssueRequestId,
+  issueQuantityViolationMessage,
+  issueRequestTxNo,
+  issueRequestTxPrefix,
+  issueTxNote,
+  issueTxNoteHasHash,
+  netIssuedScaledByItem,
+  requiredScaledByItem,
+  type NormalizedIssueLine,
+} from "@/lib/material-issue/issue-quantity"
 
 const RESERVATION_MISMATCH_MESSAGE = "자재예약 정보가 올바르지 않습니다. 화면을 새로고침한 뒤 다시 시도해 주세요."
 
@@ -65,17 +84,15 @@ export type WarehouseStockOption = {
   itemStocks: Record<string, number>   // itemId → qtyAvailable
 }
 
-function generateMaterialIssueTxNo(index: number): string {
-  const now = new Date()
-  const yyyymmdd = now.toISOString().slice(0, 10).replace(/-/g, "")
-  const hhmmssSSS = now.toISOString().slice(11, 23).replace(/[:.]/g, "")
-  const random = Math.floor(Math.random() * 10000).toString().padStart(4, "0")
-  return `ISS-${yyyymmdd}-${hhmmssSSS}-${String(index + 1).padStart(3, "0")}-${random}`
-}
-
 export type IssueMaterialInput = {
   workOrderId: string
   siteId: string
+  /**
+   * 멱등 키. 하나의 출고 작업은 재시도에도 같은 값을 보낸다. 같은 요청 ID 의 재전송은 새 출고·재고 차감 없이 처음 결과를 돌려주고,
+   * 같은 ID 에 다른 내용이면 거부한다. 영숫자/하이픈/밑줄 16~128자(UUID 권장). 출고 화면은 항상 보낸다.
+   * 생략하면(기존 스크립트·API 호출) 호출마다 새 키로 처리돼 재전송 방어는 없고, 필요량 초과 검증만 적용된다.
+   */
+  requestId?: string
   warehouseId?: string
   items: {
     itemId: string
@@ -145,8 +162,8 @@ export async function getWorkOrdersForIssue(
     const plannedQty = Number(wo.plannedQty)
 
     const materials: MaterialRequirement[] = wo.bom.bomItems.map((bi) => {
-      const baseQty = Number(bi.qtyPer) * plannedQty
-      const requiredQty = Math.round(baseQty * (1 + Number(bi.scrapRate)) * 1000) / 1000
+      // 서버 검증(issueMaterialsForWorkOrder)과 같은 계산식 — 화면의 '잔여'와 서버의 출고 가능 잔량이 어긋나지 않게 한다
+      const requiredQty = computeRequiredMaterialQty(bi.qtyPer, plannedQty, bi.scrapRate)
       const reservation = wo.materialReservations.find(
         (r) => r.itemId === bi.componentItemId
       )
@@ -266,7 +283,7 @@ export async function getLotStockByItems(
 export async function issueMaterialsForWorkOrder(
   data: IssueMaterialInput,
   tenantId: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; replayed?: boolean }> {
   let actor: Awaited<ReturnType<typeof requireRole>>
   try {
     await requireResourcePermission("PURCHASE_ORDER", "CREATE")
@@ -276,6 +293,8 @@ export async function issueMaterialsForWorkOrder(
     return { ok: false, error: toUserErrorMessage(e) }
   }
   if (actor.tenantId !== tenantId) return { ok: false, error: toUserErrorMessage("FORBIDDEN") }
+  if (data.requestId !== undefined && !isValidIssueRequestId(data.requestId)) return { ok: false, error: ISSUE_REQUEST_ID_INVALID_MESSAGE }
+  const requestId = data.requestId ?? generateReceivingRequestId()
   const activeItems = data.items.filter((i) => i.issueQty > 0)
   if (activeItems.length === 0)
     return { ok: false, error: "출고 수량을 입력하세요." }
@@ -343,6 +362,19 @@ export async function issueMaterialsForWorkOrder(
       reservationId: item.reservationId,
     }]
   })
+
+  // 수량은 소수점 6자리 정수로 환산해 정확히 비교한다(6자리 초과·0 이하는 거부)
+  for (const item of expandedItems) {
+    const scaled = toScaledQuantity(item.issueQty)
+    if (scaled === null || scaled <= BigInt(0)) return { ok: false, error: "출고 수량이 올바르지 않습니다. (0보다 크고 소수점 6자리 이하)" }
+  }
+  const normalizedLines: NormalizedIssueLine[] = expandedItems.map((item) => ({
+    itemId: item.itemId,
+    warehouseId: item.warehouseId ?? data.warehouseId ?? null,
+    lotId: item.lotId,
+    qtyScaled: toScaledQuantity(item.issueQty) as bigint,
+  }))
+  const requestHash = hashIssueRequest(data.workOrderId, normalizedLines)
 
   // LOT 관리 여부 일괄 조회 (트랜잭션 외부 — 읽기 전용)
   const uniqueItemIds = Array.from(new Set(expandedItems.map((i) => i.itemId)))
@@ -415,13 +447,48 @@ export async function issueMaterialsForWorkOrder(
     )
   }
 
-  // txNo 사전 생성 (트랜잭션 외부) — count 기반 채번은 동시요청에서 unique 충돌이 쉬워
-  // timestamp + random suffix를 사용한다. 업무 정합성은 아래 transaction이 보장한다.
-  const txNos = expandedItems.map((_, index) => generateMaterialIssueTxNo(index))
+  // txNo 사전 생성 (트랜잭션 외부) — 요청 ID 를 결정적으로 넣는다((tenantId, txNo) 고유 제약이 같은 요청의 이중 처리를 DB 에서도 막는다)
+  const txNos = expandedItems.map((_, index) => issueRequestTxNo(requestId, index))
+  let replayed = false
 
   try {
     await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {
+      replayed = false
       await lockWorkOrderForUpdate(tx, tenantId, data.workOrderId)
+
+      // ── 멱등성: 같은 요청 ID 가 이미 처리됐는지 잠금 안에서 확인한다(같은 작업지시의 동시 재전송은 위 잠금으로 직렬화) ──
+      const priorTx = await tx.inventoryTransaction.findFirst({
+        where: { tenantId, txNo: { startsWith: issueRequestTxPrefix(requestId) } },
+        orderBy: { txNo: "asc" },
+        select: { refId: true, note: true },
+      })
+      if (priorTx) {
+        if (priorTx.refId === data.workOrderId && issueTxNoteHasHash(priorTx.note, requestHash)) {
+          replayed = true
+          return // 새 출고·재고 차감·투입 LOT 를 만들지 않는다
+        }
+        throw new Error(ISSUE_REQUEST_CONFLICT_MESSAGE)
+      }
+
+      // ── 필요량 대비 출고 가능 수량 검증(N-17): BOM 필요량 − 기출고(ISSUE−RETURN) 잔량을 넘는 요청은 거부 ──
+      const lockedWorkOrder = await tx.workOrder.findFirst({
+        where: { id: data.workOrderId, tenantId },
+        select: { plannedQty: true, bom: { select: { bomItems: { select: { componentItemId: true, qtyPer: true, scrapRate: true, componentItem: { select: { code: true } } } } } } },
+      })
+      if (!lockedWorkOrder) throw new Error("작업지시를 찾을 수 없습니다.")
+      const requiredByItem = requiredScaledByItem(lockedWorkOrder.bom.bomItems, lockedWorkOrder.plannedQty)
+      const requestedByItem = new Map<string, bigint>()
+      for (const line of normalizedLines) requestedByItem.set(line.itemId, (requestedByItem.get(line.itemId) ?? BigInt(0)) + line.qtyScaled)
+      const issuedLedger = await tx.inventoryTransaction.findMany({
+        where: { tenantId, refType: "WORK_ORDER", refId: data.workOrderId, itemId: { in: Array.from(requestedByItem.keys()) }, txType: { in: ["ISSUE", "RETURN"] } },
+        select: { itemId: true, txType: true, qty: true },
+      })
+      const violation = findIssueQuantityViolation(requestedByItem, requiredByItem, netIssuedScaledByItem(issuedLedger))
+      if (violation) {
+        const code = lockedWorkOrder.bom.bomItems.find((b) => b.componentItemId === violation.itemId)?.componentItem.code ?? itemMetaMap.get(violation.itemId)?.code ?? violation.itemId
+        throw new Error(issueQuantityViolationMessage(code, violation))
+      }
+      const requiredQtyByItem = new Map(Array.from(requiredByItem.entries()).map(([id, scaled]) => [id, fromScaledQuantity(scaled)]))
 
       // LOT 행 공유 잠금(FOR SHARE)은 요청 순서와 무관하게 LOT ID 오름차순으로 한 번에 잡는다(항상 같은 순서).
       // 이후 루프의 상태 확인은 이미 잠긴 LOT 를 읽기만 한다. 공유 잠금끼리는 충돌하지 않고, 잠금을 기다리는 쪽(LOT 상태 변경)은
@@ -583,7 +650,7 @@ export async function issueMaterialsForWorkOrder(
             qty: item.issueQty,
             refType: "WORK_ORDER",
             refId: data.workOrderId,
-            note: "자재출고 처리",
+            note: issueTxNote(requestHash),
             txAt: new Date(),
           },
         })
@@ -684,7 +751,8 @@ export async function issueMaterialsForWorkOrder(
           )
         }
 
-        // ── 4. MaterialReservation 갱신 ──────────────────────────────────────
+        // ── 4. MaterialReservation 갱신 (필요량은 클라이언트 값이 아니라 서버가 BOM 으로 계산한 값) ──
+        const serverRequiredQty = requiredQtyByItem.get(item.itemId) ?? 0
         if (item.reservationId) {
           const res = await tx.materialReservation.findUnique({
             where: { id: item.reservationId },
@@ -699,8 +767,9 @@ export async function issueMaterialsForWorkOrder(
               where: { id: item.reservationId },
               data: {
                 issuedQty: newIssuedQty,
+                requiredQty: serverRequiredQty,
                 status:
-                  newIssuedQty >= Number(res.requiredQty)
+                  newIssuedQty >= serverRequiredQty
                     ? "FULFILLED"
                     : "PARTIAL",
               },
@@ -716,8 +785,9 @@ export async function issueMaterialsForWorkOrder(
               where: { id: existing.id },
               data: {
                 issuedQty: newIssuedQty,
+                requiredQty: serverRequiredQty,
                 status:
-                  newIssuedQty >= Number(existing.requiredQty)
+                  newIssuedQty >= serverRequiredQty
                     ? "FULFILLED"
                     : "PARTIAL",
               },
@@ -727,11 +797,11 @@ export async function issueMaterialsForWorkOrder(
               data: {
                 workOrderId: data.workOrderId,
                 itemId: item.itemId,
-                requiredQty: item.requiredQty,
+                requiredQty: serverRequiredQty,
                 reservedQty: 0,
                 issuedQty: item.issueQty,
                 status:
-                  item.issueQty >= item.requiredQty ? "FULFILLED" : "PARTIAL",
+                  item.issueQty >= serverRequiredQty ? "FULFILLED" : "PARTIAL",
               },
             })
           }
@@ -747,12 +817,15 @@ export async function issueMaterialsForWorkOrder(
           workOrderId: data.workOrderId,
           siteId: data.siteId,
           transactionId: firstTxId,
+          requestId,
           itemCount: expandedItems.length,
           items: summarizeAuditItems(expandedItems, ["itemId", "warehouseId", "lotId", "issueQty", "reservationId"]),
         },
         menuName: "자재출고",
       })
     }))
+
+    if (replayed) return { ok: true, replayed: true } // 같은 요청 ID 의 재전송 — 이번 호출에서는 아무것도 쓰지 않았다
 
     // 커밋 이후 캐시 재검증 오류가 출고 결과를 실패로 뒤집어 중복 출고를 유발하지 않도록 분리
     safeRevalidate(
@@ -770,6 +843,8 @@ export async function issueMaterialsForWorkOrder(
     return { ok: true }
   } catch (e) {
     console.error("[issueMaterialsForWorkOrder] error:", e)
+    // 같은 요청 ID 가 다른 작업지시·동시 요청에서 먼저 거래번호를 확보한 경우
+    if (isUniqueConstraintError(e, ["tenantId", "txNo"])) return { ok: false, error: ISSUE_REQUEST_TX_NO_CONFLICT_MESSAGE }
     // DB 연결/응답 오류는 커밋 여부를 알 수 없다 — 실패로 단정하지 않고 확인을 요청한다
     if (isOutcomeUnknownError(e)) return { ok: false, error: OUTCOME_UNKNOWN_MESSAGE }
     return {

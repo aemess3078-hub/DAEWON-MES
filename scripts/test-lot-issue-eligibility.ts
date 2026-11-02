@@ -138,7 +138,19 @@ async function main() {
         return { count: 1 }
       },
     },
-    inventoryTransaction: { create: async (a: { data: Row }) => { const row = { id: nid("itx"), ...a.data }; state.invTx.push(row); return row } },
+    inventoryTransaction: {
+      create: async (a: { data: Row }) => { const row = { id: nid("itx"), ...a.data }; state.invTx.push(row); return row },
+      // N-17: 멱등 키(요청 ID 접두사 거래번호) 조회와 작업지시 기출고량(원장 ISSUE−RETURN) 조회
+      findFirst: async (a: { where: { txNo?: { startsWith: string } } }) => state.invTx.find((t) => String(t.txNo ?? "").startsWith(a.where.txNo?.startsWith ?? "0000")) ?? null,
+      findMany: async (a: { where: { refId: string; itemId: { in: string[] } } }) => state.invTx.filter((t) => t.refType === "WORK_ORDER" && t.refId === a.where.refId && a.where.itemId.in.includes(String(t.itemId)) && (t.txType === "ISSUE" || t.txType === "RETURN")),
+    },
+    // N-17: 트랜잭션 안에서 다시 읽는 작업지시 계획수량·BOM(필요량 계산용). 기존 시나리오가 필요량에 걸리지 않도록 넉넉한 수량을 둔다
+    workOrder: {
+      findFirst: async (a: { where: { id: string } }) => {
+        const wo = state.workOrders.find((w) => w.id === a.where.id)
+        return wo ? { plannedQty: 1000, bom: { bomItems: (wo.componentIds as string[]).map((c) => ({ componentItemId: c, qtyPer: 1, scrapRate: 0, componentItem: { code: c } })) } } : null
+      },
+    },
     workOrderMaterialLot: { create: async (a: { data: Row }) => { const row = { id: nid("wml"), ...a.data }; state.woMaterialLots.push(row); return row } },
     wipUnitMaterialLot: { create: async (a: { data: Row }) => void state.wipUnitMaterialLots.push({ id: nid("wuml"), ...a.data }) },
     materialReservation: {
