@@ -10,7 +10,10 @@ import { evaluateProductionPlanWorkOrderCompletion } from "@/lib/production-plan
 import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { cancelProductionPlanForTenant } from "@/lib/production-plan-cancel.server"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
-import { lockProductionPlanItemsForUpdate, withQuantityTransactionRetry } from "@/lib/quantity-concurrency"
+import { lockProductionPlanItemsForUpdate, lockSalesOrderItemsForUpdate, withQuantityTransactionRetry } from "@/lib/quantity-concurrency"
+import { PLAN_QTY_INVALID_MESSAGE, resolvePlanItemUpdate, type ProductionKindValue } from "@/lib/production-allocation"
+import { allocationIncreaseViolationMessage, findProductionRequestViolation } from "@/lib/production-request"
+import { formatScaledQuantity, toScaledQuantity } from "@/lib/quantity-scale"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +38,10 @@ export type PlanWithDetails = {
     routingId: string | null
     salesOrderItemId: string | null
     plannedQty: any // Decimal
+    productionKind: ProductionKindValue
+    allocatedQty: any // Decimal — 수주 충당 수량(계획 수량과 구분)
+    extraReason: string | null
+    extraApprovalStatus: string
     note: string | null
     item: { id: string; code: string; name: string; itemType: string }
     bom: { id: string; version: string } | null
@@ -65,6 +72,10 @@ export type PlanItemInput = {
   bomId?: string | null
   routingId?: string | null
   plannedQty: number
+  /** 수주 충당 수량(수주 연결된 줄만). 생략하면 기존 충당 수량을 유지하되 계획 수량보다 클 수 없다 */
+  allocatedQty?: number | null
+  /** 여유 생산 사유(계획 수량 > 충당 수량이면 필수). 생략하면 기존 사유 유지 */
+  extraReason?: string | null
   note?: string | null
 }
 
@@ -296,6 +307,11 @@ export async function createPlan(data: CreatePlanInput, _tenantId: string) {
   }
 
   for (const item of items) {
+    const plannedScaled = toScaledQuantity(item.plannedQty)
+    if (plannedScaled === null || plannedScaled <= BigInt(0)) throw new Error(PLAN_QTY_INVALID_MESSAGE)
+    if (item.allocatedQty !== undefined && item.allocatedQty !== null && Number(item.allocatedQty) !== 0) {
+      throw new Error("신규 생산계획은 수주와 연결되지 않은 재고 생산 계획입니다. 수주 충당은 수주관리의 생산의뢰로 등록해 주세요.")
+    }
     if (item.routingId) {
       await validateRoutingForItem({ tenantId, itemId: item.itemId, routingId: item.routingId })
     }
@@ -318,6 +334,8 @@ export async function createPlan(data: CreatePlanInput, _tenantId: string) {
             bomId: item.bomId ?? null,
             routingId: item.routingId ?? null,
             plannedQty: item.plannedQty,
+            productionKind: "STOCK" as const,
+            allocatedQty: 0,
             note: item.note ?? null,
           })),
         },
@@ -354,6 +372,8 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
   }
 
   for (const item of items) {
+    const plannedScaled = toScaledQuantity(item.plannedQty)
+    if (plannedScaled === null || plannedScaled <= BigInt(0)) throw new Error(PLAN_QTY_INVALID_MESSAGE)
     if (item.routingId) {
       await validateRoutingForItem({ tenantId, itemId: item.itemId, routingId: item.routingId })
     }
@@ -365,13 +385,20 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
         where: { id, tenantId },
         select: {
           id: true,
-          items: { select: { id: true } },
+          items: { select: { id: true, salesOrderItemId: true } },
         },
       })
 
       if (!planForLock) {
         throw new Error("생산계획을 찾을 수 없습니다.")
       }
+
+      // 잠금 순서: 수주 품목(충당 합계 판정 단위) → 생산계획 품목. 생산의뢰·출하·수주 수정도 수주 품목 잠금을 먼저 잡는다.
+      await lockSalesOrderItemsForUpdate(
+        tx,
+        tenantId,
+        planForLock.items.map((item) => item.salesOrderItemId)
+      )
 
       await lockProductionPlanItemsForUpdate(
         tx,
@@ -389,8 +416,13 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
               id: true,
               itemId: true,
               salesOrderItemId: true,
+              productionKind: true,
+              allocatedQty: true,
+              extraReason: true,
               salesOrderItem: {
                 select: {
+                  qty: true,
+                  item: { select: { code: true } },
                   salesOrder: { select: { tenantId: true } },
                 },
               },
@@ -431,17 +463,69 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
         })
       }
 
+      // 수정 줄의 계획 수량·충당 수량·유형·여유 사유를 정하고, 충당 수량이 늘어나는 줄은 수주 품목 합계(다른 계획 포함)를 검증한다.
+      const resolved = new Map<string, ReturnType<typeof resolvePlanItemUpdate> & { ok: true }>()
       for (const productionPlanItemId of reconciliation.updateIds) {
         const item = items.find(
           (candidate) => candidate.productionPlanItemId?.trim() === productionPlanItemId
         )!
+        const current = existing.items.find((row) => row.id === productionPlanItemId)!
+        const result = resolvePlanItemUpdate({
+          linked: current.salesOrderItemId != null,
+          existing: {
+            kind: current.productionKind,
+            allocatedScaled: toScaledQuantity(String(current.allocatedQty)) ?? BigInt(0),
+            extraReason: current.extraReason,
+          },
+          plannedQty: item.plannedQty,
+          allocatedQty: item.allocatedQty,
+          extraReason: item.extraReason,
+        })
+        if (!result.ok) {
+          throw new Error(result.error)
+        }
+        resolved.set(productionPlanItemId, result)
+
+        if (result.allocationIncreased && current.salesOrderItemId && current.salesOrderItem) {
+          const others = await tx.productionPlanItem.aggregate({
+            where: {
+              salesOrderItemId: current.salesOrderItemId,
+              id: { not: productionPlanItemId },
+              plan: { tenantId, status: { not: "CANCELLED" } },
+            },
+            _sum: { allocatedQty: true },
+          })
+          const violation = findProductionRequestViolation(
+            [{ salesOrderItemId: current.salesOrderItemId, qtyScaled: result.allocatedScaled }],
+            new Map([[current.salesOrderItemId, toScaledQuantity(String(current.salesOrderItem.qty)) ?? BigInt(0)]]),
+            new Map([[current.salesOrderItemId, toScaledQuantity(String(others._sum.allocatedQty ?? 0)) ?? BigInt(0)]])
+          )
+          if (violation) {
+            throw new Error(allocationIncreaseViolationMessage(current.salesOrderItem.item.code, violation))
+          }
+        }
+      }
+
+      for (const productionPlanItemId of reconciliation.updateIds) {
+        const item = items.find(
+          (candidate) => candidate.productionPlanItemId?.trim() === productionPlanItemId
+        )!
+        const result = resolved.get(productionPlanItemId)!
+        const current = existing.items.find((row) => row.id === productionPlanItemId)!
         await tx.productionPlanItem.update({
           where: { id: productionPlanItemId },
           data: {
             itemId: item.itemId,
             bomId: item.bomId ?? null,
             routingId: item.routingId ?? null,
-            plannedQty: item.plannedQty,
+            plannedQty: formatScaledQuantity(result.plannedScaled),
+            allocatedQty: formatScaledQuantity(result.allocatedScaled),
+            productionKind: result.kind,
+            extraReason: result.extraReason,
+            // 승인 정책 미확정(1단계): 여유가 사라지면 승인 상태를 초기화하고, 그 외에는 기존 상태를 유지한다.
+            ...(result.kind !== "ORDER_EXTRA" && current.productionKind === "ORDER_EXTRA"
+              ? { extraApprovalStatus: "NOT_REQUIRED" as const, extraApprovedById: null, extraApprovedAt: null }
+              : {}),
             note: item.note ?? null,
           },
         })
@@ -456,6 +540,8 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
             bomId: item.bomId ?? null,
             routingId: item.routingId ?? null,
             plannedQty: item.plannedQty,
+            productionKind: "STOCK",
+            allocatedQty: 0,
             note: item.note ?? null,
             salesOrderItemId: null,
           },

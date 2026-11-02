@@ -18,7 +18,7 @@ import {
   type SalesOrderFollowUp,
   type SalesOrderStatusValue,
 } from "@/lib/sales-order-status"
-import { toScaledQuantity } from "@/lib/quantity-scale"
+import { formatScaledQuantity, toScaledQuantity } from "@/lib/quantity-scale"
 import {
   PRODUCTION_REQUEST_CONFLICT_MESSAGE,
   PRODUCTION_REQUEST_ID_INVALID_MESSAGE,
@@ -714,7 +714,7 @@ async function generateSalesRequestPlanNo(db: Pick<typeof prisma, "productionPla
  */
 export async function requestProductionFromSalesOrder(
   salesOrderId: string,
-  items: { salesOrderItemId: string; itemId: string; qty: number }[],
+  items: { salesOrderItemId: string; itemId: string; qty: number; extraQty?: number | null; extraReason?: string | null }[],
   tenantId: string,
   siteId: string,
   requestId?: string
@@ -761,13 +761,13 @@ export async function requestProductionFromSalesOrder(
           if (soi.itemId !== line.itemId) throw new Error("수주 품목과 생산의뢰 품목이 일치하지 않습니다.")
           ordered.set(soi.id, toScaledQuantity(String(soi.qty)) ?? BigInt(0))
         }
-        // 이미 의뢰된 수량: 취소되지 않은 생산계획(초안·확정·진행·완료)에 연결된 계획 수량
+        // 이미 충당된 수량: 취소되지 않은 생산계획(초안·확정·진행·완료)의 수주 충당 수량(allocatedQty). 여유 생산분은 포함하지 않는다.
         const requestedRows = await tx.productionPlanItem.groupBy({
           by: ["salesOrderItemId"],
           where: { salesOrderItemId: { in: lines.map((l) => l.salesOrderItemId) }, plan: { tenantId, status: { not: "CANCELLED" } } },
-          _sum: { plannedQty: true },
+          _sum: { allocatedQty: true },
         })
-        const already = new Map(requestedRows.map((r) => [r.salesOrderItemId as string, toScaledQuantity(String(r._sum.plannedQty ?? 0)) ?? BigInt(0)]))
+        const already = new Map(requestedRows.map((r) => [r.salesOrderItemId as string, toScaledQuantity(String(r._sum.allocatedQty ?? 0)) ?? BigInt(0)]))
         const violation = findProductionRequestViolation(lines, ordered, already)
         if (violation) {
           const code = salesOrder.items.find((i) => i.id === violation.salesOrderItemId)?.item.code ?? violation.salesOrderItemId
@@ -787,11 +787,18 @@ export async function requestProductionFromSalesOrder(
             status: "DRAFT",
             note: requestId ? `${baseNote} ${productionRequestTag(requestId, requestHash)}` : baseNote,
             items: {
-              create: items.map((item) => ({
-                itemId: item.itemId,
-                plannedQty: item.qty,
-                salesOrderItemId: item.salesOrderItemId,
-              })),
+              // 계획 수량 = 수주 충당 수량 + 여유 수량. 여유가 있으면 ORDER_EXTRA(사유 필수), 없으면 ORDER.
+              create: lines.map((line) => {
+                const plannedScaled = line.qtyScaled + line.extraScaled
+                return {
+                  itemId: line.itemId,
+                  plannedQty: formatScaledQuantity(plannedScaled),
+                  allocatedQty: formatScaledQuantity(line.qtyScaled),
+                  productionKind: line.extraScaled > BigInt(0) ? ("ORDER_EXTRA" as const) : ("ORDER" as const),
+                  extraReason: line.extraScaled > BigInt(0) ? line.extraReason : null,
+                  salesOrderItemId: line.salesOrderItemId,
+                }
+              }),
             },
           },
         })
@@ -810,7 +817,9 @@ export async function requestProductionFromSalesOrder(
             sourceSalesOrderNo: salesOrder.orderNo,
             requestId: requestId ?? null,
             itemCount: items.length,
-            items: summarizeAuditItems(items, ["salesOrderItemId", "itemId", "qty"]),
+            items: summarizeAuditItems(items, ["salesOrderItemId", "itemId", "qty", "extraQty", "extraReason"]),
+            plannedQtyTotal: formatScaledQuantity(lines.reduce((s, l) => s + l.qtyScaled + l.extraScaled, BigInt(0))),
+            allocatedQtyTotal: formatScaledQuantity(lines.reduce((s, l) => s + l.qtyScaled, BigInt(0))),
           },
           menuName: "수주관리",
         })
