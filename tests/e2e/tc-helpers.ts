@@ -1,4 +1,4 @@
-import { expect, type Page, type Locator } from "@playwright/test"
+import { expect, test, type Page, type Locator } from "@playwright/test"
 import * as XLSX from "xlsx"
 import * as path from "node:path"
 import { adminCredentials, developerCredentials } from "./guard"
@@ -59,11 +59,22 @@ export const rowOf = (page: Page, text: string): Locator => page.locator("tbody 
 export async function openRowAction(page: Page, rowText: string, action: "수정" | "삭제" | "상세보기") {
   const row = rowOf(page, rowText).first()
   await expect(row, `행 '${rowText}'`).toBeVisible({ timeout: 20_000 })
-  // 일부 표(사업장/로케이션/공정)는 행 메뉴 버튼에 접근성 이름이 없어(아이콘만) 마지막 버튼을 쓴다
-  const named = row.getByRole("button", { name: "메뉴 열기" })
-  if (await named.count()) await named.click()
-  else await row.getByRole("button").last().click()
-  await page.getByRole("menuitem", { name: action }).click()
+  const item = page.getByRole("menuitem", { name: action })
+  // 일부 표(사업장/로케이션/공정)는 행 메뉴 버튼에 접근성 이름이 없어(아이콘만) 마지막 버튼을 쓴다.
+  // 페이지가 hydrate 되기 전에 누른 클릭은 메뉴를 열지 못하므로, 메뉴 항목이 보일 때까지 다시 누른다(횟수는 주석으로 남긴다).
+  let attempts = 0
+  while (attempts < 5) {
+    attempts += 1
+    const named = row.getByRole("button", { name: "메뉴 열기" })
+    if (await named.count()) await named.click()
+    else await row.getByRole("button").last().click()
+    if (await item.first().waitFor({ state: "visible", timeout: 4_000 }).then(() => true, () => false)) break
+    await page.keyboard.press("Escape").catch(() => {})
+  }
+  if (attempts > 1) {
+    try { test.info().annotations.push({ type: "row-menu-retry", description: `${rowText} → ${action}: ${attempts}회 시도` }) } catch { /* test 밖 */ }
+  }
+  await item.click()
 }
 
 /** Radix Select: 라벨로 트리거를 찾아 옵션 선택(옵션명은 부분 일치) */

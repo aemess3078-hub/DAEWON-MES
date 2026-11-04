@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/db/prisma"
+import { MRP_PURCHASE_CREATION_DISABLED_MESSAGE, MRP_PURCHASE_CREATION_ENABLED } from "@/lib/mrp/purchase-creation-policy"
 import { requireRole } from "@/lib/auth"
 import { hasCurrentUserResourcePermission, requireResourcePermission } from "@/lib/auth/role-permissions"
 import {
@@ -41,6 +42,14 @@ export async function getPurchaseSuggestions(
 }
 
 export async function createDraftPurchaseOrdersFromMrpSuggestions(input: DraftPoInput): Promise<DraftPoResult> {
+  // 2-D-0: 공통 발주 파이프라인이 준비될 때까지 신규 생성 차단(권한 확인 후 DB 접근·쓰기 없이 안내만 반환)
+  // 같은 requestKey 재전송(replay)도 이 경로로 들어오므로 함께 막힌다.
+  if (!MRP_PURCHASE_CREATION_ENABLED) {
+    await requireResourcePermission("MRP", "CREATE")
+    const user = await requireResourcePermission("PURCHASE_ORDER", "CREATE")
+    await requireRole("OPERATOR", user)
+    return { success: false, code: "CREATION_DISABLED", error: MRP_PURCHASE_CREATION_DISABLED_MESSAGE }
+  }
   const result = await createDraftPurchaseOrdersFromSuggestions(
     {
       authorize: async () => {

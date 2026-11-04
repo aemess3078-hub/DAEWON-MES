@@ -96,7 +96,8 @@ check("서버 액션이 재조정 함수를 실제로 사용한다 / 스키마�
   const actions = readFileSync(join(process.cwd(), "src/lib/actions/production-plan.actions.ts"), "utf8")
   assert.ok(actions.includes("reconcileProductionPlanItems(") && actions.includes("@/lib/production-plan-item-reconciliation"))
   const schema = readFileSync(join(process.cwd(), "prisma/schema.prisma"), "utf8")
-  const planItem = schema.slice(schema.indexOf("model ProductionPlanItem"), schema.indexOf("model ProductionPlanItem") + 900)
+  const planItemStart = schema.indexOf("model ProductionPlanItem")
+  const planItem = schema.slice(planItemStart, schema.indexOf("\n}", planItemStart))
   assert.ok(planItem.includes("salesOrderItemId String?") && planItem.includes("salesOrderItem SalesOrderItem?"))
 })
 

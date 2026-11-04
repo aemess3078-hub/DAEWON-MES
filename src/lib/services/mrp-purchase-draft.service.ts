@@ -39,6 +39,7 @@ import { isDateOnly, toDateOnly } from "../mrp/period"
 import { computeOrderByDate, daysBetween, describeTermsViolation, validateQtyAgainstTerms } from "../mrp/purchase-policy"
 import type { DateOnly } from "../mrp/types"
 import { evaluateCoverage } from "../mrp/draft-coverage"
+import { MRP_PURCHASE_CREATION_DISABLED_MESSAGE } from "../mrp/purchase-creation-policy"
 import { canonicalJson, isSnapshotTooLarge, sha256Hex, type BuiltMrpRun } from "../mrp/mrp-run-snapshot"
 import { loadSupplierPolicies } from "./item-supplier.service"
 import { loadCurrentPurchasePrices, loadDraftCoverage } from "./mrp-loaders"
@@ -119,6 +120,7 @@ export type DraftPoErrorCode =
   | "RUN_NOT_FOUND"
   | "IDEMPOTENCY_KEY_REUSE_MISMATCH"
   | "SNAPSHOT_FAILED"
+  | "CREATION_DISABLED"
   | "FAILED"
 
 export const DRAFT_PO_ERROR_MESSAGES: Record<DraftPoErrorCode, string> = {
@@ -135,6 +137,7 @@ export const DRAFT_PO_ERROR_MESSAGES: Record<DraftPoErrorCode, string> = {
   IDEMPOTENCY_KEY_REUSE_MISMATCH:
     "같은 요청 키로 이미 다른 내용의 요청이 처리되었습니다. 화면을 새로고침한 뒤 구매발주 목록을 확인하고 다시 시도해 주세요.",
   SNAPSHOT_FAILED: "MRP 실행 Snapshot 을 만들지 못했습니다. 조회 기간을 줄이거나 잠시 후 다시 시도해 주세요.",
+  CREATION_DISABLED: MRP_PURCHASE_CREATION_DISABLED_MESSAGE,
   FAILED: "발주 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
 }
 
