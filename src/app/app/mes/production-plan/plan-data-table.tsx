@@ -14,6 +14,8 @@ import { cancelProductionPlan, deletePlan, PlanWithDetails } from "@/lib/actions
 import type { ResourcePermissionFlags } from "@/lib/auth/role-permissions"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
+import type { PlanQuantityView } from "@/lib/production-quantity-model"
+import { PRODUCTION_KIND_FILTER_OPTIONS } from "@/lib/production-plan-form"
 
 interface PlanDataTableProps {
   data: PlanWithDetails[]
@@ -22,10 +24,13 @@ interface PlanDataTableProps {
   tenantId: string
   permissions: ResourcePermissionFlags
   initialSalesOrderId?: string
+  /** 2-A 조회 모델(수주 조회 권한이 없으면 null) */
+  quantities?: PlanQuantityView[] | null
 }
 
-export function PlanDataTable({ data, sites, items, tenantId, permissions, initialSalesOrderId }: PlanDataTableProps) {
+export function PlanDataTable({ data, sites, items, tenantId, permissions, initialSalesOrderId, quantities = null }: PlanDataTableProps) {
   const router = useRouter()
+  const quantityMap = useMemo(() => (quantities ? new Map(quantities.map((q) => [q.planId, q])) : null), [quantities])
   const [formOpen, setFormOpen] = useState(false)
   const [formMode, setFormMode] = useState<"create" | "edit">("create")
   const [editingPlan, setEditingPlan] = useState<PlanWithDetails | null>(null)
@@ -118,9 +123,24 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
     onViewDetail: handleViewDetail,
     canUpdate: permissions.canUpdate,
     canDelete: permissions.canDelete,
+    quantities: quantityMap,
   })
 
   const filterableColumns = [
+    {
+      id: "productionKind" as keyof PlanWithDetails,
+      title: "생산 유형",
+      options: PRODUCTION_KIND_FILTER_OPTIONS,
+    },
+    {
+      id: "approval" as keyof PlanWithDetails,
+      title: "여유 승인",
+      options: [
+        { label: "승인 대기", value: "PENDING" },
+        { label: "승인 완료", value: "APPROVED" },
+        { label: "반려", value: "REJECTED" },
+      ],
+    },
     {
       id: "status" as keyof PlanWithDetails,
       title: "상태",
@@ -177,7 +197,7 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
         columns={columns}
         data={visibleData}
         searchableColumns={[
-          { id: "planNo" as keyof PlanWithDetails, title: "계획번호 검색..." },
+          { id: "planNo" as keyof PlanWithDetails, title: "계획번호" },
         ]}
         filterableColumns={filterableColumns}
       />
@@ -187,6 +207,7 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
         onOpenChange={setFormOpen}
         mode={formMode}
         plan={editingPlan}
+        quantities={editingPlan ? (quantityMap?.get(editingPlan.id) ?? null) : null}
         sites={sites}
         items={items}
         tenantId={tenantId}
@@ -224,6 +245,7 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
         open={detailOpen}
         onOpenChange={setDetailOpen}
         plan={detailPlan}
+        quantities={detailPlan ? (quantityMap?.get(detailPlan.id) ?? null) : null}
       />
     </div>
   )

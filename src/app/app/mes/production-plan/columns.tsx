@@ -19,6 +19,10 @@ import { DataTableColumnHeader } from "@/components/common/data-table"
 import { PlanWithDetails } from "@/lib/actions/production-plan.actions"
 import { formatQuantity } from "@/lib/utils"
 import { kstDaysUntil, toKstDateKey } from "@/lib/date/kst"
+import type { PlanQuantityView } from "@/lib/production-quantity-model"
+import { isPlanEditable, type PlanStatusValue } from "@/lib/production-plan-status"
+import { summarizeKinds } from "@/lib/production-plan-form"
+import { PlanKindBadge, ApprovalText } from "./plan-badges"
 
 const planTypeLabels: Record<PlanType, string> = {
   DAILY: "일간",
@@ -41,13 +45,15 @@ type GetColumnsProps = {
   onViewDetail: (plan: PlanWithDetails) => void
   canUpdate: boolean
   canDelete: boolean
+  /** 2-A 조회 모델(계획별 수량 요약). 수주 조회 권한이 없으면 null — 수량 요약 열은 "—" */
+  quantities: Map<string, PlanQuantityView> | null
 }
 
 function formatDate(date: Date): string {
   return toKstDateKey(date)
 }
 
-export function getColumns({ onEdit, onDelete, onCancel, onViewDetail, canUpdate, canDelete }: GetColumnsProps): ColumnDef<PlanWithDetails>[] {
+export function getColumns({ onEdit, onDelete, onCancel, onViewDetail, canUpdate, canDelete, quantities }: GetColumnsProps): ColumnDef<PlanWithDetails>[] {
   return [
     {
       accessorKey: "planNo",
@@ -56,7 +62,7 @@ export function getColumns({ onEdit, onDelete, onCancel, onViewDetail, canUpdate
       ),
       cell: ({ row }) => (
         <button
-          className="font-mono font-medium text-[14px] text-primary underline-offset-4 hover:underline cursor-pointer"
+          className="font-mono font-medium text-[14px] text-primary underline-offset-4 hover:underline cursor-pointer whitespace-nowrap"
           onClick={() => onViewDetail(row.original)}
         >
           {row.getValue("planNo")}
@@ -64,112 +70,57 @@ export function getColumns({ onEdit, onDelete, onCancel, onViewDetail, canUpdate
       ),
     },
     {
-      accessorKey: "planType",
-      header: ({ column }) => (
-        <DataTableColumnHeader column={column} title="계획유형" />
-      ),
-      cell: ({ row }) => {
-        const planType = row.getValue("planType") as PlanType
-        if (planType === "DAILY") {
-          return (
-            <Badge variant="secondary" className="text-[13px]">
-              {planTypeLabels[planType]}
-            </Badge>
-          )
-        }
-        if (planType === "WEEKLY") {
-          return (
-            <Badge variant="outline" className="text-[13px]">
-              {planTypeLabels[planType]}
-            </Badge>
-          )
-        }
-        return (
-          <Badge variant="default" className="text-[13px]">
-            {planTypeLabels[planType]}
-          </Badge>
-        )
-      },
-      filterFn: (row, id, filterValues: string[]) =>
-        filterValues.includes(row.getValue(id)),
+      id: "productionKind",
+      accessorFn: (row) => quantities?.get(row.id)?.kindSummary ?? summarizeKinds(row.items.map((i) => i.productionKind)),
+      header: () => <span className="whitespace-nowrap">생산 유형</span>,
+      cell: ({ row }) => <PlanKindBadge kind={row.getValue("productionKind") as string} testId={`plan-kind-${row.original.planNo}`} />,
+      filterFn: (row, id, filterValues: string[]) => filterValues.includes(row.getValue(id)),
     },
     {
-      id: "siteName",
-      accessorFn: (row) => row.site.name,
-      header: ({ column }) => (
-        <DataTableColumnHeader column={column} title="공장" />
-      ),
-      cell: ({ row }) => (
-        <span className="text-[14px]">{row.getValue("siteName")}</span>
-      ),
-    },
-    {
-      id: "period",
-      accessorFn: (row) => `${formatDate(row.startDate)} ~ ${formatDate(row.endDate)}`,
-      header: "기간",
-      cell: ({ row }) => (
-        <span className="text-[14px] text-muted-foreground">
-          {row.getValue("period")}
-        </span>
-      ),
-    },
-    {
-      id: "salesOrderBased",
-      accessorFn: (row) => row.items.some((i) => i.salesOrderItemId != null),
-      header: "유형",
-      cell: ({ row }) => {
-        const isSalesBased = row.getValue("salesOrderBased") as boolean
-        return isSalesBased ? (
-          <Badge className="text-[12px] bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-50">
-            수주기반
-          </Badge>
-        ) : (
-          <span className="text-[13px] text-muted-foreground/60">—</span>
-        )
-      },
-    },
-    {
-      id: "earliestDueDate",
+      id: "salesOrderNos",
       accessorFn: (row) => {
-        // 수주 연결 품목에서 유효한 납기일을 수집 (품목별 > 수주 헤더 순)
-        const dates = row.items
-          .map((i) => i.salesOrderItem?.deliveryDate ?? i.salesOrderItem?.salesOrder.deliveryDate ?? null)
-          .filter((d): d is Date => d != null)
-        if (dates.length === 0) return null
-        return dates.reduce((min, d) => (d < min ? d : min))
+        const nos = Array.from(new Set(row.items.map((i) => i.salesOrderItem?.salesOrder.orderNo).filter((v): v is string => !!v)))
+        return nos.join(", ")
       },
-      header: "고객 납기일",
+      header: () => <span className="whitespace-nowrap">수주</span>,
       cell: ({ row }) => {
-        const date = row.getValue("earliestDueDate") as Date | null
-        if (!date) return <span className="text-[13px] text-muted-foreground/40">—</span>
-        const formatted = toKstDateKey(date)
-        const isOverdue = kstDaysUntil(date) < 0
+        const v = row.getValue("salesOrderNos") as string
+        if (!v) return <span className="text-[13px] text-muted-foreground">연결 없음</span>
+        const list = v.split(", ")
         return (
-          <span className={`text-[13px] tabular-nums ${isOverdue ? "text-red-600 font-medium" : "text-foreground"}`}>
-            {formatted}
+          <span className="font-mono text-[13px] text-blue-700 whitespace-nowrap" data-testid={`plan-orders-${row.original.planNo}`}>
+            {list[0]}
+            {list.length > 1 ? <span className="text-muted-foreground"> 외 {list.length - 1}건</span> : null}
           </span>
         )
       },
     },
     {
-      id: "itemCount",
-      accessorFn: (row) => row.items.length,
-      header: "품목 수",
-      cell: ({ row }) => (
-        <span className="text-[14px] text-muted-foreground">
-          {row.getValue("itemCount")}건
-        </span>
-      ),
+      id: "allocatedQty",
+      accessorFn: (row) => quantities?.get(row.id)?.totals.allocatedQty ?? null,
+      header: () => <span className="whitespace-nowrap">수주 충당</span>,
+      cell: ({ row }) => {
+        const v = row.getValue("allocatedQty") as number | null
+        return <span className="text-[14px] text-right block tabular-nums" data-testid={`plan-alloc-${row.original.planNo}`}>{v === null ? "—" : formatQuantity(v)}</span>
+      },
+    },
+    {
+      id: "extraQty",
+      accessorFn: (row) => quantities?.get(row.id)?.totals.extraQty ?? null,
+      header: () => <span className="whitespace-nowrap">여유 생산</span>,
+      cell: ({ row }) => {
+        const v = row.getValue("extraQty") as number | null
+        return <span className="text-[14px] text-right block tabular-nums" data-testid={`plan-extra-${row.original.planNo}`}>{v === null ? "—" : formatQuantity(v)}</span>
+      },
     },
     {
       id: "totalPlannedQty",
-      accessorFn: (row) =>
-        row.items.reduce((sum, item) => sum + Number(item.plannedQty), 0),
+      accessorFn: (row) => quantities?.get(row.id)?.totals.plannedQty ?? row.items.reduce((sum, item) => sum + Number(item.plannedQty), 0),
       header: ({ column }) => (
-        <DataTableColumnHeader column={column} title="총 계획수량" />
+        <DataTableColumnHeader column={column} title="실제 계획수량" />
       ),
       cell: ({ row }) => (
-        <span className="text-[14px] text-right block">
+        <span className="text-[14px] text-right block tabular-nums" data-testid={`plan-planned-${row.original.planNo}`}>
           {formatQuantity(row.getValue("totalPlannedQty") as number)}
         </span>
       ),
@@ -219,6 +170,106 @@ export function getColumns({ onEdit, onDelete, onCancel, onViewDetail, canUpdate
         filterValues.includes(row.getValue(id)),
     },
     {
+      id: "approval",
+      accessorFn: (row) => {
+        const c = quantities?.get(row.id)?.totals.approvalCounts
+        if (!c) return "NONE"
+        if (c.REJECTED > 0) return "REJECTED"
+        if (c.PENDING > 0) return "PENDING"
+        if (c.APPROVED > 0) return "APPROVED"
+        return "NOT_REQUIRED"
+      },
+      header: () => <span className="whitespace-nowrap">여유 승인</span>,
+      cell: ({ row }) => {
+        const v = row.getValue("approval") as string
+        return v === "NONE" || v === "NOT_REQUIRED" ? <span className="text-[13px] text-muted-foreground">—</span> : <ApprovalText status={v} testId={`plan-approval-${row.original.planNo}`} />
+      },
+      filterFn: (row, id, filterValues: string[]) => filterValues.includes(row.getValue(id)),
+    },
+    {
+      accessorKey: "planType",
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="계획유형" />
+      ),
+      cell: ({ row }) => {
+        const planType = row.getValue("planType") as PlanType
+        if (planType === "DAILY") {
+          return (
+            <Badge variant="secondary" className="text-[13px]">
+              {planTypeLabels[planType]}
+            </Badge>
+          )
+        }
+        if (planType === "WEEKLY") {
+          return (
+            <Badge variant="outline" className="text-[13px]">
+              {planTypeLabels[planType]}
+            </Badge>
+          )
+        }
+        return (
+          <Badge variant="default" className="text-[13px]">
+            {planTypeLabels[planType]}
+          </Badge>
+        )
+      },
+      filterFn: (row, id, filterValues: string[]) =>
+        filterValues.includes(row.getValue(id)),
+    },
+    {
+      id: "siteName",
+      accessorFn: (row) => row.site.name,
+      header: ({ column }) => (
+        <DataTableColumnHeader column={column} title="공장" />
+      ),
+      cell: ({ row }) => (
+        <span className="text-[14px]">{row.getValue("siteName")}</span>
+      ),
+    },
+    {
+      id: "period",
+      accessorFn: (row) => `${formatDate(row.startDate)} ~ ${formatDate(row.endDate)}`,
+      header: "기간",
+      cell: ({ row }) => (
+        <span className="text-[14px] text-muted-foreground whitespace-nowrap">
+          {row.getValue("period")}
+        </span>
+      ),
+    },
+    {
+      id: "earliestDueDate",
+      accessorFn: (row) => {
+        // 수주 연결 품목에서 유효한 납기일을 수집 (품목별 > 수주 헤더 순)
+        const dates = row.items
+          .map((i) => i.salesOrderItem?.deliveryDate ?? i.salesOrderItem?.salesOrder.deliveryDate ?? null)
+          .filter((d): d is Date => d != null)
+        if (dates.length === 0) return null
+        return dates.reduce((min, d) => (d < min ? d : min))
+      },
+      header: "고객 납기일",
+      cell: ({ row }) => {
+        const date = row.getValue("earliestDueDate") as Date | null
+        if (!date) return <span className="text-[13px] text-muted-foreground/40">—</span>
+        const formatted = toKstDateKey(date)
+        const isOverdue = kstDaysUntil(date) < 0
+        return (
+          <span className={`text-[13px] tabular-nums whitespace-nowrap ${isOverdue ? "text-red-600 font-medium" : "text-foreground"}`}>
+            {formatted}
+          </span>
+        )
+      },
+    },
+    {
+      id: "itemCount",
+      accessorFn: (row) => row.items.length,
+      header: "품목 수",
+      cell: ({ row }) => (
+        <span className="text-[14px] text-muted-foreground whitespace-nowrap">
+          {row.getValue("itemCount")}건
+        </span>
+      ),
+    },
+    {
       id: "nextWork",
       header: "다음 업무",
       cell: ({ row }) => {
@@ -242,7 +293,7 @@ export function getColumns({ onEdit, onDelete, onCancel, onViewDetail, canUpdate
       cell: ({ row }) => {
         const plan = row.original
         const status = plan.status
-        const canEditPlan = canUpdate && status !== "CANCELLED"
+        const canEditPlan = canUpdate && isPlanEditable(status as PlanStatusValue)
         const canCancelPlan = canUpdate && (status === "DRAFT" || status === "CONFIRMED")
         const canDeletePlan = canDelete && status === "DRAFT"
         if (!canEditPlan && !canCancelPlan && !canDeletePlan) return null

@@ -3,6 +3,8 @@ export const dynamic = "force-dynamic"
 import { getTenantId } from "@/lib/auth"
 import { getResourcePermissions } from "@/lib/auth/role-permissions"
 import { getProductionPlans, getSites, getItemsForPlan } from "@/lib/actions/production-plan.actions"
+import { getProductionPlanQuantities } from "@/lib/actions/production-quantity.actions"
+import type { PlanQuantityView } from "@/lib/production-quantity-model"
 import { PlanDataTable } from "./plan-data-table"
 import { isFeatureEnabled } from "@/lib/services/feature.service"
 import { notFound } from "next/navigation"
@@ -27,11 +29,22 @@ export default async function ProductionPlanPage({ searchParams }: ProductionPla
   const permissions = await getResourcePermissions("PRODUCTION_PLAN")
   if (!permissions.canRead) notFound()
 
+  // 수량 요약(충당·여유·승인)은 2-A 조회 모델을 그대로 쓴다. 수주 조회 권한이 없으면 모델을 부르지 않고 요약 열은 "—" 로 표시한다(권한 완화 없음).
+  const soPermissions = await getResourcePermissions("SALES_ORDER")
   const [plans, sites, items] = await Promise.all([
     getProductionPlans(),
     getSites(),
     getItemsForPlan(),
   ])
+
+  let quantities: PlanQuantityView[] | null = null
+  if (soPermissions.canRead) {
+    try {
+      quantities = await getProductionPlanQuantities()
+    } catch {
+      quantities = null
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -52,6 +65,7 @@ export default async function ProductionPlanPage({ searchParams }: ProductionPla
         tenantId={tenantId}
         permissions={permissions}
         initialSalesOrderId={params.salesOrderId}
+        quantities={quantities}
       />
     </div>
   )

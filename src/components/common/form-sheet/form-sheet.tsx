@@ -22,6 +22,7 @@ export function FormSheet({
   title,
   description,
   isLoading = false,
+  submitDisabled = false,
   onSubmit,
   children,
   contentClassName,
@@ -54,7 +55,7 @@ export function FormSheet({
               <Button
                 type="submit"
                 onClick={onSubmit}
-                disabled={isLoading}
+                disabled={isLoading || submitDisabled}
               >
                 {isLoading ? (
                   <>

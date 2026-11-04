@@ -1,10 +1,11 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
+import Link from "next/link"
 import { useForm, useFieldArray, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
-import { Plus, Trash2 } from "lucide-react"
+import { Info, Lock, Plus, ShoppingCart, Trash2 } from "lucide-react"
 
 import { Form, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Button } from "@/components/ui/button"
@@ -27,6 +28,7 @@ import {
 } from "@/components/common/form-sheet"
 import { SearchableItemCombobox } from "@/components/common/searchable-item-combobox"
 import { planFormSchema, PlanFormValues } from "./plan-form-schema"
+import { PlanKindBadge, ApprovalText } from "./plan-badges"
 import {
   createPlan,
   updatePlan,
@@ -36,6 +38,24 @@ import {
   PlanWithDetails,
 } from "@/lib/actions/production-plan.actions"
 import { PlanType, PlanStatus } from "@prisma/client"
+import type { PlanQuantityView } from "@/lib/production-quantity-model"
+import {
+  AUTO_STATUS_GUIDE,
+  PLAN_STATUS_LABEL,
+  isPlanEditable,
+  selectablePlanStatuses,
+  type PlanStatusValue,
+} from "@/lib/production-plan-status"
+import {
+  APPROVAL_POLICY_NOTICE_KO,
+  ORDER_PLAN_REGISTRATION_GUIDE,
+  PRODUCTION_KIND_LABEL_KO,
+  diffQty,
+  evaluateLinkedRow,
+  sumQty,
+} from "@/lib/production-plan-form"
+import { formatQuantity } from "@/lib/utils"
+import { stripProductionRequestTag } from "@/lib/production-request-tag"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +93,8 @@ interface PlanFormSheetProps {
   tenantId: string
   open: boolean
   onOpenChange: (open: boolean) => void
+  /** 2-A 조회 모델(수정 중인 계획의 줄별 수주 맥락). 없으면 서버 검증에만 의존한다 */
+  quantities?: PlanQuantityView | null
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -83,13 +105,6 @@ const planTypeOptions = [
   { label: "월간", value: PlanType.MONTHLY },
 ]
 
-const planStatusOptions = [
-  { label: "초안", value: PlanStatus.DRAFT },
-  { label: "확정", value: PlanStatus.CONFIRMED },
-  { label: "진행중", value: PlanStatus.IN_PROGRESS },
-  { label: "완료", value: PlanStatus.COMPLETED },
-]
-
 const DEFAULT_ITEM = {
   productionPlanItemId: null,
   salesOrderItemId: null,
@@ -97,6 +112,9 @@ const DEFAULT_ITEM = {
   bomId: null,
   routingId: null,
   plannedQty: 1,
+  allocatedQty: null,
+  extraQty: null,
+  extraReason: "",
   note: "",
 }
 
@@ -110,8 +128,11 @@ export function PlanFormSheet({
   tenantId,
   open,
   onOpenChange,
+  quantities = null,
 }: PlanFormSheetProps) {
   const [isLoading, setIsLoading] = useState(false)
+  const [serverError, setServerError] = useState<string | null>(null)
+  const [showRowErrors, setShowRowErrors] = useState(false)
   const [rowBoms, setRowBoms] = useState<Record<number, BomOption[]>>({})
   const [rowRoutings, setRowRoutings] = useState<Record<number, RoutingOption[]>>({})
   const router = useRouter()
@@ -136,10 +157,22 @@ export function PlanFormSheet({
   })
   const watchedItems = useWatch({ control: form.control, name: "items" }) ?? []
 
+  const lineByItemId = useMemo(() => {
+    const m = new Map<string, NonNullable<PlanQuantityView["lines"]>[number]>()
+    for (const l of quantities?.lines ?? []) m.set(l.planItemId, l)
+    return m
+  }, [quantities])
+
+  const currentStatus = (mode === "edit" && plan ? plan.status : null) as PlanStatusValue | null
+  const statusOptions = selectablePlanStatuses(currentStatus).map((s) => ({ label: PLAN_STATUS_LABEL[s], value: s as PlanStatus }))
+  const locked = mode === "edit" && plan ? !isPlanEditable(plan.status as PlanStatusValue) : false
+
   // ─── create 모드 초기화 ──────────────────────────────────────────────────────
 
   useEffect(() => {
     if (mode === "create" && open) {
+      setServerError(null)
+      setShowRowErrors(false)
       generatePlanNo(tenantId, PlanType.WEEKLY).then((no) => {
         form.reset({
           siteId: "",
@@ -161,6 +194,8 @@ export function PlanFormSheet({
 
   useEffect(() => {
     if (mode === "edit" && plan && open) {
+      setServerError(null)
+      setShowRowErrors(false)
       form.reset({
         siteId: plan.siteId,
         planNo: plan.planNo,
@@ -168,16 +203,22 @@ export function PlanFormSheet({
         startDate: new Date(plan.startDate).toISOString().split("T")[0],
         endDate: new Date(plan.endDate).toISOString().split("T")[0],
         status: plan.status,
-        note: plan.note ?? "",
-        items: plan.items.map((item) => ({
-          productionPlanItemId: item.id,
-          salesOrderItemId: item.salesOrderItemId,
-          itemId: item.itemId,
-          bomId: item.bomId ?? null,
-          routingId: item.routingId ?? null,
-          plannedQty: Number(item.plannedQty),
-          note: item.note ?? "",
-        })),
+        note: stripProductionRequestTag(plan.note),
+        items: plan.items.map((item) => {
+          const linked = item.salesOrderItemId != null
+          return {
+            productionPlanItemId: item.id,
+            salesOrderItemId: item.salesOrderItemId,
+            itemId: item.itemId,
+            bomId: item.bomId ?? null,
+            routingId: item.routingId ?? null,
+            plannedQty: Number(item.plannedQty),
+            allocatedQty: linked ? Number(item.allocatedQty) : null,
+            extraQty: linked ? (lineByItemId.get(item.id)?.extraQty ?? diffQty(item.plannedQty, item.allocatedQty)) : null,
+            extraReason: item.extraReason ?? "",
+            note: item.note ?? "",
+          }
+        }),
       })
 
       // 각 행의 BOM/라우팅 로딩 — 기존 routingId가 새 후보 목록에서 여전히 유효하면 유지, 아니면 자동선택 규칙 적용
@@ -229,21 +270,59 @@ export function PlanFormSheet({
     form.setValue(`items.${index}.routingId`, resolveAutoSelectedRoutingId(routings, null))
   }
 
+  // ─── 수주 연결 줄: 충당·여유 입력 → 실제 계획 수량 ───────────────────────────
+
+  const setLinkedQty = (index: number, field: "allocatedQty" | "extraQty", value: number | undefined) => {
+    form.setValue(`items.${index}.${field}`, value ?? 0, { shouldDirty: true })
+    const row = form.getValues(`items.${index}`)
+    const planned = sumQty(field === "allocatedQty" ? (value ?? 0) : row.allocatedQty, field === "extraQty" ? (value ?? 0) : row.extraQty)
+    form.setValue(`items.${index}.plannedQty`, Number.isNaN(planned) ? 0 : planned, { shouldDirty: true })
+    setServerError(null)
+  }
+
+  /** 수주 연결 줄별 입력 검증(서버 N-19 규칙의 미리보기). 최대 충당 = 수주 수량 − 다른 계획 줄의 충당(서버 조회 모델 값) */
+  const rowEvaluations = watchedItems.map((row, index) => {
+    if (!row?.salesOrderItemId) return null
+    const line = row.productionPlanItemId ? lineByItemId.get(row.productionPlanItemId) : undefined
+    const max = line?.order ? Number((line.order.orderedQty - line.order.allocatedByOtherLinesQty).toFixed(6)) : null
+    return evaluateLinkedRow({ allocatedQty: row.allocatedQty, extraQty: row.extraQty, extraReason: row.extraReason, maxAllocatable: max })
+  })
+  const hasRowErrors = rowEvaluations.some((e) => e && Object.keys(e.errors).length > 0)
+
   // ─── 저장 핸들러 ────────────────────────────────────────────────────────────
 
   async function onSubmit(values: PlanFormValues) {
+    if (hasRowErrors) {
+      setShowRowErrors(true)
+      return
+    }
     setIsLoading(true)
+    setServerError(null)
     try {
+      const payload = {
+        ...values,
+        items: values.items.map((it) =>
+          it.salesOrderItemId
+            ? {
+                ...it,
+                plannedQty: sumQty(it.allocatedQty, it.extraQty),
+                allocatedQty: it.allocatedQty ?? 0,
+                extraReason: (it.extraQty ?? 0) > 0 ? (it.extraReason ?? "").trim() : null,
+                extraQty: undefined,
+              }
+            : { ...it, allocatedQty: undefined, extraQty: undefined, extraReason: undefined }
+        ),
+      }
       if (mode === "create") {
-        await createPlan(values, tenantId)
+        await createPlan(payload as never, tenantId)
       } else if (plan) {
-        await updatePlan(plan.id, values)
+        await updatePlan(plan.id, payload as never)
       }
       onOpenChange(false)
       router.refresh()
     } catch (error) {
       console.error("저장 실패:", error)
-      alert(error instanceof Error ? error.message : "저장 중 오류가 발생했습니다.")
+      setServerError(error instanceof Error ? error.message : "저장 중 오류가 발생했습니다.")
     } finally {
       setIsLoading(false)
     }
@@ -259,20 +338,55 @@ export function PlanFormSheet({
       title={mode === "create" ? "생산계획 등록" : "생산계획 수정"}
       description={
         mode === "create"
-          ? "새로운 생산계획을 등록합니다."
-          : "생산계획 정보를 수정합니다."
+          ? "재고 생산 계획을 등록합니다."
+          : "수주 충당 수량·여유 생산 수량·여유 사유를 구분해 수정합니다."
       }
       isLoading={isLoading}
+      submitDisabled={locked}
       onSubmit={form.handleSubmit(onSubmit)}
-      contentClassName="sm:max-w-2xl"
+      contentClassName="sm:max-w-3xl"
     >
       <Form {...form}>
-        <div className="space-y-6">
+        <fieldset disabled={locked} className="min-w-0 space-y-6">
+          {locked && (
+            <div className="flex items-start gap-1.5 rounded-md bg-muted px-3 py-2 text-[14px] text-muted-foreground" data-testid="pf-locked">
+              <Lock className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <span>{plan ? `'${PLAN_STATUS_LABEL[plan.status as PlanStatusValue]}' 상태의 생산계획은 수정할 수 없습니다. ${AUTO_STATUS_GUIDE}` : ""}</span>
+            </div>
+          )}
+
+          {mode === "create" && (
+            <div className="space-y-3" data-testid="pf-kind-guide">
+              <p className="text-[15px] font-medium text-foreground">생산 유형</p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div className="rounded-md border-2 border-primary bg-primary/5 px-3 py-2" data-testid="pf-kind-stock">
+                  <div className="text-[14px] font-medium">재고 생산 (선택됨)</div>
+                  <div className="text-[13px] text-muted-foreground">수주 연결 없음 · 충당 0 · 계획 수량 직접 입력</div>
+                </div>
+                <div className="rounded-md border border-dashed px-3 py-2 opacity-70" data-testid="pf-kind-order">
+                  <div className="text-[14px] font-medium">{PRODUCTION_KIND_LABEL_KO.ORDER}</div>
+                  <div className="text-[13px] text-muted-foreground">수주 처리 화면의 생산의뢰에서 등록</div>
+                </div>
+                <div className="rounded-md border border-dashed px-3 py-2 opacity-70" data-testid="pf-kind-extra">
+                  <div className="text-[14px] font-medium">{PRODUCTION_KIND_LABEL_KO.ORDER_EXTRA}</div>
+                  <div className="text-[13px] text-muted-foreground">충당 + 여유 + 사유, 수주 처리 화면에서 등록</div>
+                </div>
+              </div>
+              <div className="flex items-start gap-1.5 rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-[13px] text-blue-800">
+                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                <span>
+                  {ORDER_PLAN_REGISTRATION_GUIDE}{" "}
+                  <Link href="/app/mes/sales-orders" className="underline font-medium">수주 처리 화면으로 이동</Link>
+                </span>
+              </div>
+            </div>
+          )}
+
           {/* 헤더 정보 */}
           <div className="space-y-4">
             <p className="text-[15px] font-medium text-foreground">기본 정보</p>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {/* 계획번호 */}
               <FormTextField
                 control={form.control}
@@ -320,13 +434,16 @@ export function PlanFormSheet({
                 )}
               />
 
-              {/* 상태 */}
-              <FormSelectField
-                control={form.control}
-                name="status"
-                label="상태"
-                options={planStatusOptions}
-              />
+              {/* 상태: 직접 고를 수 있는 값은 초안·확정뿐 (진행중·완료는 작업지시·POP 실적이 바꾼다) */}
+              <div className="space-y-1" data-testid="pf-status">
+                <FormSelectField
+                  control={form.control}
+                  name="status"
+                  label="상태"
+                  options={statusOptions}
+                />
+                <p className="text-[13px] text-muted-foreground" data-testid="pf-status-guide">{AUTO_STATUS_GUIDE}</p>
+              </div>
 
               {/* 시작일 */}
               <FormField
@@ -369,9 +486,9 @@ export function PlanFormSheet({
               name="note"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>비고</FormLabel>
+                  <FormLabel>비고 · 생산 목적</FormLabel>
                   <Textarea
-                    placeholder="비고 입력"
+                    placeholder="비고 또는 생산 목적 입력 (예: 안전재고 확보)"
                     rows={2}
                     value={field.value ?? ""}
                     onChange={field.onChange}
@@ -384,251 +501,329 @@ export function PlanFormSheet({
 
           {/* 품목 목록 */}
           <div className="pt-4 border-t space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <p className="text-[15px] font-medium text-foreground">품목 목록</p>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={() => append({ ...DEFAULT_ITEM })}
+                data-testid="pf-add-item"
               >
                 <Plus className="h-3.5 w-3.5 mr-1" />
-                품목 추가
+                {mode === "create" ? "품목 추가" : "재고 생산 품목 추가"}
               </Button>
             </div>
 
-            {fields.length > 0 && (
-              <div className="rounded-md border overflow-x-auto">
-                <table className="w-full text-[13px]">
-                  <thead>
-                    <tr className="bg-muted/50 border-b">
-                      <th className="px-3 py-2 text-left font-medium text-muted-foreground min-w-[120px]">
-                        품목
-                      </th>
-                      <th className="px-3 py-2 text-left font-medium text-muted-foreground min-w-[90px]">
-                        BOM
-                      </th>
-                      <th className="px-3 py-2 text-left font-medium text-muted-foreground min-w-[90px]">
-                        라우팅
-                      </th>
-                      <th className="px-3 py-2 text-right font-medium text-muted-foreground min-w-[64px]">
-                        계획수량
-                      </th>
-                      <th className="px-3 py-2 text-left font-medium text-muted-foreground min-w-[90px]">
-                        비고
-                      </th>
-                      <th className="px-3 py-2 w-[36px]"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {fields.map((field, index) => {
-                      const currentItemId = watchedItems[index]?.itemId ?? ""
-                      const selectedInOtherRows = new Set(
-                        watchedItems
-                          .filter((_, rowIndex) => rowIndex !== index)
-                          .map((item) => item?.itemId)
-                          .filter((itemId): itemId is string => Boolean(itemId))
-                      )
-                      const bomsForRow = rowBoms[index] ?? []
-                      const routingsForRow = rowRoutings[index] ?? []
+            {fields.map((field, index) => {
+              const row = watchedItems[index]
+              const currentItemId = row?.itemId ?? ""
+              const linked = Boolean(row?.salesOrderItemId)
+              const savedLine = row?.productionPlanItemId ? lineByItemId.get(row.productionPlanItemId) : undefined
+              const savedItem = plan?.items.find((p) => p.id === row?.productionPlanItemId)
+              const effectiveWos = (savedItem?.workOrders ?? []).filter((w) => w.status !== "CANCELLED")
+              const rowLocked = effectiveWos.length > 0
+              const ev = rowEvaluations[index]
+              const errs = ev?.errors ?? {}
+              const selectedInOtherRows = new Set(
+                watchedItems
+                  .filter((_, rowIndex) => rowIndex !== index)
+                  .map((item) => item?.itemId)
+                  .filter((itemId): itemId is string => Boolean(itemId))
+              )
+              const bomsForRow = rowBoms[index] ?? []
+              const routingsForRow = rowRoutings[index] ?? []
+              const so = savedItem?.salesOrderItem?.salesOrder
+              const kind = linked ? (ev?.kind ?? "ORDER") : "STOCK"
+              const approvalStatus = savedLine?.approval.status ?? savedItem?.extraApprovalStatus ?? "NOT_REQUIRED"
 
-                      return (
-                        <tr
-                          key={field.id}
-                          className="border-t first:border-t-0 hover:bg-muted/20"
-                        >
-                          {/* 품목 */}
-                          <td className="px-2 py-1.5">
-                            <FormField
-                              control={form.control}
-                              name={`items.${index}.itemId`}
-                              render={({ field: f }) => (
-                                <FormItem>
-                                  <SearchableItemCombobox
-                                    items={items}
-                                    value={f.value ?? ""}
-                                    disabled={Boolean(watchedItems[index]?.salesOrderItemId)}
-                                    disabledItemIds={selectedInOtherRows}
-                                    onSelect={(itemId) =>
-                                      handleItemChangeForRow(index, itemId)
-                                    }
-                                    triggerClassName="h-8 min-w-[220px] px-2 text-[13px]"
-                                  />
-                                  <FormMessage className="text-[12px]" />
-                                </FormItem>
-                              )}
+              return (
+                <div key={field.id} className="rounded-lg border p-3 space-y-3" data-testid={`pf-item-${index}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <PlanKindBadge kind={kind} testId={`pf-kind-${index}`} />
+                      {linked && so && (
+                        <span className="inline-flex items-center gap-1 text-[13px] text-blue-700" data-testid={`pf-order-${index}`}>
+                          <ShoppingCart className="h-3.5 w-3.5" />
+                          <span className="font-mono">{so.orderNo}</span>
+                          <span className="text-muted-foreground">{so.customer.name}</span>
+                        </span>
+                      )}
+                      {!linked && <span className="text-[13px] text-muted-foreground">수주 연결 없음 · 충당 0</span>}
+                    </div>
+                    {/* 수주 연결 줄과 작업지시가 있는 줄은 삭제할 수 없다(서버도 같은 규칙) */}
+                    {!linked && !rowLocked && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                        onClick={() => remove(index)}
+                        aria-label="품목 삭제"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {/* 품목 */}
+                    <div className="space-y-1 sm:col-span-3">
+                      <span className="text-[13px] text-muted-foreground">품목</span>
+                      <FormField
+                        control={form.control}
+                        name={`items.${index}.itemId`}
+                        render={({ field: f }) => (
+                          <FormItem>
+                            <SearchableItemCombobox
+                              items={items}
+                              value={f.value ?? ""}
+                              disabled={linked}
+                              disabledItemIds={selectedInOtherRows}
+                              onSelect={(itemId) => handleItemChangeForRow(index, itemId)}
+                              triggerClassName="h-9 w-full min-w-0 px-2 text-[14px]"
                             />
-                          </td>
+                            <FormMessage className="text-[13px]" />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
 
-                          {/* BOM */}
-                          <td className="px-2 py-1.5">
-                            <FormField
-                              control={form.control}
-                              name={`items.${index}.bomId`}
-                              render={({ field: f }) => (
-                                <FormItem>
-                                  <Select
-                                    onValueChange={(val) =>
-                                      f.onChange(val === "__none__" ? null : val)
-                                    }
-                                    value={f.value ?? "__none__"}
-                                    disabled={!currentItemId}
-                                  >
-                                    <SelectTrigger className="h-8 text-[13px]">
-                                      <SelectValue placeholder="BOM 선택" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="__none__" className="text-[13px]">
-                                        선택 안함
-                                      </SelectItem>
-                                      {bomsForRow.map((bom) => (
-                                        <SelectItem
-                                          key={bom.id}
-                                          value={bom.id}
-                                          className="text-[13px]"
-                                        >
-                                          {bom.version}
-                                          {bom.isDefault ? " (기본)" : ""}
+                    {/* BOM */}
+                    <div className="space-y-1">
+                      <span className="text-[13px] text-muted-foreground">BOM</span>
+                      <FormField
+                        control={form.control}
+                        name={`items.${index}.bomId`}
+                        render={({ field: f }) => (
+                          <FormItem>
+                            <Select
+                              onValueChange={(val) => f.onChange(val === "__none__" ? null : val)}
+                              value={f.value ?? "__none__"}
+                              disabled={!currentItemId}
+                            >
+                              <SelectTrigger className="h-9 text-[14px]">
+                                <SelectValue placeholder="BOM 선택" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__none__" className="text-[14px]">선택 안함</SelectItem>
+                                {bomsForRow.map((bom) => (
+                                  <SelectItem key={bom.id} value={bom.id} className="text-[14px]">
+                                    {bom.version}
+                                    {bom.isDefault ? " (기본)" : ""}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <FormMessage className="text-[13px]" />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+
+                    {/* 라우팅 — 추천(품목전용 기본) / 품목전용 / 범용 3그룹으로 표시 */}
+                    <div className="space-y-1 sm:col-span-2">
+                      <span className="text-[13px] text-muted-foreground">라우팅</span>
+                      <FormField
+                        control={form.control}
+                        name={`items.${index}.routingId`}
+                        render={({ field: f }) => {
+                          const recommended = routingsForRow.filter((r) => r.scope === "ITEM_SPECIFIC" && r.isDefault)
+                          const itemSpecific = routingsForRow.filter((r) => r.scope === "ITEM_SPECIFIC" && !r.isDefault)
+                          const common = routingsForRow.filter((r) => r.scope === "COMMON")
+                          return (
+                            <FormItem>
+                              <Select
+                                onValueChange={(val) => f.onChange(val === "__none__" ? null : val)}
+                                value={f.value ?? "__none__"}
+                                disabled={!currentItemId}
+                              >
+                                <SelectTrigger className="h-9 text-[14px]">
+                                  <SelectValue placeholder="라우팅 선택" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="__none__" className="text-[14px]">선택 안함</SelectItem>
+                                  {recommended.length > 0 && (
+                                    <SelectGroup>
+                                      <SelectLabel className="text-[13px]">추천 라우팅</SelectLabel>
+                                      {recommended.map((routing) => (
+                                        <SelectItem key={routing.id} value={routing.id} className="text-[14px]">
+                                          [{routing.code}] {routing.name} v{routing.version} (기본)
                                         </SelectItem>
                                       ))}
-                                    </SelectContent>
-                                  </Select>
-                                  <FormMessage className="text-[12px]" />
-                                </FormItem>
-                              )}
-                            />
-                          </td>
-
-                          {/* 라우팅 — 추천(품목전용 기본) / 품목전용 / 범용 3그룹으로 표시 */}
-                          <td className="px-2 py-1.5">
-                            <FormField
-                              control={form.control}
-                              name={`items.${index}.routingId`}
-                              render={({ field: f }) => {
-                                const recommended = routingsForRow.filter(
-                                  (r) => r.scope === "ITEM_SPECIFIC" && r.isDefault
-                                )
-                                const itemSpecific = routingsForRow.filter(
-                                  (r) => r.scope === "ITEM_SPECIFIC" && !r.isDefault
-                                )
-                                const common = routingsForRow.filter((r) => r.scope === "COMMON")
-                                return (
-                                  <FormItem>
-                                    <Select
-                                      onValueChange={(val) =>
-                                        f.onChange(val === "__none__" ? null : val)
-                                      }
-                                      value={f.value ?? "__none__"}
-                                      disabled={!currentItemId}
-                                    >
-                                      <SelectTrigger className="h-8 text-[13px]">
-                                        <SelectValue placeholder="라우팅 선택" />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        <SelectItem value="__none__" className="text-[13px]">
-                                          선택 안함
+                                    </SelectGroup>
+                                  )}
+                                  {itemSpecific.length > 0 && (
+                                    <SelectGroup>
+                                      <SelectLabel className="text-[13px]">품목 전용 라우팅</SelectLabel>
+                                      {itemSpecific.map((routing) => (
+                                        <SelectItem key={routing.id} value={routing.id} className="text-[14px]">
+                                          [{routing.code}] {routing.name} v{routing.version}
                                         </SelectItem>
-                                        {recommended.length > 0 && (
-                                          <SelectGroup>
-                                            <SelectLabel className="text-[11px]">추천 라우팅</SelectLabel>
-                                            {recommended.map((routing) => (
-                                              <SelectItem key={routing.id} value={routing.id} className="text-[13px]">
-                                                [{routing.code}] {routing.name} v{routing.version} (기본)
-                                              </SelectItem>
-                                            ))}
-                                          </SelectGroup>
-                                        )}
-                                        {itemSpecific.length > 0 && (
-                                          <SelectGroup>
-                                            <SelectLabel className="text-[11px]">품목 전용 라우팅</SelectLabel>
-                                            {itemSpecific.map((routing) => (
-                                              <SelectItem key={routing.id} value={routing.id} className="text-[13px]">
-                                                [{routing.code}] {routing.name} v{routing.version}
-                                              </SelectItem>
-                                            ))}
-                                          </SelectGroup>
-                                        )}
-                                        {common.length > 0 && (
-                                          <SelectGroup>
-                                            <SelectLabel className="text-[11px]">범용 라우팅</SelectLabel>
-                                            {common.map((routing) => (
-                                              <SelectItem key={routing.id} value={routing.id} className="text-[13px]">
-                                                [{routing.code}] {routing.name} v{routing.version}
-                                              </SelectItem>
-                                            ))}
-                                          </SelectGroup>
-                                        )}
-                                      </SelectContent>
-                                    </Select>
-                                    <FormMessage className="text-[12px]" />
-                                  </FormItem>
-                                )
-                              }}
-                            />
-                          </td>
+                                      ))}
+                                    </SelectGroup>
+                                  )}
+                                  {common.length > 0 && (
+                                    <SelectGroup>
+                                      <SelectLabel className="text-[13px]">범용 라우팅</SelectLabel>
+                                      {common.map((routing) => (
+                                        <SelectItem key={routing.id} value={routing.id} className="text-[14px]">
+                                          [{routing.code}] {routing.name} v{routing.version}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectGroup>
+                                  )}
+                                </SelectContent>
+                              </Select>
+                              <FormMessage className="text-[13px]" />
+                            </FormItem>
+                          )
+                        }}
+                      />
+                    </div>
+                  </div>
 
-                          {/* 계획수량 */}
-                          <td className="px-2 py-1.5">
-                            <FormField
-                              control={form.control}
-                              name={`items.${index}.plannedQty`}
-                              render={({ field: f }) => (
-                                <FormItem>
-                                  <QuantityInput
-                                    maxDecimals={6}
-                                    allowNegative={false}
-                                    className="h-8 text-[13px] text-right"
-                                    value={f.value}
-                                    onChange={f.onChange}
-                                  />
-                                  <FormMessage className="text-[12px]" />
-                                </FormItem>
-                              )}
+                  {/* 수량 */}
+                  {linked ? (
+                    <div className="rounded-md bg-muted/40 p-3 space-y-3">
+                      {savedLine?.order && (
+                        <div className="text-[13px] text-muted-foreground" data-testid={`pf-order-qty-${index}`}>
+                          수주 수량 {formatQuantity(savedLine.order.orderedQty)} · 다른 계획이 충당 {formatQuantity(savedLine.order.allocatedByOtherLinesQty)} ·{" "}
+                          <span className="font-medium text-foreground" data-testid={`pf-max-${index}`}>
+                            이 줄에 충당 가능한 최대 {formatQuantity(Number((savedLine.order.orderedQty - savedLine.order.allocatedByOtherLinesQty).toFixed(6)))}
+                          </span>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <label className="space-y-1 block">
+                          <span className="text-[13px] text-muted-foreground">수주 충당 수량</span>
+                          <QuantityInput
+                            maxDecimals={6}
+                            allowNegative={false}
+                            className="h-9 text-[14px] text-right"
+                            value={row?.allocatedQty ?? undefined}
+                            onChange={(v) => setLinkedQty(index, "allocatedQty", v)}
+                            disabled={rowLocked}
+                            data-testid={`pf-alloc-${index}`}
+                            aria-invalid={!!errs.alloc}
+                          />
+                        </label>
+                        <label className="space-y-1 block">
+                          <span className="text-[13px] text-muted-foreground">여유 생산 수량</span>
+                          <QuantityInput
+                            maxDecimals={6}
+                            allowNegative={false}
+                            className="h-9 text-[14px] text-right"
+                            value={row?.extraQty ?? undefined}
+                            onChange={(v) => setLinkedQty(index, "extraQty", v)}
+                            disabled={rowLocked}
+                            data-testid={`pf-extra-${index}`}
+                            aria-invalid={!!errs.extra}
+                          />
+                        </label>
+                        <div className="space-y-1">
+                          <span className="text-[13px] text-muted-foreground">실제 계획 수량 (충당 + 여유)</span>
+                          <div className="h-9 flex items-center justify-end text-[15px] font-semibold tabular-nums" data-testid={`pf-planned-${index}`}>
+                            {Number.isNaN(ev?.plannedQty ?? Number.NaN) ? "—" : formatQuantity(ev!.plannedQty)}
+                          </div>
+                        </div>
+                      </div>
+                      {(row?.extraQty ?? 0) > 0 && (
+                        <label className="block space-y-1">
+                          <span className="text-[13px] text-muted-foreground">여유 생산 사유 (필수)</span>
+                          <Input
+                            className="h-9 text-[14px]"
+                            value={row?.extraReason ?? ""}
+                            maxLength={500}
+                            placeholder="예: 가공 불량 대비"
+                            disabled={rowLocked}
+                            onChange={(e) => {
+                              form.setValue(`items.${index}.extraReason`, e.target.value, { shouldDirty: true })
+                              setServerError(null)
+                            }}
+                            data-testid={`pf-reason-${index}`}
+                            aria-invalid={!!errs.reason}
+                          />
+                        </label>
+                      )}
+                      {showRowErrors && (errs.alloc || errs.extra || errs.reason) && (
+                        <ul className="text-[13px] text-red-600 space-y-0.5" data-testid={`pf-errors-${index}`}>
+                          {[errs.alloc, errs.extra, errs.reason].filter(Boolean).map((m) => (
+                            <li key={m}>{m}</li>
+                          ))}
+                        </ul>
+                      )}
+                      {(row?.extraQty ?? 0) > 0 || approvalStatus !== "NOT_REQUIRED" ? (
+                        <div className="text-[13px]" data-testid={`pf-approval-${index}`}>
+                          여유 승인 상태: <ApprovalText status={approvalStatus} />
+                        </div>
+                      ) : null}
+                      {rowLocked && (
+                        <div className="flex items-start gap-1.5 text-[13px] text-muted-foreground" data-testid={`pf-lock-${index}`}>
+                          <Lock className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                          작업지시({effectiveWos.map((w) => w.orderNo).join(", ")})가 있어 생산 유형과 수주 충당 수량은 변경할 수 없습니다.
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <FormField
+                        control={form.control}
+                        name={`items.${index}.plannedQty`}
+                        render={({ field: f }) => (
+                          <FormItem>
+                            <span className="text-[13px] text-muted-foreground">재고 생산 계획 수량</span>
+                            <QuantityInput
+                              maxDecimals={6}
+                              allowNegative={false}
+                              className="h-9 text-[14px] text-right"
+                              value={f.value}
+                              onChange={f.onChange}
+                              data-testid={`pf-planned-input-${index}`}
                             />
-                          </td>
-
-                          {/* 비고 */}
-                          <td className="px-2 py-1.5">
-                            <FormField
-                              control={form.control}
-                              name={`items.${index}.note`}
-                              render={({ field: f }) => (
-                                <FormItem>
-                                  <Input
-                                    className="h-8 text-[13px]"
-                                    placeholder="비고"
-                                    value={f.value ?? ""}
-                                    onChange={f.onChange}
-                                  />
-                                  <FormMessage className="text-[12px]" />
-                                </FormItem>
-                              )}
+                            <FormMessage className="text-[13px]" />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={form.control}
+                        name={`items.${index}.note`}
+                        render={({ field: f }) => (
+                          <FormItem className="sm:col-span-2">
+                            <span className="text-[13px] text-muted-foreground">비고 · 생산 목적</span>
+                            <Input
+                              className="h-9 text-[14px]"
+                              placeholder="예: 안전재고 확보"
+                              value={f.value ?? ""}
+                              onChange={f.onChange}
+                              data-testid={`pf-note-${index}`}
                             />
-                          </td>
-
-                          {/* 삭제 */}
-                          <td className="px-2 py-1.5">
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                              onClick={() => remove(index)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+                            <FormMessage className="text-[13px]" />
+                          </FormItem>
+                        )}
+                      />
+                    </div>
+                  )}
+                  {linked && (
+                    <FormField
+                      control={form.control}
+                      name={`items.${index}.note`}
+                      render={({ field: f }) => (
+                        <FormItem>
+                          <span className="text-[13px] text-muted-foreground">비고</span>
+                          <Input className="h-9 text-[14px]" placeholder="비고" value={f.value ?? ""} onChange={f.onChange} />
+                          <FormMessage className="text-[13px]" />
+                        </FormItem>
+                      )}
+                    />
+                  )}
+                </div>
+              )
+            })}
 
             {fields.length === 0 && (
               <div className="rounded-md border border-dashed py-8 text-center text-[14px] text-muted-foreground">
-                품목 추가 버튼을 눌러 계획 품목을 추가하세요.
+                {mode === "create" ? "품목 추가 버튼을 눌러 재고 생산 품목을 추가하세요." : "품목 추가 버튼을 눌러 계획 품목을 추가하세요."}
               </div>
             )}
 
@@ -639,8 +834,21 @@ export function PlanFormSheet({
                 {form.formState.errors.items.message}
               </p>
             )}
+
+            {watchedItems.some((r) => r?.salesOrderItemId) && (
+              <div className="flex items-start gap-1.5 rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-[13px] text-amber-800" data-testid="pf-approval-notice">
+                <Info className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                {APPROVAL_POLICY_NOTICE_KO}
+              </div>
+            )}
           </div>
-        </div>
+
+          {serverError && (
+            <div role="alert" className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-[14px] text-red-700" data-testid="pf-server-error">
+              {serverError}
+            </div>
+          )}
+        </fieldset>
       </Form>
     </FormSheet>
   )

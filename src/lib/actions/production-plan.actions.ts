@@ -14,6 +14,8 @@ import { lockProductionPlanItemsForUpdate, lockSalesOrderItemsForUpdate, withQua
 import { PLAN_QTY_INVALID_MESSAGE, resolvePlanItemUpdate, type ProductionKindValue } from "@/lib/production-allocation"
 import { allocationIncreaseViolationMessage, findProductionRequestViolation } from "@/lib/production-request"
 import { formatScaledQuantity, toScaledQuantity } from "@/lib/quantity-scale"
+import { keepProductionRequestTag } from "@/lib/production-request-tag"
+import { PLAN_NOT_EDITABLE_MESSAGE, validatePlanStatusChange, validatePlanStatusForCreate, type PlanStatusValue } from "@/lib/production-plan-status"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -298,8 +300,9 @@ export async function createPlan(data: CreatePlanInput, _tenantId: string) {
   const tenantId = user.tenantId
   const { items, startDate, endDate, note, ...headerFields } = data
 
-  if (data.status === PlanStatus.CANCELLED) {
-    throw new Error("취소 상태로 생산계획을 직접 등록할 수 없습니다.")
+  const createStatusError = validatePlanStatusForCreate(data.status as PlanStatusValue)
+  if (createStatusError) {
+    throw new Error(createStatusError)
   }
 
   if (items.some((item) => item.productionPlanItemId || item.salesOrderItemId)) {
@@ -411,6 +414,7 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
         select: {
           status: true,
           tenantId: true,
+          note: true,
           items: {
             select: {
               id: true,
@@ -419,6 +423,8 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
               productionKind: true,
               allocatedQty: true,
               extraReason: true,
+              plannedQty: true,
+              workOrders: { select: { id: true, status: true, plannedQty: true } },
               salesOrderItem: {
                 select: {
                   qty: true,
@@ -437,13 +443,13 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
 
       const blockedStatuses: PlanStatus[] = ["IN_PROGRESS", "COMPLETED", "CANCELLED"]
       if (blockedStatuses.includes(existing.status)) {
-        throw new Error(
-          `'${existing.status}' 상태의 생산계획은 수정할 수 없습니다.`
-        )
+        throw new Error(PLAN_NOT_EDITABLE_MESSAGE(existing.status as PlanStatusValue))
       }
 
-      if (headerFields.status === PlanStatus.CANCELLED) {
-        throw new Error("생산계획 취소는 취소 기능을 이용해 주세요.")
+      const hasEffectiveWorkOrders = existing.items.some((row) => row.workOrders.some((w) => w.status !== "CANCELLED"))
+      const statusError = validatePlanStatusChange(existing.status as PlanStatusValue, headerFields.status as PlanStatusValue, { hasEffectiveWorkOrders })
+      if (statusError) {
+        throw new Error(statusError)
       }
 
       const reconciliation = reconcileProductionPlanItems(
@@ -457,6 +463,15 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
         items
       )
 
+      for (const deleteId of reconciliation.deleteIds) {
+        const doomed = existing.items.find((row) => row.id === deleteId)!
+        if (doomed.salesOrderItemId) {
+          throw new Error("수주와 연결된 생산계획 품목은 삭제할 수 없습니다. 수주 연결을 정리하려면 생산계획을 취소해 주세요.")
+        }
+        if (doomed.workOrders.some((w) => w.status !== "CANCELLED")) {
+          throw new Error("작업지시가 연결된 생산계획 품목은 삭제할 수 없습니다. 작업지시를 먼저 정리해 주세요.")
+        }
+      }
       if (reconciliation.deleteIds.length > 0) {
         await tx.productionPlanItem.deleteMany({
           where: { planId: id, id: { in: reconciliation.deleteIds } },
@@ -485,6 +500,19 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
           throw new Error(result.error)
         }
         resolved.set(productionPlanItemId, result)
+
+        // 작업지시가 이미 있는 줄은 생산 유형·충당 수량을 바꾸지 않고, 계획 수량을 작업지시 수량 밑으로 줄이지 않는다
+        const effectiveWos = current.workOrders.filter((w) => w.status !== "CANCELLED")
+        if (effectiveWos.length > 0) {
+          const woSum = effectiveWos.reduce((sum, w) => sum + (toScaledQuantity(String(w.plannedQty)) ?? BigInt(0)), BigInt(0))
+          const currentAllocated = toScaledQuantity(String(current.allocatedQty)) ?? BigInt(0)
+          if (result.kind !== current.productionKind || result.allocatedScaled !== currentAllocated) {
+            throw new Error("작업지시가 생성된 생산계획 품목은 생산 유형과 수주 충당 수량을 변경할 수 없습니다.")
+          }
+          if (result.plannedScaled < woSum) {
+            throw new Error(`계획 수량은 작업지시 수량 합계(${formatScaledQuantity(woSum)}) 이상이어야 합니다.`)
+          }
+        }
 
         if (result.allocationIncreased && current.salesOrderItemId && current.salesOrderItem) {
           const others = await tx.productionPlanItem.aggregate({
@@ -554,7 +582,8 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
           ...headerFields,
           startDate: new Date(startDate),
           endDate: new Date(endDate),
-          note: note ?? null,
+          // 생산의뢰 요청 ID 태그는 비고를 고쳐도 보존한다(요청 ID 멱등성 유지)
+          note: keepProductionRequestTag(existing.note, note),
         },
       })
       await recordAuditLog(tx, {
