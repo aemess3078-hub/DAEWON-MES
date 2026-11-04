@@ -5,6 +5,7 @@ import { executeRunMrpRequest } from "@/lib/services/mrp-plan.service"
 import { createPurchaseOrdersFromMrp } from "@/lib/services/mrp-purchase.service"
 import type { MRPResult } from "@/lib/services/mrp.service"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { MRP_PURCHASE_CREATION_DISABLED_MESSAGE, MRP_PURCHASE_CREATION_ENABLED } from "@/lib/mrp/purchase-creation-policy"
 
 /**
  * 보안 원칙(Phase 2.5): tenantId 는 인증 컨텍스트(requireResourcePermission 이 돌려준 사용자)에서만 결정한다.
@@ -45,6 +46,12 @@ export async function createPurchaseOrdersFromMRP(
   _tenantId: string | undefined,
   siteId: string
 ): Promise<{ success: boolean; orderNo?: string; error?: string }> {
+  // 2-D-0: 공통 발주 파이프라인이 준비될 때까지 신규 생성 차단(권한 확인 후 DB 접근·쓰기 없이 안내만 반환)
+  if (!MRP_PURCHASE_CREATION_ENABLED) {
+    await requireResourcePermission("MRP", "CREATE")
+    await requireResourcePermission("PURCHASE_ORDER", "CREATE")
+    return { success: false, error: MRP_PURCHASE_CREATION_DISABLED_MESSAGE }
+  }
   return createPurchaseOrdersFromMrp(
     {
       authorize: async () => {

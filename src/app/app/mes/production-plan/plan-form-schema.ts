@@ -8,6 +8,10 @@ export const planItemFormSchema = z.object({
   bomId: z.string().optional().nullable(),
   routingId: z.string().optional().nullable(),
   plannedQty: z.number().positive("계획수량은 양수여야 합니다"),
+  // 수주 연결 줄 전용(화면 입력): 수주 충당 수량·여유 생산 수량(계획 수량 = 충당 + 여유)·여유 사유
+  allocatedQty: z.number().min(0).optional().nullable(),
+  extraQty: z.number().min(0).optional().nullable(),
+  extraReason: z.string().optional().nullable(),
   note: z.string().optional().nullable(),
 })
 

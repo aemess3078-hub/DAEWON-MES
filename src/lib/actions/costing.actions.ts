@@ -30,8 +30,9 @@ export async function getItemsForCosting() {
 
 export async function getBomsForItem(itemId: string) {
   await assertDaewonFeatureScope()
+  const user = await requireResourcePermission("COSTING", "READ")
   return prisma.bOM.findMany({
-    where: { itemId },
+    where: { tenantId: user.tenantId, itemId },
     select: { id: true, version: true, status: true, isDefault: true },
     orderBy: { version: "desc" },
   })
@@ -39,8 +40,9 @@ export async function getBomsForItem(itemId: string) {
 
 export async function getWorkOrdersForItem(itemId: string) {
   await assertDaewonFeatureScope()
+  const user = await requireResourcePermission("COSTING", "READ")
   return prisma.workOrder.findMany({
-    where: { itemId, status: "COMPLETED" },
+    where: { tenantId: user.tenantId, itemId, status: "COMPLETED" },
     select: { id: true, orderNo: true, createdAt: true },
     orderBy: { createdAt: "desc" },
     take: 20,

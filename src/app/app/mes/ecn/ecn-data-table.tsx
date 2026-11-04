@@ -183,7 +183,7 @@ export function ECNDataTable({ ecns, items, tenantId, userId, userRole, isAdmin 
   }
 
   const handleImplement = async (ecn: ECNWithDetails) => {
-    if (!confirm(`'${ecn.ecnNo}'을 실제 BOM/라우팅에 적용하시겠습니까?\n\n기존 ACTIVE BOM/라우팅이 INACTIVE로 변경되고 새 버전이 생성됩니다.`)) return
+    if (!confirm(`'${ecn.ecnNo}'을 실제 BOM/라우팅에 적용하시겠습니까?\n\n현재 활성 기본 BOM/라우팅이 비활성으로 변경되고 새 버전이 기본으로 생성됩니다. 같은 품목의 다른 활성 BOM은 변경되지 않습니다.`)) return
     try {
       await implementECN(ecn.id)
       router.refresh()

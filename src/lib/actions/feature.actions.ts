@@ -1,10 +1,13 @@
 "use server"
 
+import { requireTenantAccess } from "@/lib/auth"
+
 import { enableFeature, disableFeature, getFeatureCatalog } from "@/lib/services/feature.service"
 import { revalidatePath } from "next/cache"
 import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
 
 export async function getCatalogWithStatus(tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   const catalog = await getFeatureCatalog()
 
@@ -15,6 +18,7 @@ export async function getCatalogWithStatus(tenantId: string) {
 }
 
 export async function enableFeatureAction(tenantId: string, featureCode: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   const result = await enableFeature(tenantId, featureCode)
   revalidatePath("/app/mes/features")
@@ -23,6 +27,7 @@ export async function enableFeatureAction(tenantId: string, featureCode: string)
 }
 
 export async function disableFeatureAction(tenantId: string, featureCode: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   const result = await disableFeature(tenantId, featureCode)
   revalidatePath("/app/mes/features")

@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { getTenantId } from "@/lib/auth"
+import { requireRole } from "@/lib/auth"
 import { isMissingDbObjectError, isSchemaCompatibilityError } from "@/lib/db/prisma-error"
 import { Prisma } from "@prisma/client"
 import { fetchLatestSnapshotsByTag, monitoringEligibleEquipmentWhere } from "@/lib/actions/equipment-monitoring.utils"
@@ -223,7 +223,7 @@ async function getNcwatchTodayPartCounts(
 }
 
 export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> {
-  const tenantId = await getTenantId()
+  const { tenantId } = await requireRole("VIEWER")
   const today = getKSTReportDate()
   const todayEnd = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1)
 
@@ -359,7 +359,7 @@ export async function getEquipmentMonitorData(): Promise<EquipmentMonitorRow[]> 
 // 줄인다. 30초 폴링으로 반복 호출되므로 반환 페이로드를 최소화하는 것이 목적이다.
 // (표시 항목은 동일 — recentTags 전체/좌표/파일명/알람/최종 수신시간 모두 유지)
 export async function getEquipmentMonitorLive(): Promise<EquipmentMonitorRow[]> {
-  const tenantId = await getTenantId()
+  const { tenantId } = await requireRole("VIEWER")
   const today = getKSTReportDate()
   const todayEnd = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1)
 
@@ -450,7 +450,7 @@ export async function getEquipmentMonitorLive(): Promise<EquipmentMonitorRow[]> 
 }
 
 export async function getProductionKPIs() {
-  const tenantId = await getTenantId()
+  const { tenantId } = await requireRole("VIEWER")
   const today = getKSTReportDate()
   const todayEnd = new Date(today.getTime() + 24 * 60 * 60 * 1000 - 1)
 

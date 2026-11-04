@@ -1,5 +1,7 @@
 "use server"
 
+import { requireTenantAccess } from "@/lib/auth"
+
 import { prisma } from "@/lib/db/prisma"
 import { revalidatePath } from "next/cache"
 import type { Token, ContextKey } from "@/lib/types/numbering-rule"
@@ -19,6 +21,7 @@ function assertNumberingType(type: unknown): void {
 // ─── 규칙 조회 ────────────────────────────────────────────────────────────────
 
 export async function getNumberingRules(tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   let rules: any[]
   try {
@@ -42,6 +45,7 @@ export async function upsertNumberingRule(
   type: "LOT" | "SERIAL",
   tokens: Token[]
 ) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   await requireResourcePermission("LOT", "UPDATE")
   assertNumberingType(type)
@@ -58,6 +62,7 @@ export async function upsertNumberingRule(
 // ─── 빌더용 공통코드 그룹 목록 ───────────────────────────────────────────────
 
 export async function getCodeGroupsForBuilder(tenantId: string) {
+  await requireTenantAccess(tenantId)
   await assertDeveloperOnly()
   return prisma.codeGroup.findMany({
     where: { tenantId, isActive: true },

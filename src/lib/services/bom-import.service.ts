@@ -12,6 +12,7 @@
 
 import type { PrismaClient } from "@prisma/client"
 import { decideImportDefaultFlags } from "../bom-default-policy"
+import { assertSingleActiveDefaultBom, lockItemsForBomDefault } from "../bom-default-guard"
 
 export type BomImportDb = Pick<PrismaClient, "item" | "bOM" | "auditLog" | "$transaction">
 
@@ -87,9 +88,12 @@ export async function importBomGroups(
   let importedItemCount = 0
   let defaultAssignedCount = 0
   const bomKeys: string[] = []
+  const assignedDefaultItemIds: string[] = []
 
   try {
     await db.$transaction(async (tx) => {
+      // 같은 품목의 기본 BOM 변경(화면·ECN·다른 업로드)과 직렬화한다.
+      await lockItemsForBomDefault(tx, tenantId, parentItemIds)
       // MRP 는 tenant 일치 + ACTIVE + isDefault 인 BOM 만 사용한다.
       // 이미 ACTIVE Default 가 있는 품목에는 Default 를 추가로 만들지 않는다(중복 Default 방지).
       const existingDefaults = await tx.bOM.findMany({
@@ -102,7 +106,10 @@ export async function importBomGroups(
       )
       for (const group of groups) {
         const isDefault = defaultFlags.get(group.key) === true
-        if (isDefault) defaultAssignedCount += 1
+        if (isDefault) {
+          defaultAssignedCount += 1
+          assignedDefaultItemIds.push(group.parentItemId)
+        }
         await tx.bOM.create({
           data: {
             tenantId,
@@ -123,6 +130,9 @@ export async function importBomGroups(
         importedItemCount += group.items.length
         bomKeys.push(group.key)
       }
+
+      // 이번 업로드가 기본으로 지정한 품목에서 ACTIVE 기본 BOM 이 2건 이상이 되면(동시 변경 등) 전체를 거부한다 — 기존 기본 BOM 은 바꾸지 않는다.
+      await assertSingleActiveDefaultBom(tx, tenantId, assignedDefaultItemIds)
 
       await tx.auditLog.create({
         data: {

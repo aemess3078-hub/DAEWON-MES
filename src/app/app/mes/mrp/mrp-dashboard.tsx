@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select"
 import { MrpResultTable } from "./mrp-result-table"
 import { runMRP, createPurchaseOrdersFromMRP } from "@/lib/actions/mrp.actions"
+import { MRP_PURCHASE_CREATION_DISABLED_MESSAGE, MRP_PURCHASE_CREATION_ENABLED } from "@/lib/mrp/purchase-creation-policy"
 import type { MRPResult } from "@/lib/services/mrp.service"
 
 type Plan = {
@@ -216,7 +217,7 @@ export function MrpDashboard({ plans, tenantId, siteId }: Props) {
             {selectedItemIds.size > 0 && (
               <Button
                 onClick={handleBulkOrder}
-                disabled={isCreatingPO}
+                disabled={isCreatingPO || !MRP_PURCHASE_CREATION_ENABLED}
                 size="sm"
                 className="gap-2"
               >
@@ -225,6 +226,11 @@ export function MrpDashboard({ plans, tenantId, siteId }: Props) {
               </Button>
             )}
           </div>
+          {!MRP_PURCHASE_CREATION_ENABLED && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] text-amber-800">
+              {MRP_PURCHASE_CREATION_DISABLED_MESSAGE}
+            </div>
+          )}
           <MrpResultTable
             items={mrpResult.items}
             selectedIds={selectedItemIds}

@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { getTenantId } from "@/lib/auth"
+import { getTenantId, requireRole } from "@/lib/auth"
 import { isSchemaCompatibilityError } from "@/lib/db/prisma-error"
 import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
 
@@ -28,6 +28,10 @@ export async function upsertTagCurrentValue(
   timestamp: Date
 ): Promise<void> {
   await assertDaewonFeatureScope()
+  const user = await requireRole("VIEWER")
+  // 다른 테넌트 설비의 태그에는 값을 쓸 수 없다.
+  const ownedTag = await prisma.dataTag.findFirst({ where: { id: tagId, connection: { equipment: { tenantId: user.tenantId } } }, select: { id: true } })
+  if (!ownedTag) throw new Error("NOT_FOUND")
   await prisma.tagCurrentValue.upsert({
     where: { tagId },
     update: { value, numericValue, quality, timestamp },
@@ -41,11 +45,12 @@ export async function getCurrentTagValuesByEquipment(
   equipmentId: string
 ): Promise<TagCurrentValueRow[]> {
   await assertDaewonFeatureScope()
+  const user = await requireRole("VIEWER")
   try {
     const rows = await prisma.tagCurrentValue.findMany({
       where: {
         tag: {
-          connection: { equipmentId },
+          connection: { equipmentId, equipment: { tenantId: user.tenantId } },
           isActive: true,
           isEnabled: true,
           isVisible: true,
@@ -330,6 +335,7 @@ export async function getCurrentTagValuesByTags(
   tagIds: string[]
 ): Promise<TagCurrentValueRow[]> {
   await assertDaewonFeatureScope()
+  const user = await requireRole("VIEWER")
   if (tagIds.length === 0) return []
 
   try {
@@ -337,6 +343,7 @@ export async function getCurrentTagValuesByTags(
       where: {
         tagId: { in: tagIds },
         tag: {
+          connection: { equipment: { tenantId: user.tenantId } },
           isActive: true,
           isEnabled: true,
           isVisible: true,

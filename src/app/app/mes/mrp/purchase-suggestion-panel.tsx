@@ -18,6 +18,7 @@ import {
 } from "@/lib/actions/mrp-purchase-suggestion.actions"
 import { saveOrderMrpRun } from "@/lib/actions/mrp-run.actions"
 import { describeTermsViolation, validateQtyAgainstTerms } from "@/lib/mrp/purchase-policy"
+import { MRP_PURCHASE_CREATION_DISABLED_MESSAGE, MRP_PURCHASE_CREATION_ENABLED } from "@/lib/mrp/purchase-creation-policy"
 import {
   AUTO_SUGGEST_KINDS,
   deriveCoverageForSupplier,
@@ -429,6 +430,12 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
             </div>
           )}
 
+          {!MRP_PURCHASE_CREATION_ENABLED && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] text-amber-800">
+              {MRP_PURCHASE_CREATION_DISABLED_MESSAGE}
+            </div>
+          )}
+
           {!payload.site && (
             <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[14px] text-red-700">
               등록된 공장(사이트)이 없어 구매발주를 생성할 수 없습니다.
@@ -490,7 +497,7 @@ export function PurchaseSuggestionPanel({ params, refreshKey }: Props) {
                 createKeyRef.current = newRequestKey()
                 setDialogOpen(true)
               }}
-              disabled={selectedRows.length === 0 || creating}
+              disabled={selectedRows.length === 0 || creating || !MRP_PURCHASE_CREATION_ENABLED}
               className="gap-2"
             >
               <ShoppingCart className="h-4 w-4" />

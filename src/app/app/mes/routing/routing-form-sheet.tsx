@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from "react"
 import { useForm, useFieldArray } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
-import { Plus, Trash2, Check, ChevronsUpDown, X } from "lucide-react"
+import { Plus, Trash2, Check, ChevronsUpDown, ChevronUp, ChevronDown, X } from "lucide-react"
 
 import { Form, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Button } from "@/components/ui/button"
@@ -71,6 +71,15 @@ const itemTypeLabels: Record<string, string> = {
   CONSUMABLE: "소모품",
 }
 
+/**
+ * 공정 순서값(seq) 정리: 이미 1,2,3… 처럼 중복 없이 증가하는 값이면(기존 라우팅을 수정 없이 저장하는 경우 포함) 그대로 두고,
+ * 삭제·재추가·이동으로 값이 겹치거나 순서와 어긋나면 화면 순서대로 1..n 으로 다시 매긴다.
+ */
+function normalizeOperationSeq<T extends { seq: number }>(ops: T[]): T[] {
+  const ordered = ops.every((op, i) => Number.isInteger(op.seq) && op.seq > 0 && (i === 0 || op.seq > ops[i - 1].seq))
+  return ordered ? ops : ops.map((op, i) => ({ ...op, seq: i + 1 }))
+}
+
 export function RoutingFormSheet({
   open,
   onOpenChange,
@@ -90,7 +99,7 @@ export function RoutingFormSheet({
     defaultValues: DEFAULT_FORM_VALUES,
   })
 
-  const { fields, append, remove } = useFieldArray({
+  const { fields, append, remove, move } = useFieldArray({
     control: form.control,
     name: "operations",
   })
@@ -132,7 +141,7 @@ export function RoutingFormSheet({
         scope: values.scope,
         itemIds: values.scope === RoutingScope.COMMON ? [] : values.itemIds,
         isDefault: values.scope === RoutingScope.COMMON ? false : values.isDefault,
-        operations: values.operations.map((op) => ({
+        operations: normalizeOperationSeq(values.operations).map((op) => ({
           seq: op.seq,
           operationCode: op.operationCode,
           name: op.name,
@@ -439,7 +448,7 @@ export function RoutingFormSheet({
 
             {fields.length > 0 && (
               <div className="rounded-md border overflow-hidden">
-                <div className="grid grid-cols-[36px_1fr_140px_72px_36px] gap-0 bg-muted/50 px-3 py-2 text-[13px] font-medium text-muted-foreground">
+                <div className="grid grid-cols-[36px_1fr_140px_72px_92px] gap-0 bg-muted/50 px-3 py-2 text-[13px] font-medium text-muted-foreground">
                   <span>순서</span>
                   <span>공정 선택</span>
                   <span>작업장</span>
@@ -454,7 +463,7 @@ export function RoutingFormSheet({
                   return (
                     <div
                       key={field.id}
-                      className="grid grid-cols-[36px_1fr_140px_72px_36px] gap-0 items-center px-3 py-2 border-t first:border-t-0 hover:bg-muted/20"
+                      className="grid grid-cols-[36px_1fr_140px_72px_92px] gap-0 items-center px-3 py-2 border-t first:border-t-0 hover:bg-muted/20"
                     >
                       {/* 순서 */}
                       <span className="text-[13px] text-muted-foreground">
@@ -525,16 +534,41 @@ export function RoutingFormSheet({
                         )}
                       />
 
-                      {/* 삭제 버튼 */}
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={() => remove(index)}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
+                      {/* 순서 이동 + 삭제 */}
+                      <div className="flex items-center justify-end">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-7 text-muted-foreground"
+                          aria-label="공정 위로 이동"
+                          disabled={index === 0}
+                          onClick={() => move(index, index - 1)}
+                        >
+                          <ChevronUp className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-7 text-muted-foreground"
+                          aria-label="공정 아래로 이동"
+                          disabled={index === fields.length - 1}
+                          onClick={() => move(index, index + 1)}
+                        >
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                          aria-label="공정 삭제"
+                          onClick={() => remove(index)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
                     </div>
                   )
                 })}

@@ -28,6 +28,7 @@ import {
   type WorkOrderForIssue,
 } from "@/lib/actions/material-issue.actions"
 import { formatQuantity } from "@/lib/utils"
+import { generateReceivingRequestId } from "@/lib/receiving-request-id"
 
 function isLotManaged(item: MaterialRequirement["item"]): boolean {
   return item.isLotTracked || item.itemType === "SEMI_FINISHED"
@@ -75,6 +76,8 @@ export function IssueFormDialog({
   const [confirmedIssuePlan, setConfirmedIssuePlan] = useState<LabelPlan | null>(null)
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  // 출고 요청 멱등 키: 한 번의 출고 작업(재시도 포함)에 같은 값을 쓰고, 성공하거나 창을 새로 열 때만 새로 만든다
+  const issueRequestIdRef = useRef<string | null>(null)
   // QR 스캔 결과 반영(비동기 조회 뒤)이 최신 LOT 행을 보도록 ref 로 미러링한다.
   const lotSplitsRef = useRef(lotSplitsMap)
   lotSplitsRef.current = lotSplitsMap
@@ -195,6 +198,7 @@ export function IssueFormDialog({
   }
 
   const handleOpen = (nextOpen: boolean) => {
+    issueRequestIdRef.current = null
     if (!nextOpen) {
       setWarehouseMap({})
       setQtyMap({})
@@ -308,14 +312,16 @@ export function IssueFormDialog({
       })
 
       startTransition(async () => {
+        issueRequestIdRef.current ??= generateReceivingRequestId()
         const result = await issueMaterialsForWorkOrder(
-          { workOrderId: workOrder.id, siteId: workOrder.site.id, items },
+          { workOrderId: workOrder.id, siteId: workOrder.site.id, items, requestId: issueRequestIdRef.current },
           tenantId,
         )
         if (!result.ok) {
           alert(result.error ?? "출고 처리 중 오류가 발생했습니다.")
           return
         }
+        issueRequestIdRef.current = null
         router.refresh()
         // 출고가 확정되었으므로 확정 당시 선택한 LOT 별 QR 라벨을 바로 출력할 수 있게 한다(라벨 창을 닫으면 출고 창도 닫힘).
         if (issueLabelPlan.items.length > 0) {

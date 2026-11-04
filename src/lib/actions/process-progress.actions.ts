@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/db/prisma"
 import { OperationStatus, WipMovementType, WipUnitStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
-import { requireRole, getTenantId } from "@/lib/auth"
+import { requireRole, getTenantId, requireTenantAccess } from "@/lib/auth"
 import { startOperation } from "@/lib/actions/pop.actions"
 import { assertDirectOperationStatusRequestAllowed } from "@/lib/operation-status-integrity"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
@@ -75,6 +75,7 @@ export type ReworkRow = {
 export async function getOperationProgressList(
   tenantId: string
 ): Promise<OperationProgressRow[]> {
+  await requireTenantAccess(tenantId)
   const operations = await prisma.workOrderOperation.findMany({
     where: {
       workOrder: {
@@ -158,6 +159,7 @@ export async function getOperationProgressList(
 export async function getReworkPendingList(
   tenantId: string
 ): Promise<ReworkRow[]> {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   const reworkWipUnits = await prisma.wipUnit.findMany({
     where: {

@@ -100,6 +100,8 @@ function makeDb(tables: Record<string, Row[]>) {
   const db = new Proxy(target, {
     get(_t, prop: string) {
       if (prop === "$transaction") return async (fn: (tx: unknown) => Promise<unknown>) => fn(db)
+      // 기본 BOM 단일성 보호(N-03)의 Item 행 잠금 — 목 DB 에는 잠금이 없으므로 no-op
+      if (prop === "$queryRaw") return async () => []
       if (!(prop in tables)) throw new Error(`unexpected model access: ${prop}`)
       return model(prop)
     },

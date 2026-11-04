@@ -29,6 +29,7 @@ import {
 } from "@/lib/actions/sales-order.actions"
 import { SalesOrderStatus } from "@prisma/client"
 import type { SalesOrderRow } from "./columns"
+import { CREATABLE_STATUSES, selectableSalesOrderStatuses, type SalesOrderStatusValue } from "@/lib/sales-order-status"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -146,6 +147,13 @@ export function SalesOrderFormSheet({
   // ─── CONFIRMED 이상이면 품목 편집 비활성화 ──────────────────────────────────
 
   const currentStatus = form.watch("status")
+  // 선택할 수 있는 상태: 등록은 초안·확정, 수정은 현재 상태에서 직접 바꿀 수 있는 상태만(생산중·부분출하·출하완료는 처리 결과로 자동 변경). 서버가 같은 규칙을 다시 검증한다.
+  const selectableStatuses: SalesOrderStatusValue[] =
+    mode === "edit" && salesOrder
+      ? selectableSalesOrderStatuses(salesOrder.status as SalesOrderStatusValue)
+      : CREATABLE_STATUSES
+  const statusOptions = STATUS_OPTIONS.filter((opt) => selectableStatuses.includes(opt.value as SalesOrderStatusValue))
+  const statusLocked = mode === "edit" && !!salesOrder && selectableStatuses.length <= 1
   const isItemEditDisabled =
     mode === "edit" &&
     salesOrder?.status !== undefined &&
@@ -176,7 +184,12 @@ export function SalesOrderFormSheet({
       if (mode === "create") {
         await createSalesOrder(tenantId, siteId, payload)
       } else if (salesOrder) {
-        await updateSalesOrder(salesOrder.id, payload)
+        const res = await updateSalesOrder(salesOrder.id, payload)
+        if (!res.ok) {
+          // 서버가 상태 전이·후속 업무(생산계획·작업지시·출하) 때문에 거부한 사유를 그대로 안내한다
+          alert(res.error ?? "저장 중 오류가 발생했습니다.")
+          return
+        }
       }
       onOpenChange(false)
       router.refresh()
@@ -294,13 +307,18 @@ export function SalesOrderFormSheet({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {STATUS_OPTIONS.map((opt) => (
+                        {statusOptions.map((opt) => (
                           <SelectItem key={opt.value} value={opt.value}>
                             {opt.label}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
+                    {statusLocked && (
+                      <p className="text-[13px] text-muted-foreground">
+                        이 상태에서는 직접 변경할 수 없습니다. 생산의뢰·출하 처리 결과에 따라 자동으로 바뀝니다.
+                      </p>
+                    )}
                     <FormMessage />
                   </FormItem>
                 )}

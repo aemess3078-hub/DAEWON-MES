@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { requireRole } from "@/lib/auth"
+import { requireRole, requireTenantAccess } from "@/lib/auth"
 import { revalidatePath } from "next/cache"
 import { assertLotQualityReleaseAllowed } from "./quality-release-gate.helpers"
 import type { Prisma } from "@prisma/client"
@@ -13,8 +13,10 @@ import {
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
+import { SHIPPABLE_STATUSES, salesOrderNotShippableMessage, type SalesOrderStatusValue } from "@/lib/sales-order-status"
 
 export async function getShipments(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.shipmentOrder.findMany({
     where: { tenantId },
     include: {
@@ -52,6 +54,7 @@ export async function getShipments(tenantId: string) {
 export type DeliveryStatusRow = Awaited<ReturnType<typeof getDeliveryStatusRows>>[number]
 
 export async function getDeliveryStatusRows(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.shipmentOrder.findMany({
     where: { tenantId },
     select: {
@@ -371,6 +374,7 @@ export async function getAvailableFinishedGoodsLots(
 }
 
 export async function generateShipmentNo(tenantId: string): Promise<string> {
+  await requireTenantAccess(tenantId)
   const { year } = kstDateParts()
   const prefix = `SH-${year}-`
   const last = await prisma.shipmentOrder.findFirst({
@@ -493,6 +497,11 @@ export async function createShipment(
       new Set(data.items.map((item) => item.salesOrderItemId)),
     )
     await lockSalesOrderItemsForUpdate(tx, tenantId, salesOrderItemIds)
+
+    // 잠금 이후 수주 상태를 다시 확인한다(수주 취소와 동시에 실행돼도 취소된 수주에 출하가 남지 않는다)
+    const lockedSalesOrder = await tx.salesOrder.findFirst({ where: { id: data.salesOrderId, tenantId }, select: { status: true } })
+    if (!lockedSalesOrder) throw new Error("수주를 찾을 수 없습니다.")
+    if (!SHIPPABLE_STATUSES.includes(lockedSalesOrder.status as SalesOrderStatusValue)) throw new Error(salesOrderNotShippableMessage(lockedSalesOrder.status))
 
     const salesOrderItems = await tx.salesOrderItem.findMany({
       where: {
@@ -771,6 +780,10 @@ export async function confirmShipment(id: string) {
       user.tenantId,
       shipment.items.map((item) => item.salesOrderItemId)
     )
+    // 확정 직전에 수주 상태를 다시 확인한다. 실패하면 위의 PLANNED→SHIPPED 전환을 포함해 트랜잭션 전체가 롤백된다(재고·수불 미생성).
+    const lockedSalesOrder = await tx.salesOrder.findFirst({ where: { id: shipment.salesOrderId, tenantId: user.tenantId }, select: { status: true } })
+    if (!lockedSalesOrder) throw new Error("수주를 찾을 수 없습니다.")
+    if (!SHIPPABLE_STATUSES.includes(lockedSalesOrder.status as SalesOrderStatusValue)) throw new Error(salesOrderNotShippableMessage(lockedSalesOrder.status))
 
     for (const item of shipment.items) {
       if (item.item.isLotTracked && (!item.lotId || !item.lot || item.lot.itemId !== item.itemId || item.lot.status !== "ACTIVE")) {

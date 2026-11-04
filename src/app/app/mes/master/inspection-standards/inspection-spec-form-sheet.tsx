@@ -35,9 +35,8 @@ import {
 } from "@/components/ui/table"
 import { FormSelectField, FormTextField } from "@/components/common/form-sheet"
 import {
-  createInspectionSpec,
-  updateInspectionSpec,
-  upsertInspectionItems,
+  createInspectionSpecWithItems,
+  updateInspectionSpecWithItems,
   InspectionSpecWithItems,
 } from "@/lib/actions/quality.actions"
 
@@ -190,28 +189,34 @@ export function InspectionSpecFormSheet({
       unit: row.unit.trim() !== "" ? row.unit.trim() : null,
     }))
 
+    // 서버 검증(N-10)과 같은 규칙을 먼저 안내한다: 수치 항목의 두 한도가 모두 있으면 하한 <= 상한
+    for (const row of mappedItems) {
+      if (row.inputType === "NUMERIC" && row.lowerLimit !== null && row.upperLimit !== null && row.lowerLimit > row.upperLimit) {
+        alert(`'${row.name}' 항목의 하한(${row.lowerLimit})이 상한(${row.upperLimit})보다 클 수 없습니다.`)
+        return
+      }
+    }
+
     setIsLoading(true)
     try {
+      // 표준과 검사항목을 한 번의 서버 호출(트랜잭션)로 저장한다 — 항목 저장이 실패해도 빈 표준이 남지 않는다.
       if (isEdit) {
-        await updateInspectionSpec(editingSpec!.id, {
-          version: values.version,
-          status: values.status,
-        })
-        await upsertInspectionItems(editingSpec!.id, mappedItems)
+        await updateInspectionSpecWithItems(
+          editingSpec!.id,
+          { version: values.version, status: values.status },
+          mappedItems
+        )
       } else {
-        const created = await createInspectionSpec(
+        await createInspectionSpecWithItems(
           {
             itemId: values.itemId,
             routingOperationId: values.routingOperationId,
             version: values.version,
             status: values.status,
           },
+          mappedItems,
           tenantId
         )
-        // 등록과 동시에 검사항목 저장
-        if (itemRows.length > 0 && created?.id) {
-          await upsertInspectionItems(created.id, mappedItems)
-        }
       }
       onOpenChange(false)
       router.refresh()

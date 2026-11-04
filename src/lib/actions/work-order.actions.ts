@@ -1,7 +1,7 @@
 "use server"
 
 import { prisma } from "@/lib/db/prisma"
-import { getTenantId, requireRole } from "@/lib/auth"
+import { getTenantId, requireRole, requireTenantAccess } from "@/lib/auth"
 import { generateCnsManufacturingNo } from "@/lib/lot-numbering/lot-number-generator"
 import type { CnsItemRuleContext } from "@/lib/lot-numbering/lot-rule-resolver"
 import { failureResult, UserFacingError, type ActionResult } from "@/lib/errors/user-error"
@@ -225,7 +225,10 @@ export type ProductionPlanItemForWorkOrder = {
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
 export async function getWorkOrders(): Promise<WorkOrderWithDetails[]> {
+  // 테넌트는 세션에서만 결정하고, 작업지시 읽기 권한을 요구한다.
+  const user = await requireResourcePermission("WORK_ORDER", "READ")
   const workOrders = await prisma.workOrder.findMany({
+    where: { tenantId: user.tenantId },
     include: workOrderInclude,
     orderBy: [{ createdAt: "desc" }],
   })
@@ -236,6 +239,7 @@ export async function getWorkOrders(): Promise<WorkOrderWithDetails[]> {
 export type WipInventoryRow = Awaited<ReturnType<typeof getWipInventoryRows>>[number]
 
 export async function getWipInventoryRows(tenantId: string) {
+  await requireTenantAccess(tenantId)
   const workOrders = await prisma.workOrder.findMany({
     where: {
       tenantId,
@@ -465,8 +469,10 @@ export async function getWipInventoryRows(tenantId: string) {
 }
 
 export async function getWorkOrderById(id: string): Promise<WorkOrderWithDetails | null> {
-  const workOrder = await prisma.workOrder.findUnique({
-    where: { id },
+  const user = await requireResourcePermission("WORK_ORDER", "READ")
+  // 다른 테넌트의 ID 는 "없음"과 동일하게 null 로 응답한다(존재 여부도 노출하지 않음).
+  const workOrder = await prisma.workOrder.findFirst({
+    where: { id, tenantId: user.tenantId },
     include: workOrderInclude,
   })
 
@@ -474,23 +480,27 @@ export async function getWorkOrderById(id: string): Promise<WorkOrderWithDetails
 }
 
 export async function getSites() {
+  const user = await requireRole("VIEWER")
   return prisma.site.findMany({
+    where: { tenantId: user.tenantId },
     select: { id: true, code: true, name: true, type: true },
     orderBy: { name: "asc" },
   })
 }
 
 export async function getItemsForWorkOrder() {
+  const user = await requireRole("VIEWER")
   return prisma.item.findMany({
-    where: { itemType: { in: ["FINISHED", "SEMI_FINISHED"] } },
+    where: { tenantId: user.tenantId, itemType: { in: ["FINISHED", "SEMI_FINISHED"] } },
     select: { id: true, code: true, name: true, itemType: true },
     orderBy: { code: "asc" },
   })
 }
 
 export async function getBomsForItem(itemId: string) {
+  const user = await requireRole("VIEWER")
   return prisma.bOM.findMany({
-    where: { itemId, status: "ACTIVE" },
+    where: { tenantId: user.tenantId, itemId, status: "ACTIVE" },
     select: { id: true, version: true, isDefault: true },
     orderBy: { version: "asc" },
   })
@@ -543,7 +553,9 @@ export async function getRoutingsForItem(itemId: string) {
 }
 
 export async function getEquipments() {
+  const user = await requireRole("VIEWER")
   return prisma.equipment.findMany({
+    where: { tenantId: user.tenantId },
     select: { id: true, code: true, name: true, equipmentType: true, workCenterId: true },
     orderBy: { code: "asc" },
   })
@@ -552,6 +564,7 @@ export async function getEquipments() {
 export async function getConfirmedProductionPlanItemsForWorkOrder(
   tenantId: string
 ): Promise<ProductionPlanItemForWorkOrder[]> {
+  await requireTenantAccess(tenantId)
   const rows = await prisma.productionPlanItem.findMany({
     where: {
       plan: {
@@ -769,6 +782,7 @@ async function validateWorkOrderOperationAssignments(
 // ─── Business Logic ───────────────────────────────────────────────────────────
 
 export async function generateOrderNo(tenantId: string): Promise<string> {
+  await requireTenantAccess(tenantId)
   const { year } = kstDateParts()
   const prefix = `WO-${year}-`
 
@@ -853,6 +867,7 @@ export async function generateManufacturingNo(
   itemId?: string | null,
   sequenceOffset = 0,
 ): Promise<string> {
+  await requireTenantAccess(tenantId)
   const itemContext = await getCnsItemRuleContext(tenantId, itemId)
   return generateCnsManufacturingNo(prisma, tenantId, itemContext, new Date(), sequenceOffset)
 }

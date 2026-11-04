@@ -81,6 +81,7 @@ export function BomDataTable({
       router.refresh()
     } catch (error) {
       console.error("삭제 실패:", error)
+      alert(error instanceof Error ? error.message : "삭제 중 오류가 발생했습니다.")
     }
   }
 

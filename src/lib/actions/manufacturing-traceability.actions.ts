@@ -1,5 +1,7 @@
 "use server"
 
+import { requireTenantAccess } from "@/lib/auth"
+
 import { prisma } from "@/lib/db/prisma"
 import { getLotGenealogyForTraceability, type LotGenealogyNode } from "./lot-genealogy.helpers"
 import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
@@ -170,6 +172,7 @@ export async function getManufacturingTraceability(
   manufacturingNo: string,
   tenantId: string,
 ): Promise<ManufacturingTraceability | null> {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   const trimmed = manufacturingNo.trim()
   if (!trimmed) return null
@@ -518,6 +521,7 @@ export async function listManufacturingNos(
   tenantId: string,
   search?: string,
 ): Promise<{ manufacturingNo: string; orderNo: string; itemName: string }[]> {
+  await requireTenantAccess(tenantId)
   await assertDaewonFeatureScope()
   const rows = await prisma.workOrder.findMany({
     where: {

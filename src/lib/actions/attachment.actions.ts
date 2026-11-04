@@ -2,7 +2,7 @@
 
 import { PermissionAction } from "@prisma/client"
 import { prisma } from "@/lib/db/prisma"
-import { requireRole, getTenantId, type CurrentUser } from "@/lib/auth"
+import { requireRole, getTenantId, requireTenantAccess, type CurrentUser } from "@/lib/auth"
 import { revalidatePath } from "next/cache"
 import { getErrorMessage } from "@/lib/utils"
 import { createAttachmentSignedUrl, deleteAttachmentFile } from "@/lib/storage/attachment-storage"
@@ -75,6 +75,7 @@ export async function assertAttachmentEntityOwnership(
   entityId: string,
   tenantId: string
 ): Promise<void> {
+  await requireTenantAccess(tenantId)
   if (entityType === "QUALITY_INSPECTION") {
     const row = await prisma.qualityInspection.findFirst({
       where: { id: entityId, workOrderOperation: { workOrder: { tenantId } } },
@@ -212,6 +213,7 @@ export async function assertNoAttachmentsForEntity(
 }
 
 export async function assertAttachmentDeleteAllowed(entityType: AttachmentEntityType, entityId: string, tenantId: string): Promise<void> {
+  await requireTenantAccess(tenantId)
   if (entityType === "QUALITY_INSPECTION") {
     const count = await prisma.defectRecord.count({
       where: { qualityInspectionId: entityId, qualityInspection: { workOrderOperation: { workOrder: { tenantId } } } },

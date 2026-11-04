@@ -1,6 +1,6 @@
 "use server"
 
-import { getTenantId, requireRole } from "@/lib/auth"
+import { getTenantId, requireRole, requireTenantAccess } from "@/lib/auth"
 import { prisma } from "@/lib/db/prisma"
 import { RoutingScope, RoutingStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
@@ -139,6 +139,7 @@ export async function validateRoutingForItem(params: {
   itemId: string
   routingId: string
 }): Promise<void> {
+  await requireTenantAccess(params.tenantId)
   await validateRoutingForItemContext(prisma, params)
 }
 
@@ -181,11 +182,22 @@ async function assertItemsOwnedAndEligible(tenantId: string, itemIds: string[]) 
   }
 }
 
+// 공정 순서값(seq) 검증: 양의 정수이고 한 라우팅 안에서 중복되면 안 된다(DB 유니크 위반 전에 한글 안내).
+function assertValidOperationSeq(operations: { seq: number }[]) {
+  const seen = new Set<number>()
+  for (const op of operations) {
+    if (!Number.isInteger(op.seq) || op.seq <= 0) throw new Error("공정 순서는 1 이상의 정수여야 합니다.")
+    if (seen.has(op.seq)) throw new Error(`공정 순서가 중복되었습니다(순서 ${op.seq}). 공정 순서를 확인해 주세요.`)
+    seen.add(op.seq)
+  }
+}
+
 export async function createRouting(data: CreateRoutingInput, _tenantId?: string) {
   await requireResourcePermission("ROUTING", "CREATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
   const { operations, itemIds, isDefault, scope, ...routingFields } = data
+  assertValidOperationSeq(operations)
 
   const normalizedItemIds = scope === "COMMON" ? [] : normalizeItemIds(itemIds)
   if (scope === "ITEM_SPECIFIC" && normalizedItemIds.length === 0) {
@@ -271,6 +283,7 @@ export async function updateRouting(id: string, data: CreateRoutingInput) {
   if (!owned) throw new Error("NOT_FOUND")
 
   const { operations, itemIds, isDefault, scope, ...routingFields } = data
+  assertValidOperationSeq(operations)
   const { code, name, version, status } = routingFields
 
   const normalizedItemIds = scope === "COMMON" ? [] : normalizeItemIds(itemIds)

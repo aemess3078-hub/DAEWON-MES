@@ -89,6 +89,7 @@ export function BomFormSheet({
     control: form.control,
     name: "bomItems",
   })
+  const selectedComponentIds = form.watch("bomItems").map((b) => b.componentItemId)
 
   useEffect(() => {
     if (open) {
@@ -121,6 +122,7 @@ export function BomFormSheet({
       router.refresh()
     } catch (error) {
       console.error("저장 실패:", error)
+      alert(error instanceof Error ? error.message : "저장 중 오류가 발생했습니다.")
     } finally {
       setIsLoading(false)
     }
@@ -190,7 +192,7 @@ export function BomFormSheet({
               control={form.control}
               name="isDefault"
               label="기본 BOM"
-              description="이 BOM을 해당 품목의 기본 BOM으로 설정합니다."
+              description="이 BOM을 해당 품목의 기본 BOM으로 설정합니다. 활성 상태로 저장하면 같은 품목의 기존 기본 BOM은 기본 지정만 해제되고 활성 상태는 유지됩니다."
             />
           </div>
 
@@ -248,6 +250,7 @@ export function BomFormSheet({
                                   key={item.id}
                                   value={item.id}
                                   className="text-[13px]"
+                                  disabled={selectedComponentIds.includes(item.id) && item.id !== f.value}
                                 >
                                   [{item.code}] {item.name} ({item.uom})
                                 </SelectItem>

@@ -49,7 +49,10 @@ export type CreateWorkCenterInput = {
 
 export async function createWorkCenter(data: CreateWorkCenterInput) {
   await requireResourcePermission("ROUTING", "CREATE")
-  await requireRole("OPERATOR")
+  const user = await requireRole("OPERATOR")
+  // 작업장은 사업장(Site)에 속하고 Site 가 테넌트를 결정한다 → 클라이언트가 보낸 siteId 가 내 테넌트의 사업장인지 확인한다.
+  const site = await prisma.site.findFirst({ where: { id: data.siteId, tenantId: user.tenantId }, select: { id: true } })
+  if (!site) throw new Error("NOT_FOUND")
   await prisma.workCenter.create({ data })
   revalidatePath("/app/mes/work-centers")
 }
