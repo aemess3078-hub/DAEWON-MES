@@ -230,8 +230,12 @@ export function NumberingRuleBuilder({
     setIsSaving(true)
     setSavedOk(false)
     try {
-      await upsertNumberingRule(tenantId, type, tokens)
-      setSavedOk(true)
+      const result = await upsertNumberingRule(tenantId, type, tokens)
+      if (result && result.success === false) {
+        alert(result.message)
+      } else {
+        setSavedOk(true)
+      }
     } catch {
       alert("저장에 실패했습니다.")
     } finally {
