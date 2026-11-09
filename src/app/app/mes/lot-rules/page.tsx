@@ -3,13 +3,13 @@ import { getNumberingRules, getCodeGroupsForBuilder } from "@/lib/actions/number
 import { NumberingRuleBuilder } from "./numbering-rule-builder"
 import type { Token } from "@/lib/types/numbering-rule"
 import { getCurrentUser, getTenantId } from "@/lib/auth"
-import { isDeveloperUser } from "@/lib/developer"
+import { canManageNumberingRules } from "@/lib/developer"
 
 export const dynamic = "force-dynamic"
 
 export default async function NumberingRulesPage() {
   const user = await getCurrentUser()
-  if (!isDeveloperUser(user)) notFound()
+  if (!canManageNumberingRules(user)) notFound()
   const tenantId = await getTenantId()
 
   const [rules, codeGroups] = await Promise.all([

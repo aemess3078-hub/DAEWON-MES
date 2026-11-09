@@ -86,10 +86,12 @@ export const DAEWON_DEV_ONLY_ROUTES: readonly string[] = [
   "/app/mes/gateways",
   "/app/mes/equipment-connections",
   "/app/mes/tags",
-  "/app/mes/lot-rules",
   "/app/mes/features",
   "/app/mes/common-codes",
 ]
+
+/** 개발자 외에 오너·관리자(OWNER/ADMIN)도 접근하는 경로 — 번호 규칙(LOT·제조번호) 관리 */
+export const DAEWON_ADMIN_ROUTES: readonly string[] = ["/app/mes/lot-rules"]
 
 export type RouteActor = { loginId?: string | null; role?: string | null } | null | undefined
 
@@ -118,6 +120,7 @@ export function isRouteAllowed(pathname: string, actor: RouteActor): boolean {
   if (path !== "/app" && !path.startsWith("/app/")) return true
   if (isDeveloperLogin(actor?.loginId)) return true
   if (path === "/app" || path === "/app/mes") return true // /app/mes 는 /app 으로 redirect 하는 진입 경로
+  if (DAEWON_ADMIN_ROUTES.some((p) => matchesPrefix(path, p))) return actor?.role === "OWNER" || actor?.role === "ADMIN"
   if (DAEWON_DEV_ONLY_ROUTES.some((p) => matchesPrefix(path, p))) return false
   return DAEWON_ALLOWED_ROUTES.some((p) => matchesPrefix(path, p))
 }

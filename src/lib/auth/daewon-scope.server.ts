@@ -1,6 +1,8 @@
 import { cookies } from "next/headers"
 import { verifyAuthToken, NMES_SESSION_COOKIE } from "@/lib/jwt"
 import { isDeveloperLogin, isScopeEnforced } from "@/lib/auth/daewon-scope"
+import { getCurrentUser } from "@/lib/auth"
+import { canManageNumberingRules } from "@/lib/developer"
 
 /**
  * 서버 액션 / API 용 대원정밀 구축 범위 가드.
@@ -32,6 +34,18 @@ export async function assertDeveloperOnly(): Promise<void> {
   if (!isScopeEnforced()) return
   const loginId = await getVerifiedLoginId()
   if (!isDeveloperLogin(loginId)) throw new Error("FORBIDDEN")
+}
+
+/**
+ * 번호 규칙(LOT·제조번호) 관리 액션의 진입 가드: 개발자 계정 또는 오너·관리자(OWNER/ADMIN).
+ * 역할은 서명 검증된 세션의 사용자 기준으로 DB 에서 다시 읽는다(JWT 의 role 값은 신뢰하지 않는다).
+ */
+export async function assertNumberingRuleManager(): Promise<void> {
+  if (!isScopeEnforced()) return
+  const loginId = await getVerifiedLoginId()
+  if (isDeveloperLogin(loginId)) return
+  const user = await getCurrentUser()
+  if (!canManageNumberingRules(user)) throw new Error("FORBIDDEN")
 }
 
 /** API Route 용: 허용되면 null, 아니면 응답 상태코드(401/403). */

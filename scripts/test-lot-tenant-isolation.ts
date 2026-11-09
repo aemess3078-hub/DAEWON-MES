@@ -135,7 +135,7 @@ async function main() {
     getTenantId: async () => process.env.DEFAULT_TENANT_ID ?? auth.tenantId,
     getCurrentUser: async () => (auth.mode === "anon" ? null : actor()),
   })
-  inject("../src/lib/auth/daewon-scope.server", { assertDeveloperOnly: async () => {}, assertDaewonFeatureScope: async () => {} })
+  inject("../src/lib/auth/daewon-scope.server", { assertDeveloperOnly: async () => {}, assertNumberingRuleManager: async () => {}, assertDaewonFeatureScope: async () => {} })
   const lotActions = require("../src/lib/actions/lot.actions") as typeof import("../src/lib/actions/lot.actions")
   const numbering = require("../src/lib/actions/numbering-rule.actions") as typeof import("../src/lib/actions/numbering-rule.actions")
 
