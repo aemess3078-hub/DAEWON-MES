@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import {
   ClipboardEdit,
@@ -22,6 +23,12 @@ import {
 } from "@/lib/actions/pop.actions"
 import type { PopWipLookupResult } from "@/lib/actions/pop-wip-lookup.actions"
 import { PopWipQrScan, type PopWipFound } from "@/components/pop/pop-wip-qr-scan"
+import {
+  ALL_PROCESSES,
+  displayProcessName,
+  filterQueueRows,
+  summarizeQueueByProcess,
+} from "@/lib/pop-process-filter"
 
 // ─── Filter types ────────────────────────────────────────────────────────────
 
@@ -51,10 +58,6 @@ type FormState = { goodQty: string; defectQty: string; reworkQty: string; toolId
 const EMPTY_FORM: FormState = { goodQty: "", defectQty: "", reworkQty: "", toolIds: [] }
 
 // ─── Helper components ───────────────────────────────────────────────────────
-
-function displayProcessName(processName: string): string {
-  return processName.includes("후처리") ? "후처리공정" : processName
-}
 
 function formatDate(value: string | null): string {
   if (!value) return "-"
@@ -271,6 +274,7 @@ export function WorkQueueClient({
   const router = useRouter()
   const [filter, setFilter] = useState<QueueFilter>("ALL")
   const [keyword, setKeyword] = useState("")
+  const [selectedProcess, setSelectedProcess] = useState<string>(ALL_PROCESSES)
   // WIP QR 로 찾은 작업지시(표시 필터일 뿐 — 작업 시작/실적등록 처리와 무관)
   const [qrWip, setQrWip] = useState<PopWipFound | null>(null)
   const workOrderIdsInList = useMemo(() => new Set(rows.map((row) => row.workOrderId)), [rows])
@@ -370,34 +374,15 @@ export function WorkQueueClient({
     }
   }
 
+  // 공정별 조회: rows 는 서버가 이미 "현재 진행중/대기인 공정"만 내려 준 목록이다. 화면은 그 안에서 상태·공정·검색어(AND)로 좁혀 보여 줄 뿐이며,
+  // 작업 가능 여부(canWork)는 서버 계산값을 그대로 쓰고 시작·실적 등록은 서버가 다시 검증한다.
+  const processSummaries = useMemo(() => summarizeQueueByProcess(rows), [rows])
+  const selectedSummary = processSummaries.find((item) => item.name === selectedProcess)
+
   const filteredRows = useMemo(() => {
-    const normalizedKeyword = keyword.trim().toLowerCase()
-
-    return rows.filter((row) => {
-      if (qrWip && row.workOrderId !== qrWip.workOrderId) return false
-      const matchesFilter =
-        filter === "ALL" ||
-        (filter === "PENDING" && row.status === "PENDING") ||
-        (filter === "IN_PROGRESS" && row.status === "IN_PROGRESS") ||
-        (filter === "AVAILABLE" && row.canWork) ||
-        (filter === "BLOCKED" && !row.canWork)
-
-      if (!matchesFilter) return false
-      if (!normalizedKeyword) return true
-
-      return [
-        row.orderNo,
-        row.manufacturingNo ?? "",
-        row.itemCode,
-        row.itemName,
-        row.equipmentName ?? "",
-        displayProcessName(row.processName),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(normalizedKeyword)
-    })
-  }, [filter, keyword, qrWip, rows])
+    const base = qrWip ? rows.filter((row) => row.workOrderId === qrWip.workOrderId) : rows
+    return filterQueueRows(base, { status: filter, process: selectedProcess, keyword })
+  }, [filter, keyword, qrWip, rows, selectedProcess])
 
   // QR 로 작업지시를 표시하면 그 작업지시의 첫 공정 카드로 스크롤한다(표시만 — 어떤 업무 처리도 호출하지 않는다)
   useEffect(() => {
@@ -459,11 +444,36 @@ export function WorkQueueClient({
             <Input
               value={keyword}
               onChange={(event) => setKeyword(event.target.value)}
-              placeholder="작업지시번호, 제조번호, 품목, 공정 검색"
+              placeholder="작업지시번호, 제조번호, 품목, 공정, 설비 검색"
               className="h-11 pl-9 text-[15px]"
             />
           </div>
         </div>
+        {/* 공정별 조회 */}
+        {processSummaries.length > 0 && (
+          <div className="mt-3 space-y-2 border-t pt-3" data-testid="pop-process-filter">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[14px] font-medium text-slate-600">공정별 조회</span>
+              {[{ name: ALL_PROCESSES, total: rows.length }, ...processSummaries].map((item) => (
+                <Button
+                  key={item.name}
+                  type="button"
+                  variant={selectedProcess === item.name ? "default" : "outline"}
+                  className="h-11 rounded-full px-5 text-[15px]"
+                  aria-pressed={selectedProcess === item.name}
+                  onClick={() => setSelectedProcess(item.name)}
+                >
+                  {item.name === ALL_PROCESSES ? "전체 공정" : item.name} {item.total}
+                </Button>
+              ))}
+            </div>
+            {selectedSummary && (
+              <p className="text-[14px] text-slate-500">
+                {selectedSummary.name}: 작업가능 {selectedSummary.available} · 진행중 {selectedSummary.inProgress} · 대기 {selectedSummary.pending}
+              </p>
+            )}
+          </div>
+        )}
         {/* WIP QR 스캔: 라벨의 WIP 로 작업지시를 찾아 목록에 표시한다(선택적 편의기능 — 검색·필터·수동 선택은 그대로) */}
         <div className="mt-3 border-t pt-3">
           <PopWipQrScan
@@ -474,6 +484,7 @@ export function WorkQueueClient({
               // 찾은 작업지시가 현재 필터·검색어에 가려지지 않도록 전체 보기로 돌린다
               setFilter("ALL")
               setKeyword("")
+              setSelectedProcess(ALL_PROCESSES)
               setQrWip(found)
             }}
             onClear={() => setQrWip(null)}
@@ -519,6 +530,12 @@ export function WorkQueueClient({
                       <span className="rounded-full bg-slate-100 px-3 py-1 text-[14px] font-medium text-slate-600">
                         {row.seq}공정
                       </span>
+                      <Link
+                        href={"/pop/production/" + row.operationId + (row.assignmentId ? "?assignmentId=" + row.assignmentId : "")}
+                        className="inline-flex min-h-[36px] items-center rounded-full border border-blue-300 px-4 text-[14px] font-medium text-blue-700 hover:bg-blue-50"
+                      >
+                        작업 화면 열기
+                      </Link>
                     </div>
                     <div>
                       <p className="font-mono text-[16px] font-semibold text-slate-700">
