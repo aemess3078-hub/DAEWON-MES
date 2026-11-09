@@ -1,10 +1,12 @@
 "use client"
 
 import Link from "next/link"
+import { usePathname, useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
-import { ChevronDown, ChevronRight, CheckCircle2, PackageMinus } from "lucide-react"
+import { ChevronDown, ChevronRight, CheckCircle2, PackageMinus, Search, X } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { IssueFormDialog } from "./issue-form-dialog"
 import { WipLabelButton } from "./wip-label-button"
 import {
@@ -23,6 +25,71 @@ interface MaterialIssueTableProps {
   warehouses: WarehouseStockOption[]
   tenantId: string
   initialWorkOrderId?: string
+  /** 현재 적용된 통합 검색어(서버가 정규화한 값) */
+  query?: string
+  /** 검색 조건과 같은 기준의 전체 결과 건수 */
+  total?: number
+  page?: number
+  totalPages?: number
+}
+
+const SEARCH_DEBOUNCE_MS = 300
+
+function pageHref(pathname: string, query: string, page: number): string {
+  const params = new URLSearchParams()
+  if (query) params.set("q", query)
+  if (page > 1) params.set("page", String(page))
+  const qs = params.toString()
+  return qs ? `${pathname}?${qs}` : pathname
+}
+
+/** 통합 검색창: 출고번호·작업지시번호·제조번호·품목코드·품목명·LOT 번호. 300ms 디바운스, 검색어가 바뀌면 1페이지로 이동. */
+function IssueSearchBar({ query, total }: { query: string; total: number }) {
+  const router = useRouter()
+  const pathname = usePathname()
+  const [value, setValue] = useState(query)
+
+  // 서버가 돌려준 검색어가 바뀌면(예: 전체 보기) 입력창도 맞춘다.
+  useEffect(() => {
+    setValue(query)
+  }, [query])
+
+  useEffect(() => {
+    const next = value.trim().replace(/\s+/g, " ")
+    if (next === query) return
+    const timer = setTimeout(() => {
+      router.replace(pageHref(pathname, next, 1), { scroll: false })
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [value, query, pathname, router])
+
+  return (
+    <div className="mb-4 flex items-center gap-3">
+      <div className="relative w-full max-w-md">
+        <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="출고번호, 작업지시번호, 제조번호, 품목, LOT 번호 검색"
+          className="h-10 pl-9 pr-9 text-[14px]"
+          aria-label="통합 검색"
+        />
+        {value && (
+          <button
+            type="button"
+            onClick={() => setValue("")}
+            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="검색어 지우기"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        )}
+      </div>
+      <span className="text-[14px] text-muted-foreground" data-testid="issue-search-total">
+        {query ? `검색 결과 ${total.toLocaleString()}건` : `전체 ${total.toLocaleString()}건`}
+      </span>
+    </div>
+  )
 }
 
 export function MaterialIssueTable({
@@ -30,7 +97,12 @@ export function MaterialIssueTable({
   warehouses,
   tenantId,
   initialWorkOrderId,
+  query = "",
+  total = data.length,
+  page = 1,
+  totalPages = 1,
 }: MaterialIssueTableProps) {
+  const pathname = usePathname()
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
   const [issuingOrder, setIssuingOrder] = useState<WorkOrderForIssue | null>(null)
   const [contextError, setContextError] = useState<string | null>(null)
@@ -63,6 +135,7 @@ export function MaterialIssueTable({
   if (data.length === 0) {
     return (
       <div className="space-y-4">
+        {(query || total > 0) && <IssueSearchBar query={query} total={total} />}
         {initialWorkOrderId && (
           <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] text-amber-800">
             <span>전달된 작업지시가 현재 원자재 출고 대상에 없습니다.</span>
@@ -73,10 +146,12 @@ export function MaterialIssueTable({
         )}
         <div className="rounded-lg border border-dashed py-16 text-center">
           <p className="text-[15px] text-muted-foreground">
-            원자재 출고 대상 작업지시가 없습니다.
+            {query ? "검색 결과가 없습니다." : "원자재 출고 대상 작업지시가 없습니다."}
           </p>
           <p className="mt-1 text-[13px] text-muted-foreground">
-            RELEASED 또는 IN_PROGRESS 상태의 작업지시가 표시됩니다.
+            {query
+              ? "검색어를 줄이거나 다른 검색어로 다시 찾아보세요."
+              : "RELEASED 또는 IN_PROGRESS 상태의 작업지시가 표시됩니다."}
           </p>
         </div>
       </div>
@@ -85,6 +160,7 @@ export function MaterialIssueTable({
 
   return (
     <>
+      <IssueSearchBar query={query} total={total} />
       {initialWorkOrderId && (
         <div className={`mb-4 flex items-center justify-between rounded-lg border px-4 py-3 text-[14px] ${
           contextError
@@ -231,6 +307,30 @@ export function MaterialIssueTable({
           })}
         </div>
       </div>
+
+      {totalPages > 1 && (
+        <div className="mt-4 flex items-center justify-between text-[14px]">
+          <span className="text-muted-foreground">
+            {page} / {totalPages} 페이지
+          </span>
+          <div className="flex gap-2">
+            {page > 1 ? (
+              <Button variant="outline" size="sm" className="h-8 text-[13px]" asChild>
+                <Link href={pageHref(pathname, query, page - 1)} scroll={false}>이전</Link>
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" className="h-8 text-[13px]" disabled>이전</Button>
+            )}
+            {page < totalPages ? (
+              <Button variant="outline" size="sm" className="h-8 text-[13px]" asChild>
+                <Link href={pageHref(pathname, query, page + 1)} scroll={false}>다음</Link>
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" className="h-8 text-[13px]" disabled>다음</Button>
+            )}
+          </div>
+        </div>
+      )}
 
       <IssueFormDialog
         open={!!issuingOrder}

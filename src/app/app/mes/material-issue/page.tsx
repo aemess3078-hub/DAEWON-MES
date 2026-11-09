@@ -2,28 +2,38 @@ export const dynamic = "force-dynamic"
 
 import { getTenantId } from "@/lib/auth"
 import {
-  getWorkOrdersForIssue,
+  searchWorkOrdersForIssue,
+  getMaterialIssueSummary,
   getWarehousesWithStock,
 } from "@/lib/actions/material-issue.actions"
 import { MaterialIssueTable } from "./material-issue-table"
 
 interface MaterialIssuePageProps {
-  searchParams: Promise<{ workOrderId?: string }>
+  searchParams: Promise<{ workOrderId?: string; q?: string; page?: string }>
 }
 
 export default async function MaterialIssuePage({ searchParams }: MaterialIssuePageProps) {
   const tenantId = await getTenantId()
   const params = await searchParams
 
-  const workOrders = await getWorkOrdersForIssue(tenantId)
+  // 서버 검색 + 페이지네이션(검색어·페이지는 URL 로 유지). 요약 배지는 검색과 무관한 전체 범위 기준.
+  const [result, summary] = await Promise.all([
+    searchWorkOrdersForIssue(tenantId, {
+      q: typeof params.q === "string" ? params.q : undefined,
+      page: Number(params.page),
+      includeWorkOrderId: params.workOrderId,
+    }),
+    getMaterialIssueSummary(tenantId),
+  ])
+  const workOrders = result.rows
 
   const itemIdSet = new Set(workOrders.flatMap((workOrder) => workOrder.materials.map((material) => material.itemId)))
   const itemIds = Array.from(itemIdSet)
   const warehouses = await getWarehousesWithStock(tenantId, itemIds)
 
-  const pendingCount = workOrders.filter((workOrder) => !workOrder.allIssued).length
-  const completedCount = workOrders.filter((workOrder) => workOrder.allIssued).length
-  const manufacturingNoCount = workOrders.filter((workOrder) => workOrder.manufacturingNo).length
+  const pendingCount = summary.pending
+  const completedCount = summary.completed
+  const manufacturingNoCount = summary.withManufacturingNo
 
   return (
     <div className="space-y-6">
@@ -50,6 +60,10 @@ export default async function MaterialIssuePage({ searchParams }: MaterialIssueP
           warehouses={warehouses}
           tenantId={tenantId}
           initialWorkOrderId={params.workOrderId}
+          query={result.query}
+          total={result.total}
+          page={result.page}
+          totalPages={result.totalPages}
         />
     </div>
   )
