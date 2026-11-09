@@ -8,7 +8,7 @@
 import { test, expect } from "@playwright/test"
 import { assertSafeE2eEnvironment, adminCredentials, developerCredentials } from "./guard"
 import { apiLogin } from "./support/perm-lib"
-import { loadData, logDetail, db, closeDb, num, call, findAction, warm, iso, addDays, rid, fingerprint, counts, diffCounts } from "./support/o2s-lib"
+import { loadData, logDetail, db, closeDb, num, call, findAction, warm, iso, addDays, rid, fingerprint, counts, diffCounts, legacyDraftSalesOrder } from "./support/o2s-lib"
 
 assertSafeE2eEnvironment()
 const D = loadData()
@@ -27,6 +27,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await closeDb() })
 
 async function mkSo(qty: number, status: "DRAFT" | "CONFIRMED" = "CONFIRMED") {
+  if (status === "DRAFT") return legacyDraftSalesOrder(D, qty) // 서버는 항상 확정으로 등록하므로 초안은 과거 데이터로 심는다
   const r = await call(admin, A("createSalesOrder", /sales-order\.actions/), [T, D.site.id, { customerId: D.customer.id, orderDate: iso(new Date()), deliveryDate: iso(addDays(10)), status, items: [{ itemId: D.items.fg.id, qty, unitPrice: 1, deliveryDate: iso(addDays(10)) }] }])
   expect(r.ok, r.error ?? "").toBe(true)
   const so = await db().salesOrder.findFirstOrThrow({ where: { tenantId: T }, orderBy: { createdAt: "desc" }, include: { items: true } })
@@ -101,7 +102,7 @@ test("[N18-03] 활성 생산계획이 있는 수주 취소/초안 복귀 거부 
     }
   }
   expect(await statusOf(so), "상태 불변").toBe("IN_PRODUCTION")
-  expect((await db().productionPlan.findUniqueOrThrow({ where: { id: p.planId } })).status, "계획은 연쇄 취소되지 않음").toBe("DRAFT")
+  expect((await db().productionPlan.findUniqueOrThrow({ where: { id: p.planId } })).status, "계획은 연쇄 취소되지 않음(생산의뢰 계획은 등록 즉시 확정)").toBe("CONFIRMED")
   // 확정 상태인데 활성 계획이 있는 불일치 데이터(과거 우회로 생긴 것): 초안 복귀도 거부
   const so3 = await mkSo(20)
   const p3 = await request(so3, 20)

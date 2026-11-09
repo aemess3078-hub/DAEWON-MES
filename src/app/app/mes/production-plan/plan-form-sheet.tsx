@@ -10,6 +10,7 @@ import { Info, Lock, Plus, ShoppingCart, Trash2 } from "lucide-react"
 import { Form, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { QuantityInput } from "@/components/ui/quantity-input"
 import { Textarea } from "@/components/ui/textarea"
 import {
@@ -145,7 +146,7 @@ export function PlanFormSheet({
       planType: PlanType.WEEKLY,
       startDate: "",
       endDate: "",
-      status: PlanStatus.DRAFT,
+      status: PlanStatus.CONFIRMED,
       note: "",
       items: [],
     },
@@ -180,7 +181,7 @@ export function PlanFormSheet({
           planType: PlanType.WEEKLY,
           startDate: "",
           endDate: "",
-          status: PlanStatus.DRAFT,
+          status: PlanStatus.CONFIRMED,
           note: "",
           items: [],
         })
@@ -434,7 +435,19 @@ export function PlanFormSheet({
                 )}
               />
 
-              {/* 상태: 직접 고를 수 있는 값은 초안·확정뿐 (진행중·완료는 작업지시·POP 실적이 바꾼다) */}
+              {/* 상태: 등록 화면은 선택 항목이 없다(등록하면 바로 확정). 수정 화면은 기존 초안 계획의 개별 확정 경로로 초안·확정만 고를 수 있다(진행중·완료는 작업지시·POP 실적이 바꾼다) */}
+              {mode === "create" ? (
+                <div className="space-y-1" data-testid="pf-status-auto">
+                  <div className="space-y-2">
+                    <Label className="text-[14px] font-medium">상태</Label>
+                    <div className="flex h-10 items-center gap-2 text-[14px] text-foreground">
+                      <span className="font-medium">확정</span>
+                      <span className="text-[13px] text-muted-foreground">등록하면 바로 확정되어 작업지시를 만들 수 있습니다</span>
+                    </div>
+                  </div>
+                  <p className="text-[13px] text-muted-foreground" data-testid="pf-status-guide">{AUTO_STATUS_GUIDE}</p>
+                </div>
+              ) : (
               <div className="space-y-1" data-testid="pf-status">
                 <FormSelectField
                   control={form.control}
@@ -444,6 +457,7 @@ export function PlanFormSheet({
                 />
                 <p className="text-[13px] text-muted-foreground" data-testid="pf-status-guide">{AUTO_STATUS_GUIDE}</p>
               </div>
+              )}
 
               {/* 시작일 */}
               <FormField

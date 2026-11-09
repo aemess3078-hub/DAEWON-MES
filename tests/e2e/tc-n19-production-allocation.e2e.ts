@@ -8,7 +8,7 @@
 import { test, expect } from "@playwright/test"
 import { assertSafeE2eEnvironment, adminCredentials, developerCredentials } from "./guard"
 import { apiLogin } from "./support/perm-lib"
-import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays, counts, diffCounts, stockOf, sumOnHand } from "./support/o2s-lib"
+import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays, counts, diffCounts, stockOf, sumOnHand, legacyDraftSalesOrder } from "./support/o2s-lib"
 
 assertSafeE2eEnvironment()
 const D = loadData()
@@ -30,6 +30,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await closeDb() })
 
 async function mkSo(qty: number, status: "CONFIRMED" | "DRAFT" = "CONFIRMED") {
+  if (status === "DRAFT") return legacyDraftSalesOrder(D, qty) // 서버는 항상 확정으로 등록하므로 초안은 과거 데이터로 심는다
   const r = await call(admin, A("createSalesOrder", /sales-order\.actions/), [T, D.site.id, { customerId: D.customer.id, orderDate: iso(new Date()), deliveryDate: iso(addDays(10)), status, items: [{ itemId: D.items.fg.id, qty, unitPrice: 1, deliveryDate: iso(addDays(10)) }] }])
   expect(r.ok, r.error ?? "").toBe(true)
   const so = await db().salesOrder.findFirstOrThrow({ where: { tenantId: T }, orderBy: { createdAt: "desc" }, include: { items: true } })
@@ -93,7 +94,7 @@ test("[N19-01][시나리오1] 수주 100 → 정상 생산 100: ORDER, 계획=�
   expect(ok(r), errOf(r)).toBe(true)
   const o = await rowsOf(so.itemId)
   expect(o.rows).toHaveLength(1)
-  expect(o.rows[0]).toMatchObject({ planned: 100, alloc: 100, kind: "ORDER", reason: null, approval: "NOT_REQUIRED", planStatus: "DRAFT" })
+  expect(o.rows[0]).toMatchObject({ planned: 100, alloc: 100, kind: "ORDER", reason: null, approval: "NOT_REQUIRED", planStatus: "CONFIRMED" })
   expect((await db().salesOrder.findUniqueOrThrow({ where: { id: so.id } })).status).toBe("IN_PRODUCTION")
 })
 

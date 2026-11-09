@@ -22,7 +22,7 @@ export const planFormSchema = z
     planType: z.nativeEnum(PlanType),
     startDate: z.string().min(1, "시작일을 선택하세요"),
     endDate: z.string().min(1, "종료일을 선택하세요"),
-    status: z.nativeEnum(PlanStatus).default(PlanStatus.DRAFT),
+    status: z.nativeEnum(PlanStatus).default(PlanStatus.CONFIRMED),
     note: z.string().optional().nullable(),
     items: z.array(planItemFormSchema).min(1, "품목을 최소 1개 이상 추가하세요"),
   })

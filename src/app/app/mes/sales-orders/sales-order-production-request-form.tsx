@@ -122,7 +122,7 @@ export function SalesOrderProductionRequestForm({ salesOrderId, orderStatus, ten
         </Badge>
       </div>
       <div className="text-[13px] text-amber-800">
-        수주 충당 수량과 여유 생산 수량을 직접 입력합니다. 실제 생산계획 수량은 둘의 합이며, 생산계획(초안)이 생성되고 수주 상태가 <strong>생산중</strong>으로 변경됩니다.
+        수주 충당 수량과 여유 생산 수량을 직접 입력합니다. 실제 생산계획 수량은 둘의 합이며, 생산계획이 확정 상태로 생성되어 바로 작업지시를 만들 수 있고, 수주 상태가 <strong>생산중</strong>으로 변경됩니다.
         기본 충당 수량은 기존 부족수량(참고값)을 추가 충당 가능량 안으로 맞춘 값이며, 추가 생산 검토 필요량은 자동으로 적용되지 않습니다.
       </div>
 

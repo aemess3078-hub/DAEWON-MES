@@ -5,6 +5,7 @@
 import assert from "node:assert/strict"
 import {
   CREATABLE_PLAN_STATUSES,
+  NEW_PLAN_STATUS,
   isPlanEditable,
   selectablePlanStatuses,
   validatePlanStatusChange,
@@ -18,7 +19,9 @@ let passed = 0
 function ok(value: unknown, label: string) { assert.ok(value, label); passed += 1; console.log(`PASS ${label}`) }
 
 // 상태 정책
-ok(CREATABLE_PLAN_STATUSES.join() === "DRAFT,CONFIRMED", "S1 새 계획은 초안·확정만")
+ok(CREATABLE_PLAN_STATUSES.join() === "DRAFT,CONFIRMED", "S1 등록 요청에서 받아 주는 값은 초안·확정뿐(구 클라이언트 호환)")
+ok(NEW_PLAN_STATUS === "CONFIRMED", "S1b 신규 생산계획은 항상 확정으로 저장")
+ok(validatePlanStatusForCreate(undefined) === null && validatePlanStatusForCreate(null) === null, "S1c 요청에 상태가 없어도 등록 허용")
 ok(validatePlanStatusForCreate("DRAFT") === null && validatePlanStatusForCreate("CONFIRMED") === null, "S2 초안·확정 등록 허용")
 for (const st of ["IN_PROGRESS", "COMPLETED", "CANCELLED"] as PlanStatusValue[]) ok(!!validatePlanStatusForCreate(st), `S3 ${st} 직접 등록 거부`)
 ok(/자동으로 바뀝니다/.test(validatePlanStatusForCreate("IN_PROGRESS") ?? ""), "S4 거부 사유에 자동 변경 안내")
@@ -29,7 +32,7 @@ ok(/작업지시가 있는/.test(validatePlanStatusChange("CONFIRMED", "DRAFT", 
 for (const from of ["DRAFT", "CONFIRMED"] as PlanStatusValue[]) for (const to of ["IN_PROGRESS", "COMPLETED"] as PlanStatusValue[]) ok(!!validatePlanStatusChange(from, to, noWo), `T4 ${from}→${to} 직접 지정 거부`)
 for (const from of ["IN_PROGRESS", "COMPLETED", "CANCELLED"] as PlanStatusValue[]) ok(!!validatePlanStatusChange(from, from, noWo) && !isPlanEditable(from), `T5 ${from} 는 수정 자체 불가`)
 ok(!!validatePlanStatusChange("DRAFT", "CANCELLED", noWo), "T6 취소는 취소 기능으로만")
-ok(selectablePlanStatuses("DRAFT").join() === "DRAFT,CONFIRMED" && selectablePlanStatuses("CONFIRMED").join() === "CONFIRMED,DRAFT" && selectablePlanStatuses(null).join() === "DRAFT,CONFIRMED" && selectablePlanStatuses("IN_PROGRESS").join() === "IN_PROGRESS", "T7 상태 선택지")
+ok(selectablePlanStatuses("DRAFT").join() === "DRAFT,CONFIRMED" && selectablePlanStatuses("CONFIRMED").join() === "CONFIRMED,DRAFT" && selectablePlanStatuses(null).join() === "CONFIRMED" && selectablePlanStatuses("IN_PROGRESS").join() === "IN_PROGRESS", "T7 상태 선택지(등록 화면은 확정 하나, 수정 화면은 기존 초안 개별 확정 경로 유지)")
 
 // 화면 입력 규칙
 const ev = (o: Partial<Parameters<typeof evaluateLinkedRow>[0]>) => evaluateLinkedRow({ allocatedQty: 60, extraQty: 0, extraReason: "", maxAllocatable: 100, ...o })

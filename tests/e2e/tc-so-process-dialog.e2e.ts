@@ -228,7 +228,7 @@ test("[SD-04] 화면 — 충당 60 + 여유 10(사유) 생산의뢰 성공: 생�
   const rows = await rowsOf(so.itemId)
   expect(rows.length).toBe(2)
   const created = rows.find((r) => r.plan.planNo === planNo)!
-  expect([num(created.plannedQty), num(created.allocatedQty), created.productionKind, created.extraReason, created.extraApprovalStatus, created.plan.status]).toEqual([70, 60, "ORDER_EXTRA", "가공 불량 대비", "NOT_REQUIRED", "DRAFT"])
+  expect([num(created.plannedQty), num(created.allocatedQty), created.productionKind, created.extraReason, created.extraApprovalStatus, created.plan.status]).toEqual([70, 60, "ORDER_EXTRA", "가공 불량 대비", "NOT_REQUIRED", "CONFIRMED"])
   expect((await db().salesOrder.findUniqueOrThrow({ where: { id: so.id } })).status).toBe("IN_PRODUCTION")
   // 성공 후 화면 수량이 서버 값으로 갱신(충당 100, 미충당 0, 계획 110, 여유 10)
   const v = await expectScreenMatchesServer(page, so)

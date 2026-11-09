@@ -6,7 +6,7 @@
 import { test, expect } from "@playwright/test"
 import { assertSafeE2eEnvironment, adminCredentials, developerCredentials } from "./guard"
 import { apiLogin } from "./support/perm-lib"
-import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays, counts, diffCounts } from "./support/o2s-lib"
+import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays, counts, diffCounts, legacyDraftSalesOrder, legacyDraftStockPlan } from "./support/o2s-lib"
 
 assertSafeE2eEnvironment()
 const D = loadData()
@@ -28,6 +28,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await closeDb() })
 
 async function mkSo(qty: number, status: "CONFIRMED" | "DRAFT" = "CONFIRMED") {
+  if (status === "DRAFT") return legacyDraftSalesOrder(D, qty) // 서버는 항상 확정으로 등록하므로 초안은 과거 데이터로 심는다
   const r = await call(admin, A("createSalesOrder", /sales-order\.actions/), [T, D.site.id, { customerId: D.customer.id, orderDate: iso(new Date()), deliveryDate: iso(addDays(10)), status, items: [{ itemId: D.items.fg.id, qty, unitPrice: 1, deliveryDate: iso(addDays(10)) }] }])
   expect(r.ok, r.error ?? "").toBe(true)
   const so = await db().salesOrder.findFirstOrThrow({ where: { tenantId: T }, orderBy: { createdAt: "desc" }, include: { items: true } })
@@ -47,7 +48,7 @@ async function rawUpdate(planId: string, over: { status?: string; items?: Record
   const items = over.items ?? p.items.map((r) => ({ productionPlanItemId: r.id, itemId: r.itemId, bomId: r.bomId ?? D.bom.id, routingId: r.routingId ?? D.routing.id, plannedQty: num(r.plannedQty), ...(r.salesOrderItemId ? { salesOrderItemId: r.salesOrderItemId } : {}) }))
   return call(admin, A("updatePlan", /production-plan\.actions/), [planId, { siteId: p.siteId, planNo: p.planNo, planType: p.planType, startDate: "2026-11-02", endDate: "2026-11-30", status: over.status ?? p.status, note: p.note, items }])
 }
-async function createStockPlan(qty: number, status = "DRAFT", itemId = D.items.fg.id) {
+async function createStockPlan(qty: number, status = "CONFIRMED", itemId = D.items.fg.id) {
   const tag = `E2E-PC stock ${RUN}-${++seq}`
   const r = await call(admin, A("createPlan", /production-plan\.actions/), [{ siteId: D.site.id, planNo: "", planType: "DAILY", startDate: "2026-11-02", endDate: "2026-11-30", status, note: tag, items: [{ itemId, bomId: itemId === D.items.fg.id ? D.bom.id : null, routingId: itemId === D.items.fg.id ? D.routing.id : null, plannedQty: qty }] }, T])
   return { r, find: () => db().productionPlan.findFirstOrThrow({ where: { tenantId: T, note: tag }, include: { items: true } }) }
@@ -95,7 +96,7 @@ async function runProduction(wo: Awaited<ReturnType<typeof createWo>>, qty: numb
 }
 
 // ───────────────────────── PS-01 등록 상태 ─────────────────────────
-test("[PS-01] 등록 — 새 생산계획은 초안·확정으로만 등록, 진행중·완료·취소 지정은 거부(DB 불변)", async () => {
+test("[PS-01] 등록 — 새 생산계획은 요청 값과 무관하게 항상 확정으로 저장(초안 요청도 확정), 진행중·완료·취소 지정은 거부(DB 불변)", async () => {
   const before = await counts()
   for (const st of ["IN_PROGRESS", "COMPLETED", "CANCELLED"]) {
     const { r } = await createStockPlan(10, st)
@@ -108,15 +109,13 @@ test("[PS-01] 등록 — 새 생산계획은 초안·확정으로만 등록, 진
     const { r, find } = await createStockPlan(10, st)
     expect(ok(r), errOf(r)).toBe(true)
     const p = await find()
-    expect([p.status, p.items[0].productionKind, num(p.items[0].allocatedQty), p.items[0].salesOrderItemId]).toEqual([st, "STOCK", 0, null])
+    expect([p.status, p.items[0].productionKind, num(p.items[0].allocatedQty), p.items[0].salesOrderItemId], `요청 ${st} → 확정 저장`).toEqual(["CONFIRMED", "STOCK", 0, null])
   }
 })
 
 // ───────────────────────── PS-02 수정 전이 ─────────────────────────
-test("[PS-02] 수정 — 수동 전이는 초안↔확정만: 초안→진행중·완료·취소 거부, 초안→확정·확정→초안 허용, 작업지시가 있는 확정 계획은 초안 복귀 거부", async () => {
-  const { r, find } = await createStockPlan(40)
-  expect(ok(r)).toBe(true)
-  const p = await find()
+test("[PS-02] 수정 — 수동 전이는 초안↔확정만: (기존 초안 데이터) 초안→진행중·완료·취소 거부, 초안→확정·확정→초안 허용, 작업지시가 있는 확정 계획은 초안 복귀 거부", async () => {
+  const p = await legacyDraftStockPlan(D, 40, `E2E-PC legacy draft ${RUN}-${++seq}`) // 서버는 항상 확정으로 등록하므로 초안은 과거 데이터로 심는다
   const before = await counts()
   for (const st of ["IN_PROGRESS", "COMPLETED", "CANCELLED"]) {
     const u = await rawUpdate(p.id, { status: st })
@@ -224,12 +223,12 @@ test("[PS-06] 비고 수정 — 생산계획 비고를 고쳐도 생산의뢰 �
 })
 
 // ───────────────────────── PS-05 수주·계획 상태 관계(현행 동작 기록) ─────────────────────────
-test("[PS-05] 수주 상태와 생산계획 상태의 현행 관계 기록 — 생산의뢰 시 수주 생산중·계획 초안, 계획 확정·작업지시·실적 시작은 수주 상태를 바꾸지 않고, 계획 취소는 수주를 확정으로 되돌림, 초안 수주도 생산의뢰하면 생산중", async () => {
+test("[PS-05] 수주 상태와 생산계획 상태의 현행 관계 기록 — 생산의뢰 시 수주 생산중·계획 확정(등록 즉시), 작업지시·실적 시작은 수주 상태를 바꾸지 않고, 계획 취소는 수주를 확정으로 되돌림, 기존 초안 수주도 생산의뢰하면 생산중", async () => {
   const so = await mkSo(100)
   const row = await apiRequest(so, 100)
   const soStatus = async () => (await db().salesOrder.findUniqueOrThrow({ where: { id: so.id } })).status
   const trace: Record<string, string> = { afterRequest: `${row.plan.status}/${await soStatus()}` }
-  expect(trace.afterRequest).toBe("DRAFT/IN_PRODUCTION")
+  expect(trace.afterRequest).toBe("CONFIRMED/IN_PRODUCTION")
   expect(ok(await rawUpdate(row.planId, { status: "CONFIRMED" }))).toBe(true)
   trace.afterConfirm = `${(await planOf(row.planId)).status}/${await soStatus()}`
   const wo = await createWo(row.id, 100, "PS05")

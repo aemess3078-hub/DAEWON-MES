@@ -7,7 +7,7 @@
 import { test, expect } from "@playwright/test"
 import { assertSafeE2eEnvironment, adminCredentials, developerCredentials } from "./guard"
 import { apiLogin } from "./support/perm-lib"
-import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays, counts, diffCounts } from "./support/o2s-lib"
+import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays, counts, diffCounts, legacyDraftSalesOrder } from "./support/o2s-lib"
 
 assertSafeE2eEnvironment()
 const D = loadData()
@@ -25,6 +25,7 @@ test.beforeAll(async () => {
 test.afterAll(async () => { await closeDb() })
 
 async function mkSo(qty: number, status: "CONFIRMED" | "DRAFT" = "CONFIRMED") {
+  if (status === "DRAFT") return legacyDraftSalesOrder(D, qty) // 서버는 항상 확정으로 등록하므로 초안은 과거 데이터로 심는다
   const r = await call(admin, A("createSalesOrder", /sales-order\.actions/), [T, D.site.id, { customerId: D.customer.id, orderDate: iso(new Date()), deliveryDate: iso(addDays(10)), status, items: [{ itemId: D.items.fg.id, qty, unitPrice: 1, deliveryDate: iso(addDays(10)) }] }])
   expect(r.ok, r.error ?? "").toBe(true)
   const so = await db().salesOrder.findFirstOrThrow({ where: { tenantId: T }, orderBy: { createdAt: "desc" }, include: { items: true } })
@@ -42,14 +43,14 @@ async function planned(soItemId: string) {
 }
 const ok = (r: { ok: boolean; value: any }) => r.ok && r.value?.ok !== false
 
-test("[N14-01] 최초 생산의뢰 — 수주 100 에 100 의뢰: 계획(초안) 1건·수주 품목 연결·수량 일치·수주 상태 IN_PRODUCTION", async () => {
+test("[N14-01] 최초 생산의뢰 — 수주 100 에 100 의뢰: 계획(확정 — 등록 즉시 확정) 1건·수주 품목 연결·수량 일치·수주 상태 IN_PRODUCTION", async () => {
   const so = await mkSo(100)
   const r = await request(so, 100)
   expect(ok(r), r.value?.error ?? r.error ?? "").toBe(true)
   const p = await planned(so.itemId)
   expect([p.active, p.activePlans]).toEqual([100, 1])
   const plan = p.rows[0].plan
-  expect(plan.status).toBe("DRAFT")
+  expect(plan.status).toBe("CONFIRMED")
   expect(plan.planNo).toMatch(/^PP-REQ-\d{8}-\d{3}$/)
   expect((await db().salesOrder.findUniqueOrThrow({ where: { id: so.id } })).status).toBe("IN_PRODUCTION")
 })

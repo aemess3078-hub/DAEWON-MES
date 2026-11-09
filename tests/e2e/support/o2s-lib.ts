@@ -117,3 +117,35 @@ export async function fingerprint(): Promise<string> {
   const rows = await db().$queryRawUnsafe<{ s: string }[]>(`select coalesce(sum("qtyOnHand"),0)::text || '/' || coalesce(sum("qtyAvailable"),0)::text as s from "InventoryBalance"`)
   return JSON.stringify([await counts(), rows[0].s])
 }
+
+// ───────── 기존 초안(DRAFT) 데이터 픽스처 ─────────
+// 수주·생산계획 등록 서버 액션은 이제 항상 CONFIRMED 로 저장한다(초안 단계 제거).
+// "과거에 만들어진 초안"은 서버 액션으로 만들 수 없으므로 DB 에 직접 심어 기존 초안 데이터의 조회·개별 확정 경로를 시험한다.
+type LegacyData = { tenantId: string; site: { id: string }; customer: { id: string }; items: { fg: { id: string } }; bom: { id: string }; routing: { id: string } }
+let legacySeq = 0
+const legacyTag = () => `${Date.now().toString(36).toUpperCase()}${(++legacySeq).toString(36).toUpperCase()}`
+
+/** 과거 데이터처럼 초안(DRAFT) 상태의 수주 한 건(품목 1줄)을 DB 에 직접 만든다 */
+export async function legacyDraftSalesOrder(D: LegacyData, qty: number) {
+  const so = await db().salesOrder.create({
+    data: {
+      tenantId: D.tenantId, siteId: D.site.id, customerId: D.customer.id, orderNo: `E2E-LEG-SO-${legacyTag()}`,
+      orderDate: new Date(), deliveryDate: addDays(10), status: "DRAFT",
+      items: { create: [{ itemId: D.items.fg.id, qty, unitPrice: 1, deliveryDate: addDays(10) }] },
+    },
+    include: { items: true },
+  })
+  return { id: so.id, no: so.orderNo, itemId: so.items[0].id }
+}
+
+/** 과거 데이터처럼 초안(DRAFT) 상태의 재고 생산계획 한 건(품목 1줄)을 DB 에 직접 만든다 */
+export async function legacyDraftStockPlan(D: LegacyData, qty: number, note: string) {
+  return db().productionPlan.create({
+    data: {
+      tenantId: D.tenantId, siteId: D.site.id, planNo: `E2E-LEG-PP-${legacyTag()}`, planType: "DAILY", status: "DRAFT",
+      startDate: new Date("2026-11-02"), endDate: new Date("2026-11-30"), note,
+      items: { create: [{ itemId: D.items.fg.id, bomId: D.bom.id, routingId: D.routing.id, plannedQty: qty, productionKind: "STOCK", allocatedQty: 0 }] },
+    },
+    include: { items: true },
+  })
+}
