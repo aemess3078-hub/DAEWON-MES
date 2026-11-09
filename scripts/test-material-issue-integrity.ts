@@ -640,11 +640,12 @@ async function main() {
   ok(Array.isArray(emptyList) && emptyList.length === 0, "F5 인증 실패(오류)와 조회 결과 없음(빈 배열)은 구분된다")
   resetState()
   ok((await rejection(() => issue.getWarehousesWithStock("t1", null as never))) === "잘못된 요청입니다." && (await issue.getWarehousesWithStock("t1", [])).length === 1, "F6 잘못된 itemIds 는 오류, 빈 배열은 창고 목록만 반환(기존 동작)")
-  const woFn = issueSrc.slice(issueSrc.indexOf("export async function getWorkOrdersForIssue"), issueSrc.indexOf("// ─── 창고 목록"))
+  const woFn = issueSrc.slice(issueSrc.indexOf("export async function getWorkOrdersForIssue"), issueSrc.indexOf("export type WorkOrderIssuePage"))
+  const searchFn = issueSrc.slice(issueSrc.indexOf("export async function searchWorkOrdersForIssue"), issueSrc.indexOf("async function buildIssueRows"))
   const whFn = issueSrc.slice(issueSrc.indexOf("export async function getWarehousesWithStock"), issueSrc.indexOf("// ─── LOT별 재고 조회"))
-  ok((woFn.match(/clientTenantId/g) ?? []).length === 2 && (whFn.match(/clientTenantId/g) ?? []).length === 2 && woFn.includes("requireMaterialIssueReader(clientTenantId)") && whFn.includes("requireMaterialIssueReader(clientTenantId)"), "F7 소스: 클라이언트 tenantId 는 인증 확인에만 쓰이고(선언 + 확인 호출 각 1회) 조회 쿼리는 세션 tenant 를 쓴다")
+  ok((woFn.match(/clientTenantId/g) ?? []).length === 2 && (whFn.match(/clientTenantId/g) ?? []).length === 2 && woFn.includes("requireMaterialIssueReader(clientTenantId)") && whFn.includes("requireMaterialIssueReader(clientTenantId)") && (searchFn.match(/clientTenantId/g) ?? []).length === 4 && searchFn.includes("requireMaterialIssueReader(clientTenantId)") && searchFn.includes("tenantId,") , "F7 소스: 클라이언트 tenantId 는 인증 확인에만 쓰이고(선언 + 확인 호출 각 1회) 조회 쿼리는 세션 tenant 를 쓴다")
   const layoutSrc = read("src/app/app/layout.tsx")
-  ok(layoutSrc.includes("canReadPath") && layoutSrc.includes("redirect('/login')") && read("src/app/app/mes/material-issue/page.tsx").includes("getWorkOrdersForIssue(tenantId)") && read("src/app/app/mes/material-issue/page.tsx").includes("getWarehousesWithStock(tenantId, itemIds)"), "F8 호출처는 자재출고 페이지(서버 컴포넌트) 하나뿐이며 페이지 호출 방식·layout 의 로그인/메뉴 권한 확인은 그대로 — POP·키오스크 경로의 호출 없음")
+  ok(layoutSrc.includes("canReadPath") && layoutSrc.includes("redirect('/login')") && read("src/app/app/mes/material-issue/page.tsx").includes("searchWorkOrdersForIssue(tenantId,") && read("src/app/app/mes/material-issue/page.tsx").includes("getWarehousesWithStock(tenantId, itemIds)"), "F8 호출처는 자재출고 페이지(서버 컴포넌트) 하나뿐이며 페이지 호출 방식·layout 의 로그인/메뉴 권한 확인은 그대로 — POP·키오스크 경로의 호출 없음")
   ok(!/getWorkOrdersForIssue|getWarehousesWithStock/.test(read("src/app/pop/work-select/page.tsx") + read("src/lib/actions/pop.actions.ts")), "F9 POP 경로는 이 조회 액션을 쓰지 않는다(별도 인증 체계 영향 없음)")
 
   // ═══ G. 자재예약 ID 소속 검증 ═════════════════════════════════════════════

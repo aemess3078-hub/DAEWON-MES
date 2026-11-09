@@ -3,7 +3,7 @@
 import { prisma } from "@/lib/db/prisma"
 import { requireRole } from "@/lib/auth"
 import { revalidatePath } from "next/cache"
-import type { WipUnit } from "@prisma/client"
+import type { Prisma, WipUnit } from "@prisma/client"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import {
   lockLotForShare,
@@ -35,6 +35,13 @@ import {
   requiredScaledByItem,
   type NormalizedIssueLine,
 } from "@/lib/material-issue/issue-quantity"
+import {
+  buildIssueSearchWhere,
+  buildIssueTxSearchWhere,
+  normalizeIssuePage,
+  normalizeIssuePageSize,
+  parseIssueSearchTerms,
+} from "@/lib/material-issue/issue-search"
 
 const RESERVATION_MISMATCH_MESSAGE = "자재예약 정보가 올바르지 않습니다. 화면을 새로고침한 뒤 다시 시도해 주세요."
 
@@ -109,6 +116,30 @@ export type IssueMaterialInput = {
 
 // ─── 자재출고 대상 WorkOrder 조회 ─────────────────────────────────────────────
 
+const ISSUE_WORK_ORDER_STATUSES: ("RELEASED" | "IN_PROGRESS")[] = ["RELEASED", "IN_PROGRESS"]
+
+const ISSUE_WORK_ORDER_INCLUDE = {
+  item: { select: { id: true, code: true, name: true } },
+  site: { select: { id: true, name: true } },
+  bom: {
+    include: {
+      bomItems: {
+        include: {
+          componentItem: {
+            select: { id: true, code: true, name: true, uom: true, spec: true, isLotTracked: true, itemType: true },
+          },
+        },
+        orderBy: { seq: "asc" },
+      },
+    },
+  },
+  materialReservations: true,
+} satisfies Prisma.WorkOrderInclude
+
+type IssueWorkOrderRecord = Prisma.WorkOrderGetPayload<{ include: typeof ISSUE_WORK_ORDER_INCLUDE }>
+
+const ISSUE_WORK_ORDER_ORDER_BY: Prisma.WorkOrderOrderByWithRelationInput[] = [{ dueDate: "asc" }, { orderNo: "asc" }]
+
 export async function getWorkOrdersForIssue(
   clientTenantId: string
 ): Promise<WorkOrderForIssue[]> {
@@ -117,28 +148,115 @@ export async function getWorkOrdersForIssue(
   const workOrders = await prisma.workOrder.findMany({
     where: {
       tenantId,
-      status: { in: ["RELEASED", "IN_PROGRESS"] },
+      status: { in: ISSUE_WORK_ORDER_STATUSES },
     },
-    include: {
-      item: { select: { id: true, code: true, name: true } },
-      site: { select: { id: true, name: true } },
-      bom: {
-        include: {
-          bomItems: {
-            include: {
-              componentItem: {
-                select: { id: true, code: true, name: true, uom: true, spec: true, isLotTracked: true, itemType: true },
-              },
-            },
-            orderBy: { seq: "asc" },
-          },
-        },
-      },
-      materialReservations: true,
-    },
-    orderBy: [{ dueDate: "asc" }, { orderNo: "asc" }],
+    include: ISSUE_WORK_ORDER_INCLUDE,
+    orderBy: ISSUE_WORK_ORDER_ORDER_BY,
+  })
+  return buildIssueRows(tenantId, workOrders)
+}
+
+export type WorkOrderIssuePage = {
+  rows: WorkOrderForIssue[]
+  /** 검색 조건과 같은 기준의 전체 결과 건수(페이지 크기와 무관). */
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
+  query: string
+}
+
+/**
+ * 자재출고현황 통합 검색 + 서버 페이지네이션. 기존 범위(tenant · 릴리즈/진행중 작업지시)와 정렬(납기, 작업지시번호)은 그대로이고,
+ * 검색은 그 범위에 AND 로 적용된다. 읽기 전용 — 출고·취소·재고에는 관여하지 않는다.
+ * includeWorkOrderId: 다른 화면에서 작업지시를 지정해 넘어온 경우, 검색·페이지와 무관하게 그 작업지시를 목록에 포함한다(범위 안일 때만).
+ */
+export async function searchWorkOrdersForIssue(
+  clientTenantId: string,
+  input: { q?: string; page?: number; pageSize?: number; includeWorkOrderId?: string } = {},
+): Promise<WorkOrderIssuePage> {
+  const { tenantId } = await requireMaterialIssueReader(clientTenantId)
+  const terms = parseIssueSearchTerms(input.q)
+  const pageSize = normalizeIssuePageSize(input.pageSize)
+  const requestedPage = normalizeIssuePage(input.page)
+
+  // 출고번호·LOT 번호는 검색어별로 일치하는 작업지시 id 를 먼저 구한다(중복 id 는 Set 으로 제거).
+  const issueMatchedIds = new Map<string, string[]>()
+  for (const term of terms) {
+    const txs = await prisma.inventoryTransaction.findMany({
+      where: buildIssueTxSearchWhere(tenantId, term),
+      select: { refId: true },
+      distinct: ["refId"],
+    })
+    issueMatchedIds.set(term.toLowerCase(), Array.from(new Set(txs.map((t) => t.refId).filter((id): id is string => !!id))))
+  }
+
+  const searchWhere = buildIssueSearchWhere(terms, issueMatchedIds)
+  const where: Prisma.WorkOrderWhereInput = {
+    tenantId,
+    status: { in: ISSUE_WORK_ORDER_STATUSES },
+    ...(searchWhere ? { AND: [searchWhere] } : {}),
+  }
+
+  const total = await prisma.workOrder.count({ where })
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const page = Math.min(requestedPage, totalPages)
+  const workOrders = await prisma.workOrder.findMany({
+    where,
+    include: ISSUE_WORK_ORDER_INCLUDE,
+    orderBy: ISSUE_WORK_ORDER_ORDER_BY,
+    skip: (page - 1) * pageSize,
+    take: pageSize,
   })
 
+  const includeId = typeof input.includeWorkOrderId === "string" ? input.includeWorkOrderId.trim() : ""
+  if (includeId && !workOrders.some((wo) => wo.id === includeId)) {
+    const extra = await prisma.workOrder.findFirst({
+      where: { id: includeId, tenantId, status: { in: ISSUE_WORK_ORDER_STATUSES } },
+      include: ISSUE_WORK_ORDER_INCLUDE,
+    })
+    if (extra) workOrders.unshift(extra)
+  }
+
+  return { rows: await buildIssueRows(tenantId, workOrders), total, page, pageSize, totalPages, query: terms.join(" ") }
+}
+
+/** 화면 상단 요약(출고 대기/완료/제조번호 보유). 검색·페이지와 무관한 전체 범위 기준이며 필요한 열만 읽는다. */
+export async function getMaterialIssueSummary(
+  clientTenantId: string,
+): Promise<{ pending: number; completed: number; withManufacturingNo: number }> {
+  const { tenantId } = await requireMaterialIssueReader(clientTenantId)
+  const rows = await prisma.workOrder.findMany({
+    where: { tenantId, status: { in: ISSUE_WORK_ORDER_STATUSES } },
+    select: {
+      plannedQty: true,
+      manufacturingNo: true,
+      bom: { select: { bomItems: { select: { componentItemId: true, qtyPer: true, scrapRate: true } } } },
+      materialReservations: { select: { itemId: true, issuedQty: true } },
+    },
+  })
+  let pending = 0
+  let completed = 0
+  let withManufacturingNo = 0
+  for (const wo of rows) {
+    const plannedQty = Number(wo.plannedQty)
+    const items = wo.bom.bomItems
+    // getWorkOrdersForIssue 의 allIssued 와 같은 판정(필요량 계산식 공유)
+    const allIssued =
+      items.length > 0 &&
+      items.every((bi) => {
+        const required = computeRequiredMaterialQty(bi.qtyPer, plannedQty, bi.scrapRate)
+        const reservation = wo.materialReservations.find((r) => r.itemId === bi.componentItemId)
+        return Math.max(0, required - (reservation ? Number(reservation.issuedQty) : 0)) <= 0
+      })
+    if (allIssued) completed += 1
+    else pending += 1
+    if (wo.manufacturingNo) withManufacturingNo += 1
+  }
+  return { pending, completed, withManufacturingNo }
+}
+
+async function buildIssueRows(tenantId: string, workOrders: IssueWorkOrderRecord[]): Promise<WorkOrderForIssue[]> {
   // 전체 필요 품목 ID 수집 → 재고 일괄 조회
   const allItemIdSet = new Set(
     workOrders.flatMap((wo) => wo.bom.bomItems.map((bi) => bi.componentItemId))
