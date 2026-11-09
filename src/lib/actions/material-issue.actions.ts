@@ -36,8 +36,10 @@ import {
   type NormalizedIssueLine,
 } from "@/lib/material-issue/issue-quantity"
 import {
-  buildIssueSearchWhere,
-  buildIssueTxSearchWhere,
+  findIssueHistoryPage,
+  findIssueWorkOrderPage,
+  kstDayRangeUtc,
+  normalizeIssueDate,
   normalizeIssuePage,
   normalizeIssuePageSize,
   parseIssueSearchTerms,
@@ -180,34 +182,23 @@ export async function searchWorkOrdersForIssue(
   const pageSize = normalizeIssuePageSize(input.pageSize)
   const requestedPage = normalizeIssuePage(input.page)
 
-  // 출고번호·LOT 번호는 검색어별로 일치하는 작업지시 id 를 먼저 구한다(중복 id 는 Set 으로 제거).
-  const issueMatchedIds = new Map<string, string[]>()
-  for (const term of terms) {
-    const txs = await prisma.inventoryTransaction.findMany({
-      where: buildIssueTxSearchWhere(tenantId, term),
-      select: { refId: true },
-      distinct: ["refId"],
-    })
-    issueMatchedIds.set(term.toLowerCase(), Array.from(new Set(txs.map((t) => t.refId).filter((id): id is string => !!id))))
-  }
-
-  const searchWhere = buildIssueSearchWhere(terms, issueMatchedIds)
-  const where: Prisma.WorkOrderWhereInput = {
+  // 검색·건수·페이지네이션은 DB 에서(검색어는 LIKE 가 아니라 strpos 로 비교 — 특수문자가 와일드카드로 해석되지 않는다).
+  const found = await findIssueWorkOrderPage(prisma, {
     tenantId,
-    status: { in: ISSUE_WORK_ORDER_STATUSES },
-    ...(searchWhere ? { AND: [searchWhere] } : {}),
-  }
-
-  const total = await prisma.workOrder.count({ where })
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
-  const page = Math.min(requestedPage, totalPages)
-  const workOrders = await prisma.workOrder.findMany({
-    where,
-    include: ISSUE_WORK_ORDER_INCLUDE,
-    orderBy: ISSUE_WORK_ORDER_ORDER_BY,
-    skip: (page - 1) * pageSize,
-    take: pageSize,
+    statuses: ISSUE_WORK_ORDER_STATUSES,
+    terms,
+    page: requestedPage,
+    pageSize,
   })
+  const { total, page, totalPages } = found
+  const fetched = found.ids.length
+    ? await prisma.workOrder.findMany({
+        where: { tenantId, id: { in: found.ids } },
+        include: ISSUE_WORK_ORDER_INCLUDE,
+      })
+    : []
+  const byId = new Map(fetched.map((wo) => [wo.id, wo]))
+  const workOrders = found.ids.map((id) => byId.get(id)).filter((wo): wo is IssueWorkOrderRecord => !!wo)
 
   const includeId = typeof input.includeWorkOrderId === "string" ? input.includeWorkOrderId.trim() : ""
   if (includeId && !workOrders.some((wo) => wo.id === includeId)) {
