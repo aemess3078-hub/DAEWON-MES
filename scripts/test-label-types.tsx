@@ -109,6 +109,13 @@ async function main() {
   const noMfg = spec.computeLabelLayout({ ...wip, manufacturingNo: null })
   ok(noMfg.last === null && noMfg.fits, "B8 제조번호가 없으면 해당 줄 생략(임의 값 없음)")
 
+  const fgLabeled = { ...fg, labelType: "FG_LOT" as const, manufacturingNo: "MFG-26-0001" }
+  const fl = spec.computeLabelLayout(fgLabeled)
+  ok(fl.fits && fl.mfg?.text === "제조번호 MFG-26-0001" && fl.last?.text === "500 EA".replace(/^/, "수량 ") && fl.lot?.lines[0].startsWith("LOT "), "B9 완제품 라벨: 제조번호 줄 추가 · LOT/수량 유지 · 29mm 안")
+  const flLong = spec.computeLabelLayout({ ...fgLabeled, manufacturingNo: "M".repeat(60) })
+  ok(flLong.fits && !!flLong.mfg && spec.estimateTextWidthPt(flLong.mfg.text, flLong.mfg.fontPt, true) <= flLong.textWidthMm * spec.MM_TO_PT, "B10 긴 제조번호도 폭·높이 안(말줄임)")
+  ok(spec.computeLabelLayout({ ...fg, labelType: "FG_LOT" as const }).mfg === null && spec.computeLabelLayout({ ...raw, manufacturingNo: "X-1" }).mfg === null, "B11 제조번호 없으면 줄 생략 · 원자재 라벨엔 표시 안 함(기존 유지)")
+
   // ─── C. 출력 가능 여부 ──────────────────────────────────────────────────
   const base = { itemCode: "A-1", itemName: "품목" }
   ok(!spec.getLabelBlock({ ...base, kind: "WIP_QR", labelType: "WIP", wipId: "" }).printable, "C1 WIP 식별값이 없으면 출력 불가(임의 QR 없음)")

@@ -320,7 +320,7 @@ function testSourceStructure() {
   const woForm = read("src", "app", "app", "mes", "work-orders", "work-order-form-sheet.tsx")
   ok(/const result = await createPurchaseOrder\([\s\S]*?if \(!result\.success\)/.test(poForm), "D4 발주 폼이 반환 결과(success)를 처리")
   ok(/const result = await createWorkOrder\([\s\S]*?if \(!result\.success\)/.test(woForm), "D4 작업지시 폼이 반환 결과를 처리")
-  ok(/isCnsLotRuleAllowed\(\)/.test(woForm) && /제조번호를 직접 입력해 주세요/.test(woForm), "D4 대원정밀: 제조번호 미입력 시 자동 발행이라고 안내하지 않고 직접 입력을 요구")
+  ok(!/isCnsLotRuleAllowed\(\)/.test(woForm) && /제조번호 규칙으로 자동 발행/.test(woForm) && /직접 입력도 가능/.test(woForm), "D4 제조번호: 미입력 시 제조번호 규칙으로 자동 발행, 직접 입력도 가능(수동 입력 유지)")
 
   const rcvDialog = read("src", "app", "app", "mes", "purchase-orders", "receiving-dialog.tsx")
   ok(/createReceivingInspection\(/.test(rcvDialog) && /runReceivingBatch\(/.test(rcvDialog), "D5 발주 입고 다이얼로그가 실패 결과를 무시하지 않음(성공으로 닫히던 결함 수정, 품목별 결과 기억)")

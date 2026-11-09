@@ -188,6 +188,12 @@ export function BarcodeLabel({ data, reprint = false, qrMm = LABEL_QR_MM_DEFAULT
               </div>
             )}
 
+            {layout.mfg && (
+              <div style={{ ...row, fontWeight: 700, fontSize: `${layout.mfg.fontPt}pt`, fontFamily: FONT_MONO }} data-label-mfg>
+                {layout.mfg.text}
+              </div>
+            )}
+
             {layout.last && <div style={{ ...row, fontWeight: 700, fontSize: `${layout.last.fontPt}pt` }}>{layout.last.text}</div>}
           </div>
 

@@ -25,7 +25,7 @@ export default async function NumberingRulesPage() {
       <div>
         <h1 className="text-[26px] font-semibold tracking-tight">번호 규칙 관리</h1>
         <p className="text-[15px] text-muted-foreground mt-1">
-          LOT 및 시리얼 번호의 자동 생성 규칙을 설정합니다.
+          LOT 번호 및 제조번호의 자동 생성 규칙을 설정합니다.
         </p>
       </div>
 
@@ -40,7 +40,7 @@ export default async function NumberingRulesPage() {
         <div className="border-t" />
         <NumberingRuleBuilder
           type="SERIAL"
-          label="시리얼 번호 규칙"
+          label="제조번호 규칙"
           initialTokens={serialTokens}
           tenantId={tenantId}
           codeGroups={codeGroups}

@@ -21,6 +21,8 @@ export type LotLabelReceipt = {
   kind: LotLabelReceiptKind
   /** 발주번호 / 작업지시번호(있을 때) */
   refNo: string | null
+  /** 생산 입고(작업지시)일 때 그 작업지시의 제조번호. 재출력 라벨에 최초 출력과 같은 제조번호를 표시한다. */
+  manufacturingNo?: string | null
 }
 
 export type LotLabelLot = {
@@ -39,6 +41,8 @@ export type ReprintLabelItem = {
   itemName: string
   lotNo: string
   spec?: string | null
+  /** 완제품(FG_LOT) 재출력 라벨의 제조번호. */
+  manufacturingNo?: string | null
   quantity?: number
   uom?: string
   dateLabel: string
@@ -82,6 +86,7 @@ export function buildReprintLabelItem(lot: LotLabelLot, receipt: LotLabelReceipt
     itemName: lot.itemName,
     lotNo: lot.lotNo,
     spec: labelType === "RAW_LOT" ? lot.spec : null,
+    manufacturingNo: labelType === "FG_LOT" ? (receipt?.manufacturingNo ?? null) : null,
     ...(receipt ? { quantity: receipt.qty, uom: lot.uom } : {}),
     dateLabel: receipt ? dateLabelForKind(receipt.kind) : "",
     date: receipt ? formatLabelDate(new Date(receipt.at)) : "",

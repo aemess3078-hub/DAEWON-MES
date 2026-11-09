@@ -36,10 +36,6 @@ import {
 } from "@/lib/actions/work-order.actions"
 import { WorkOrderStatus } from "@prisma/client"
 import { formatQuantity } from "@/lib/utils"
-import {
-  DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE,
-  isCnsLotRuleAllowed,
-} from "@/lib/lot-numbering/lot-brand-guard"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -109,7 +105,6 @@ export function WorkOrderFormSheet({
   defaultProductionPlanItemId,
 }: WorkOrderFormSheetProps) {
   const [isLoading, setIsLoading] = useState(false)
-  const autoManufacturingNoAvailable = isCnsLotRuleAllowed()
   const [boms, setBoms] = useState<BomOption[]>([])
   const [routings, setRoutings] = useState<RoutingOption[]>([])
   const [loadingBoms, setLoadingBoms] = useState(false)
@@ -298,11 +293,6 @@ export function WorkOrderFormSheet({
   // ─── 저장 핸들러 ────────────────────────────────────────────────────────────
 
   async function onSubmit(values: WorkOrderFormValues) {
-    // 대원정밀은 LOT/제조번호 자동 채번 규칙이 확정되기 전까지 직접 입력이 필요하다(서버도 동일하게 차단).
-    if (mode === "create" && !autoManufacturingNoAvailable && !values.manufacturingNo?.trim()) {
-      form.setError("manufacturingNo", { type: "required", message: "제조번호를 직접 입력해 주세요." })
-      return
-    }
     setIsLoading(true)
     try {
       if (mode === "create") {
@@ -476,12 +466,10 @@ export function WorkOrderFormSheet({
               control={form.control}
               name="manufacturingNo"
               label="제조번호"
-              placeholder={autoManufacturingNoAvailable ? "미입력 시 자동 발행" : "제조번호를 직접 입력"}
+              placeholder="미입력 시 자동 발행"
               description={
                 mode === "create"
-                  ? autoManufacturingNoAvailable
-                    ? "비워두면 품목 설정에 따라 자동 발행됩니다. 직접 입력도 가능합니다."
-                    : DAEWON_MANUFACTURING_NO_RULE_NOT_CONFIGURED_MESSAGE
+                  ? "비워두면 번호 규칙 관리의 제조번호 규칙으로 자동 발행됩니다. 직접 입력도 가능합니다."
                   : "이미 발행된 제조번호를 비우면 추적성 조회가 어려워질 수 있습니다."
               }
             />
