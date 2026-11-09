@@ -261,6 +261,7 @@ export function ReceiptDialog({
           itemCode: workOrder.item.code,
           itemName: workOrder.item.name,
           lotNo: receivedLotNo ?? undefined,
+          manufacturingNo: workOrder.manufacturingNo ?? null, // 완제품 라벨에 제조번호 표시(QR 은 LOT 그대로)
           dateLabel: "생산일",
           quantity: receivedQty ?? receiptQty ?? workOrder.pendingQty,
           uom: workOrder.item.uom,

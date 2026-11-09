@@ -8,6 +8,7 @@ import { failureResult, UserFacingError, type ActionResult } from "@/lib/errors/
 import { safeRevalidate } from "@/lib/revalidate-safe"
 import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
 import { decideManufacturingNo } from "@/lib/lot-numbering/manufacturing-no-policy"
+import { computeNextTenantManufacturingNo } from "@/lib/lot-numbering/tenant-manufacturing-rule"
 import { WorkOrderStatus, OperationStatus, Prisma } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { computeWipReceiptStatus } from "./wip-receipt.helpers"
@@ -855,7 +856,8 @@ async function validateManualManufacturingNoPolicy(
     lotNumberingType: item.lotNumberingType,
     manualLotPolicy: item.manualLotPolicy,
     input: manufacturingNo,
-    autoAllowed: isCnsLotRuleAllowed(),
+    // 자동 채번 가능: CNS 는 CNS 규칙, 대원정밀은 제조번호 규칙(미설정이면 발행 시 안내 오류).
+    autoAllowed: true,
     blankMeansAuto: options.blankMeansAuto,
   })
   if (decision.kind === "ERROR") throw new UserFacingError(decision.message)
@@ -869,6 +871,21 @@ export async function generateManufacturingNo(
 ): Promise<string> {
   await requireTenantAccess(tenantId)
   const itemContext = await getCnsItemRuleContext(tenantId, itemId)
+  // 대원정밀: 번호 규칙 관리의 '제조번호 규칙'(SERIAL)으로 발행. CNS 규칙은 NEXT_PUBLIC_BRAND=newmes 에서만 쓴다.
+  if (!isCnsLotRuleAllowed()) {
+    try {
+      return await computeNextTenantManufacturingNo(
+        prisma,
+        tenantId,
+        { itemCode: itemContext.itemCode, itemType: itemContext.itemType },
+        new Date(),
+        sequenceOffset,
+      )
+    } catch (error) {
+      // 규칙 미설정·값 부족 등 업무 안내는 프로덕션에서도 화면에 보이도록 UserFacingError 로 감싼다.
+      throw new UserFacingError(error instanceof Error ? error.message : "제조번호 자동 발행에 실패했습니다.")
+    }
+  }
   return generateCnsManufacturingNo(prisma, tenantId, itemContext, new Date(), sequenceOffset)
 }
 

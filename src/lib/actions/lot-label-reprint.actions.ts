@@ -68,9 +68,11 @@ export async function getLotLabelSource(input: { lotId: string }): Promise<LotLa
   const woIds = txs.filter((t) => t.refType === "WORK_ORDER" && t.refId).map((t) => t.refId as string)
   const [pos, wos] = await Promise.all([
     poIds.length ? prisma.purchaseOrder.findMany({ where: { tenantId, id: { in: poIds } }, select: { id: true, orderNo: true } }) : [],
-    woIds.length ? prisma.workOrder.findMany({ where: { tenantId, id: { in: woIds } }, select: { id: true, orderNo: true } }) : [],
+    woIds.length ? prisma.workOrder.findMany({ where: { tenantId, id: { in: woIds } }, select: { id: true, orderNo: true, manufacturingNo: true } }) : [],
   ])
   const refNo = new Map<string, string>([...pos, ...wos].map((r) => [r.id, r.orderNo]))
+  // 완제품 재출력: 최초 출력과 같은 제조번호(생산 입고의 작업지시에 저장된 값). 읽기만 한다.
+  const mfgNoByWo = new Map<string, string | null>(wos.map((r) => [r.id, r.manufacturingNo]))
 
   const receipts: LotLabelReceipt[] = txs.map((t) => ({
     key: t.id,
@@ -79,6 +81,7 @@ export async function getLotLabelSource(input: { lotId: string }): Promise<LotLa
     at: t.txAt.toISOString(),
     kind: receiptKindForRef(t.refType),
     refNo: t.refId ? (refNo.get(t.refId) ?? null) : null,
+    manufacturingNo: t.refType === "WORK_ORDER" && t.refId ? (mfgNoByWo.get(t.refId) ?? null) : null,
   }))
 
   return {

@@ -221,6 +221,8 @@ export type LabelLayout = {
   lot: { fontPt: number; lines: string[]; truncated: boolean } | null
   /** 마지막 굵은 줄: LOT 라벨 `수량 …`, WIP 라벨 `제조번호 …`. */
   last: { fontPt: number; text: string } | null
+  /** 완제품(FG_LOT) 라벨의 제조번호 줄(고정폭 1줄, 말줄임). 제조번호가 없으면 null — 원자재/기존 LOT 라벨은 항상 null. */
+  mfg: { fontPt: number; text: string } | null
   qtyPt: number
   /** 계산상 필요한 텍스트 높이(pt)와 사용 가능 높이(pt). */
   usedHeightPt: number
@@ -235,6 +237,9 @@ const CODE_PT = 8.5
 const NAME_SIZES = [11, 10, 9, 8.5, 8]
 const LOT_SIZES = [10, 9, 8.5, 8, 7.5]
 const LAST_SIZES = [11, 10, 9]
+const MFG_PT = 8
+/** 제조번호 줄이 있는 완제품 라벨은 29mm 높이를 지키려고 수량 줄을 한 단계 작게 쓴다. */
+const LAST_SIZES_WITH_MFG = [10, 9]
 
 /** 한 줄 높이(pt). */
 function lineHeightPt(fontPt: number): number {
@@ -243,7 +248,7 @@ function lineHeightPt(fontPt: number): number {
 
 type LayoutInput = Pick<
   LabelData,
-  "kind" | "itemName" | "itemCode" | "lotNo" | "quantity" | "uom" | "wipId" | "manufacturingNo" | "workOrderNo" | "spec"
+  "kind" | "labelType" | "itemName" | "itemCode" | "lotNo" | "quantity" | "uom" | "wipId" | "manufacturingNo" | "workOrderNo" | "spec"
 >
 
 /** 마지막 굵은 줄 텍스트(없으면 null). */
@@ -285,6 +290,9 @@ export function computeLabelLayout(data: LayoutInput, qrMmInput: number = LABEL_
 
   const codeText = wrapText(codeRowText(data), CODE_PT, textWidthPt, 1, true).lines[0] ?? ""
   const lastRaw = lastRowText(data)
+  // 완제품 LOT 라벨: 제조번호 줄(WIP 라벨은 이미 마지막 줄에 제조번호를 표시한다).
+  const mfgNo = data.kind === "LOT_QR" && data.labelType === "FG_LOT" ? data.manufacturingNo?.trim() : ""
+  const mfg: LabelLayout["mfg"] = mfgNo ? { fontPt: MFG_PT, text: wrapText(`제조번호 ${mfgNo}`, MFG_PT, textWidthPt, 1, true).lines[0] ?? "" } : null
 
   let fallback: LabelLayout | null = null
   for (const namePt of NAME_SIZES) {
@@ -306,9 +314,10 @@ export function computeLabelLayout(data: LayoutInput, qrMmInput: number = LABEL_
       // 마지막 줄: 한 줄에 들어가는 가장 큰 글자, 안 들어가면 말줄임.
       let last: LabelLayout["last"] = null
       if (lastRaw) {
-        let chosen = LAST_SIZES[LAST_SIZES.length - 1]
+        const lastSizes = mfg ? LAST_SIZES_WITH_MFG : LAST_SIZES
+        let chosen = lastSizes[lastSizes.length - 1]
         let text = wrapText(lastRaw, chosen, textWidthPt, 1).lines[0]
-        for (const size of LAST_SIZES) {
+        for (const size of lastSizes) {
           if (estimateTextWidthPt(lastRaw, size) <= textWidthPt) {
             chosen = size
             text = lastRaw
@@ -323,7 +332,8 @@ export function computeLabelLayout(data: LayoutInput, qrMmInput: number = LABEL_
         lineHeightPt(CODE_PT) +
         (lot ? lot.lines.length * lineHeightPt(lot.fontPt) : 0) +
         (last ? lineHeightPt(last.fontPt) : 0) +
-        ROW_GAP_PT * (2 + (lot ? 1 : 0) + (last ? 1 : 0))
+        (mfg ? lineHeightPt(mfg.fontPt) : 0) +
+        ROW_GAP_PT * (2 + (lot ? 1 : 0) + (last ? 1 : 0) + (mfg ? 1 : 0))
       const layout: LabelLayout = {
         kind: data.kind,
         qrMm,
@@ -334,6 +344,7 @@ export function computeLabelLayout(data: LayoutInput, qrMmInput: number = LABEL_
         codeText,
         lot,
         last,
+        mfg,
         qtyPt: last?.fontPt ?? LAST_SIZES[0],
         usedHeightPt: used,
         availableHeightPt,
@@ -355,6 +366,7 @@ export function computeLabelLayout(data: LayoutInput, qrMmInput: number = LABEL_
       codeText,
       lot: null,
       last: null,
+      mfg: null,
       qtyPt: LAST_SIZES[0],
       usedHeightPt: availableHeightPt,
       availableHeightPt,
