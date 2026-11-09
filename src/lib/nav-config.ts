@@ -67,8 +67,9 @@ export const MES_NAV: NavItem[] = [
           { id: 'nav-purchase-orders', parentId: 'nav-material', label: '자재발주현황', icon: 'ShoppingCart', href: '/app/mes/purchase-orders', displayOrder: 1, children: [] },
           { id: 'nav-material-receipt', parentId: 'nav-material', label: '자재입고현황', icon: 'PackagePlus', href: '/app/mes/material-receipt', displayOrder: 2, children: [] },
           { id: 'nav-material-issue', parentId: 'nav-material', label: '자재출고현황', icon: 'FileInput', href: '/app/mes/material-issue', displayOrder: 3, children: [] },
-          { id: 'nav-material-stock', parentId: 'nav-material', label: '자재재고현황', icon: 'Boxes', href: '/app/mes/material/stock', displayOrder: 4, children: [] },
-          { id: 'nav-mrp', parentId: 'nav-material', label: '자재소요량계획(MRP)', icon: 'Calculator', href: '/app/mes/mrp', displayOrder: 5, children: [] },
+          { id: 'nav-material-issue-history', parentId: 'nav-material', label: '자재출고이력', icon: 'History', href: '/app/mes/material-issue-history', displayOrder: 4, children: [] },
+          { id: 'nav-material-stock', parentId: 'nav-material', label: '자재재고현황', icon: 'Boxes', href: '/app/mes/material/stock', displayOrder: 5, children: [] },
+          { id: 'nav-mrp', parentId: 'nav-material', label: '자재소요량계획(MRP)', icon: 'Calculator', href: '/app/mes/mrp', displayOrder: 6, children: [] },
         ],
       },
       // 4. 재고관리

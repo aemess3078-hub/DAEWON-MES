@@ -42,6 +42,7 @@ const MENU_CODE_RESOURCE_MAP: Record<string, string> = {
   stock: "INVENTORY",
   "material-receipt": "PURCHASE_ORDER",
   "material-issue": "PURCHASE_ORDER",
+  "material-issue-history": "PURCHASE_ORDER",
   "material-return": "PURCHASE_ORDER",
   "inventory-transactions": "INVENTORY_TXN",
   "wip-inventory": "INVENTORY",

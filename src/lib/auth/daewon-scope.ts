@@ -44,6 +44,7 @@ export const DAEWON_ALLOWED_ROUTES: readonly string[] = [
   "/app/mes/purchase-orders",
   "/app/mes/material-receipt",
   "/app/mes/material-issue",
+  "/app/mes/material-issue-history",
   "/app/mes/material/stock",
   "/app/mes/mrp",
   // 재고관리
