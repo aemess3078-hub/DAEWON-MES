@@ -15,7 +15,7 @@ import { PLAN_QTY_INVALID_MESSAGE, resolvePlanItemUpdate, type ProductionKindVal
 import { allocationIncreaseViolationMessage, findProductionRequestViolation } from "@/lib/production-request"
 import { formatScaledQuantity, toScaledQuantity } from "@/lib/quantity-scale"
 import { keepProductionRequestTag } from "@/lib/production-request-tag"
-import { PLAN_NOT_EDITABLE_MESSAGE, validatePlanStatusChange, validatePlanStatusForCreate, type PlanStatusValue } from "@/lib/production-plan-status"
+import { NEW_PLAN_STATUS, PLAN_NOT_EDITABLE_MESSAGE, validatePlanStatusChange, validatePlanStatusForCreate, type PlanStatusValue } from "@/lib/production-plan-status"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -87,10 +87,14 @@ export type CreatePlanInput = {
   planType: PlanType
   startDate: string
   endDate: string
+  /** 수정(updatePlan)에서만 의미가 있다. 등록(createPlan)은 값과 무관하게 서버가 CONFIRMED 로 저장한다. */
   status: PlanStatus
   note?: string | null
   items: PlanItemInput[]
 }
+
+/** 등록용 입력: 상태는 서버가 정하므로 생략할 수 있다(구 클라이언트가 보내는 초안·확정은 무시) */
+export type CreatePlanRequest = Omit<CreatePlanInput, "status"> & { status?: PlanStatus }
 
 // ─── Query Functions ──────────────────────────────────────────────────────────
 
@@ -295,12 +299,13 @@ async function generateProductionPlanNoForCreate(tenantId: string, planType: Pla
 
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
 
-export async function createPlan(data: CreatePlanInput, _tenantId: string) {
+export async function createPlan(data: CreatePlanRequest, _tenantId: string) {
   const user = await requireResourcePermission("PRODUCTION_PLAN", "CREATE")
   const tenantId = user.tenantId
-  const { items, startDate, endDate, note, ...headerFields } = data
+  // 상태는 서버가 결정한다: 신규 재고 생산계획은 등록 즉시 확정(작업지시 생성 가능). 요청의 status 는 무시한다.
+  const { items, startDate, endDate, note, status: requestedStatus, ...headerFields } = data
 
-  const createStatusError = validatePlanStatusForCreate(data.status as PlanStatusValue)
+  const createStatusError = validatePlanStatusForCreate(requestedStatus as PlanStatusValue | undefined)
   if (createStatusError) {
     throw new Error(createStatusError)
   }
@@ -328,6 +333,7 @@ export async function createPlan(data: CreatePlanInput, _tenantId: string) {
         ...headerFields,
         planNo,
         tenantId,
+        status: NEW_PLAN_STATUS as PlanStatus,
         startDate: new Date(startDate),
         endDate: new Date(endDate),
         note: note ?? null,
@@ -353,7 +359,7 @@ export async function createPlan(data: CreatePlanInput, _tenantId: string) {
         afterData: {
         planNo,
         planType: data.planType,
-        status: data.status,
+        status: NEW_PLAN_STATUS,
         itemCount: items.length,
         items: summarizeAuditItems(items, ["itemId", "bomId", "routingId", "plannedQty"]),
       },

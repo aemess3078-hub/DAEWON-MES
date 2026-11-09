@@ -2,7 +2,7 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { requireRole, requireTenantAccess } from "@/lib/auth"
-import { Prisma, SalesOrderStatus } from "@prisma/client"
+import { PlanStatus, Prisma, SalesOrderStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { getErrorMessage } from "@/lib/utils"
 import { hasResourcePermission, getCurrentPermissionSnapshot, requireResourcePermission } from "@/lib/auth/role-permissions"
@@ -10,10 +10,14 @@ import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/au
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { getSalesOrderProgressForTenant } from "@/lib/sales-order-progress.server"
 import { lockSalesOrderItemsForUpdate } from "@/lib/quantity-concurrency"
+import { NEW_PLAN_STATUS } from "@/lib/production-plan-status"
 import {
-  CREATABLE_STATUSES,
   SALES_ORDER_STATUS_LABEL,
   isTerminalSalesOrderStatus,
+  resolveNewSalesOrderStatus,
+  salesOrderItemEditBlockReason,
+  sameSalesOrderItems,
+  validateSalesOrderItemEditInput,
   validateSalesOrderStatusChange,
   type SalesOrderFollowUp,
   type SalesOrderStatusValue,
@@ -40,22 +44,41 @@ export async function getSalesOrders(tenantId: string) {
     where: { tenantId },
     include: {
       customer: true,
-      items: { include: { item: true } },
+      items: {
+        include: {
+          item: true,
+          // 품목 수정 가능 여부 판단용(취소되지 않은 생산계획). 화면에는 사유 문장만 내려보낸다.
+          productionPlanItems: { where: { plan: { tenantId, status: { not: "CANCELLED" } } }, select: { plan: { select: { planNo: true } } } },
+        },
+      },
       shipments: true,
     },
     orderBy: { createdAt: "desc" },
   })
-  return rows.map((o) => ({
-    ...o,
-    totalAmount: o.totalAmount !== null ? Number(o.totalAmount) : null,
-    items: o.items.map((i) => ({
-      ...i,
-      qty:         Number(i.qty),
-      unitPrice:   i.unitPrice   !== null ? Number(i.unitPrice)   : null,
-      producedQty: Number(i.producedQty),
-      shippedQty:  Number(i.shippedQty),
-    })),
-  }))
+  return rows.map((o) => {
+    // 서버(updateSalesOrder)가 최종 판정하고, 화면은 같은 규칙으로 미리 입력을 막아 안내한다(작업지시는 활성 생산계획이 있어야 존재하므로 계획으로 갈음)
+    const liveShipments = o.shipments.filter((s) => s.status !== "CANCELLED")
+    const itemEditBlockedReason = salesOrderItemEditBlockReason(o.status as SalesOrderStatusValue, {
+      activePlanNos: Array.from(new Set(o.items.flatMap((i) => i.productionPlanItems.map((p) => p.plan.planNo)))).sort(),
+      workOrderNos: [],
+      shipmentNos: liveShipments.map((s) => s.shipmentNo).sort(),
+      openShipmentNos: [],
+      fullyShipped: false,
+      hasShippedQty: o.items.some((i) => Number(i.shippedQty) > 0),
+    })
+    return {
+      ...o,
+      itemEditBlockedReason,
+      totalAmount: o.totalAmount !== null ? Number(o.totalAmount) : null,
+      items: o.items.map(({ productionPlanItems: _pp, ...i }) => ({
+        ...i,
+        qty:         Number(i.qty),
+        unitPrice:   i.unitPrice   !== null ? Number(i.unitPrice)   : null,
+        producedQty: Number(i.producedQty),
+        shippedQty:  Number(i.shippedQty),
+      })),
+    }
+  })
 }
 
 export type SalesOrderStatusRow = Awaited<ReturnType<typeof getSalesOrderStatusRows>>[number]
@@ -151,7 +174,8 @@ export type CreateSalesOrderInput = {
   customerId: string
   orderDate: Date
   deliveryDate: Date
-  status: SalesOrderStatus
+  /** 구 클라이언트 호환용. 값과 무관하게 서버가 CONFIRMED 로 저장한다(등록 즉시 확정). 초안·확정 외의 값은 거부한다. */
+  status?: SalesOrderStatus
   totalAmount?: number
   currency?: string
   note?: string
@@ -166,8 +190,11 @@ export async function createSalesOrder(
   await requireResourcePermission("SALES_ORDER", "CREATE")
   const actor = await requireRole("OPERATOR")
   if (actor.tenantId !== tenantId) throw new Error("FORBIDDEN")
-  // 수주 등록 시 지정할 수 있는 상태는 초안·확정뿐이다(생산중·부분출하·출하완료는 처리 결과로 자동 변경, 완료·취소는 등록 대상 아님)
-  if (!CREATABLE_STATUSES.includes(data.status as SalesOrderStatusValue)) throw new Error("수주는 초안 또는 확정 상태로만 등록할 수 있습니다.")
+  // 신규 수주는 등록 즉시 확정(CONFIRMED)으로 저장한다. 화면이 보낸 상태값과 무관하며 서버가 최종 결정한다.
+  // (생산중·부분출하·출하완료는 처리 결과로 자동 변경되고, 완료·취소는 등록 대상이 아니다. 기존 초안 수주는 건드리지 않는다.)
+  const resolvedStatus = resolveNewSalesOrderStatus(data.status)
+  if (!resolvedStatus.ok) throw new Error(resolvedStatus.error)
+  const newStatus = resolvedStatus.status as SalesOrderStatus
   const order = await withUniqueBusinessNumberRetry(async () => {
     const orderNo = await generateSalesOrderNo(tenantId)
     return prisma.$transaction(async (tx) => {
@@ -179,7 +206,7 @@ export async function createSalesOrder(
           orderNo,
           orderDate: data.orderDate,
           deliveryDate: data.deliveryDate,
-          status: data.status,
+          status: newStatus,
           totalAmount: data.totalAmount,
           currency: data.currency ?? "KRW",
           note: data.note,
@@ -204,7 +231,7 @@ export async function createSalesOrder(
           orderNo,
           siteId,
           customerId: data.customerId,
-          status: data.status,
+          status: newStatus,
           itemCount: data.items.length,
           items: summarizeAuditItems(data.items, ["itemId", "qty", "unitPrice"]),
         },
@@ -240,7 +267,7 @@ export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput):
       // 같은 수주 품목을 쓰는 생산의뢰·출하 등록·출하 확정과 같은 잠금(수주 품목 행)을 먼저 잡아 직렬화한다.
       // 잠금 이후의 상태와 이력으로 판정하므로 취소와 출하가 동시에 성공해 모순이 생기지 않는다.
       await lockSalesOrderItemsForUpdate(tx, tenantId, head.items.map((i) => i.id))
-      const current = await tx.salesOrder.findFirstOrThrow({ where: { id, tenantId }, include: { items: true } })
+      const current = await tx.salesOrder.findFirstOrThrow({ where: { id, tenantId }, include: { items: { include: { item: { select: { code: true } } } } } })
       const itemIds = current.items.map((i) => i.id)
 
       const currentStatus = current.status as SalesOrderStatusValue
@@ -255,13 +282,52 @@ export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput):
         const reason = validateSalesOrderStatusChange(currentStatus, target, followUp)
         if (reason) throw new Error(reason)
       }
-      const canEditItems = current.status === "DRAFT"
-      if (canEditItems && data.items && (followUp.activePlanNos.length > 0 || followUp.workOrderNos.length > 0 || followUp.shipmentNos.length > 0)) {
-        throw new Error("이미 연결된 생산계획·작업지시·출하가 있어 품목·수량을 수정할 수 없습니다.")
+      // 품목·수량 수정: 초안·확정 수주에 후속 업무(생산계획·작업지시·출하·출하 수량)가 없을 때만 허용한다(수주 충당·출하 수량·LOT 연결 보호).
+      // 후속 업무가 있는데 품목이 바뀐 요청은 거부하고, 품목이 그대로인 일반 수정(비고·고객·납기 등)은 통과시킨다.
+      let applyItems = false
+      if (data.items) {
+        const blocked = salesOrderItemEditBlockReason(currentStatus, followUp)
+        const unchanged = sameSalesOrderItems(current.items, data.items)
+        if (blocked) {
+          if (!unchanged) throw new Error(blocked)
+        } else if (!unchanged) {
+          const inputError = validateSalesOrderItemEditInput(data.items)
+          if (inputError) throw new Error(inputError)
+          applyItems = true
+        }
       }
 
-      if (canEditItems && data.items) {
-        await tx.salesOrderItem.deleteMany({ where: { salesOrderId: id } })
+      if (applyItems && data.items) {
+        // 품목 줄은 지우고 다시 만들지 않고 제자리에서 고친다(줄 ID 보존). 취소된 생산계획·출하 이력이 걸린 줄은 삭제할 수 없다.
+        const wanted = new Map(data.items.map((i) => [i.itemId, i]))
+        for (const cur of current.items) {
+          if (wanted.has(cur.itemId)) continue
+          const [planRefs, shipRefs] = await Promise.all([
+            tx.productionPlanItem.count({ where: { salesOrderItemId: cur.id } }),
+            tx.shipmentItem.count({ where: { salesOrderItemId: cur.id } }),
+          ])
+          if (planRefs + shipRefs > 0) throw new Error(`'${cur.item.code}' 품목에는 취소된 생산계획·출하 이력이 남아 있어 삭제할 수 없습니다. 수량은 수정할 수 있습니다.`)
+          await tx.salesOrderItem.delete({ where: { id: cur.id } })
+        }
+        const existingByItem = new Map(current.items.map((c) => [c.itemId, c]))
+        for (const item of data.items) {
+          const cur = existingByItem.get(item.itemId)
+          if (cur) {
+            await tx.salesOrderItem.update({
+              where: { id: cur.id },
+              data: {
+                qty: item.qty,
+                unitPrice: item.unitPrice ?? null,
+                ...(item.deliveryDate !== undefined && { deliveryDate: item.deliveryDate }),
+                ...(item.note !== undefined && { note: item.note }),
+              },
+            })
+          } else {
+            await tx.salesOrderItem.create({
+              data: { salesOrderId: id, itemId: item.itemId, qty: item.qty, unitPrice: item.unitPrice, deliveryDate: item.deliveryDate, note: item.note },
+            })
+          }
+        }
       }
       const updated = await tx.salesOrder.update({
         where: { id },
@@ -273,17 +339,6 @@ export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput):
           ...(data.totalAmount !== undefined && { totalAmount: data.totalAmount }),
           ...(data.currency !== undefined && { currency: data.currency }),
           ...(data.note !== undefined && { note: data.note }),
-          ...(canEditItems && data.items && {
-            items: {
-              create: data.items.map((item) => ({
-                itemId: item.itemId,
-                qty: item.qty,
-                unitPrice: item.unitPrice,
-                deliveryDate: item.deliveryDate,
-                note: item.note,
-              })),
-            },
-          }),
         },
         include: { items: true },
       })
@@ -311,6 +366,7 @@ export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput):
             "note",
           ]),
           itemCount: updated.items.length,
+          ...(applyItems && data.items ? { itemsChanged: true, items: summarizeAuditItems(data.items, ["itemId", "qty", "unitPrice"]) } : {}),
         },
         menuName: "수주관리",
       })
@@ -784,7 +840,8 @@ export async function requestProductionFromSalesOrder(
             planType: "DAILY",
             startDate: new Date(),
             endDate: new Date(),
-            status: "DRAFT",
+            // 생산의뢰로 만드는 계획은 등록 즉시 확정(작업지시 생성 가능). 여유 생산 승인 상태(extraApprovalStatus)는 DB 기본값을 그대로 둔다.
+            status: NEW_PLAN_STATUS as PlanStatus,
             note: requestId ? `${baseNote} ${productionRequestTag(requestId, requestHash)}` : baseNote,
             items: {
               // 계획 수량 = 수주 충당 수량 + 여유 수량. 여유가 있으면 ORDER_EXTRA(사유 필수), 없으면 ORDER.

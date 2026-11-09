@@ -275,7 +275,7 @@ test("[QM-02][시나리오2] 수주 100, 충당 40 — 미충당 60, 미입고 �
   await reqOk(so, 40)
   const v = (await cross(so.id)).items[0]
   expect([v.allocatedQty, v.unallocatedQty, v.plannedQty, v.extraQty, v.lines.length]).toEqual([40, 60, 40, 0, 1])
-  expect(v.lines[0]).toMatchObject({ productionKind: "ORDER", plannedQty: 40, allocatedQty: 40, extraQty: 0, receivedQty: 0, counted: true, planStatus: "DRAFT" })
+  expect(v.lines[0]).toMatchObject({ productionKind: "ORDER", plannedQty: 40, allocatedQty: 40, extraQty: 0, receivedQty: 0, counted: true, planStatus: "CONFIRMED" })
   expect(v.pendingAllocatedReceipt).toEqual({ minQty: 40, maxQty: 40, exact: true })
   expect([v.shortage.legacy.shortageQty, v.shortage.proposed.shortageMinQty, v.shortage.proposed.shortageMaxQty, v.shortage.deltaMinQty]).toEqual([100, 60, 60, -40])
   expect(v.shortage.differenceCodes).toContain("PENDING_ALLOCATION_NOT_IN_LEGACY")

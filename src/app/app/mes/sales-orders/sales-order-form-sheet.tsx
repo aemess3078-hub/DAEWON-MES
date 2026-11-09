@@ -10,6 +10,7 @@ import { addDays, isWithinInterval, isPast } from "date-fns"
 import { Form, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import { MoneyInput } from "@/components/ui/money-input"
 import { QuantityInput } from "@/components/ui/quantity-input"
 import { Textarea } from "@/components/ui/textarea"
@@ -29,7 +30,7 @@ import {
 } from "@/lib/actions/sales-order.actions"
 import { SalesOrderStatus } from "@prisma/client"
 import type { SalesOrderRow } from "./columns"
-import { CREATABLE_STATUSES, selectableSalesOrderStatuses, type SalesOrderStatusValue } from "@/lib/sales-order-status"
+import { NEW_SALES_ORDER_STATUS, selectableSalesOrderStatuses, type SalesOrderStatusValue } from "@/lib/sales-order-status"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,8 @@ const DEFAULT_VALUES: SalesOrderFormValues = {
   customerId: "",
   orderDate: todayString(),
   deliveryDate: "",
-  status: "DRAFT",
+  // 신규 수주는 등록 즉시 확정된다(서버가 CONFIRMED 로 저장). 등록 화면에는 상태 선택이 없다.
+  status: "CONFIRMED",
   totalAmount: undefined,
   currency: "KRW",
   note: "",
@@ -119,14 +121,16 @@ export function SalesOrderFormSheet({
         status: salesOrder.status,
         totalAmount: salesOrder.totalAmount ? Number(salesOrder.totalAmount) : undefined,
         currency: salesOrder.currency,
-        note: "",
+        note: salesOrder.note ?? "",
         items: salesOrder.items.map((i) => ({
           itemId: (i as { itemId?: string; item?: { id: string } }).itemId
             ?? (i as { item?: { id: string } }).item?.id
             ?? "",
           qty: Number(i.qty),
           unitPrice: i.unitPrice ? Number(i.unitPrice) : undefined,
-          note: "",
+          // 저장할 때 기존 품목 납기·비고가 지워지지 않도록 그대로 불러온다
+          deliveryDate: i.deliveryDate ? new Date(i.deliveryDate).toISOString().split("T")[0] : "",
+          note: i.note ?? "",
         })),
       })
     }
@@ -147,17 +151,16 @@ export function SalesOrderFormSheet({
   // ─── CONFIRMED 이상이면 품목 편집 비활성화 ──────────────────────────────────
 
   const currentStatus = form.watch("status")
-  // 선택할 수 있는 상태: 등록은 초안·확정, 수정은 현재 상태에서 직접 바꿀 수 있는 상태만(생산중·부분출하·출하완료는 처리 결과로 자동 변경). 서버가 같은 규칙을 다시 검증한다.
+  // 선택할 수 있는 상태: 등록은 선택 없이 확정(자동), 수정은 현재 상태에서 직접 바꿀 수 있는 상태만(생산중·부분출하·출하완료는 처리 결과로 자동 변경). 서버가 같은 규칙을 다시 검증한다.
   const selectableStatuses: SalesOrderStatusValue[] =
     mode === "edit" && salesOrder
       ? selectableSalesOrderStatuses(salesOrder.status as SalesOrderStatusValue)
-      : CREATABLE_STATUSES
+      : [NEW_SALES_ORDER_STATUS]
   const statusOptions = STATUS_OPTIONS.filter((opt) => selectableStatuses.includes(opt.value as SalesOrderStatusValue))
   const statusLocked = mode === "edit" && !!salesOrder && selectableStatuses.length <= 1
-  const isItemEditDisabled =
-    mode === "edit" &&
-    salesOrder?.status !== undefined &&
-    salesOrder.status !== "DRAFT"
+  // 품목·수량 수정: 초안·확정 수주에 생산계획·작업지시·출하가 연결되지 않았을 때만 가능(서버 updateSalesOrder 가 같은 규칙으로 다시 검증)
+  const itemEditBlockedReason = mode === "edit" && salesOrder ? salesOrder.itemEditBlockedReason ?? null : null
+  const isItemEditDisabled = itemEditBlockedReason !== null
 
   // ─── 저장 핸들러 ────────────────────────────────────────────────────────────
 
@@ -168,7 +171,6 @@ export function SalesOrderFormSheet({
         customerId: values.customerId,
         orderDate: new Date(values.orderDate),
         deliveryDate: new Date(values.deliveryDate),
-        status: values.status as SalesOrderStatus,
         totalAmount: values.totalAmount,
         currency: values.currency,
         note: values.note,
@@ -182,9 +184,10 @@ export function SalesOrderFormSheet({
       }
 
       if (mode === "create") {
+        // 상태는 보내지 않는다 — 서버가 CONFIRMED 로 저장한다
         await createSalesOrder(tenantId, siteId, payload)
       } else if (salesOrder) {
-        const res = await updateSalesOrder(salesOrder.id, payload)
+        const res = await updateSalesOrder(salesOrder.id, { ...payload, status: values.status as SalesOrderStatus })
         if (!res.ok) {
           // 서버가 상태 전이·후속 업무(생산계획·작업지시·출하) 때문에 거부한 사유를 그대로 안내한다
           alert(res.error ?? "저장 중 오류가 발생했습니다.")
@@ -295,7 +298,16 @@ export function SalesOrderFormSheet({
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              {/* 상태 */}
+              {/* 상태: 수정 화면에서만 선택(기존 초안 수주의 개별 확정 경로). 등록 화면은 자동 확정이라 선택 항목이 없다. */}
+              {mode === "create" ? (
+                <div className="space-y-2" data-testid="so-status-auto">
+                  <Label className="text-[14px] font-medium">상태</Label>
+                  <div className="flex h-10 items-center gap-2 text-[14px] text-foreground">
+                    <span className="font-medium">확정</span>
+                    <span className="text-[13px] text-muted-foreground">등록하면 바로 확정됩니다</span>
+                  </div>
+                </div>
+              ) : (
               <FormField
                 control={form.control}
                 name="status"
@@ -323,6 +335,7 @@ export function SalesOrderFormSheet({
                   </FormItem>
                 )}
               />
+              )}
 
               {/* 통화 */}
               <FormField
@@ -410,8 +423,8 @@ export function SalesOrderFormSheet({
             </div>
 
             {isItemEditDisabled && (
-              <p className="text-[13px] text-muted-foreground">
-                확정 이상 상태에서는 품목을 수정할 수 없습니다.
+              <p className="text-[13px] text-muted-foreground" data-testid="so-item-locked">
+                {itemEditBlockedReason}
               </p>
             )}
 

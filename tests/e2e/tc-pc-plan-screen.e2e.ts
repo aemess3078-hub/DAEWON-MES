@@ -5,7 +5,7 @@
 import { test, expect, type Page, type Locator } from "@playwright/test"
 import { assertSafeE2eEnvironment, adminCredentials, developerCredentials } from "./guard"
 import { apiLogin, roleCreds } from "./support/perm-lib"
-import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays } from "./support/o2s-lib"
+import { loadData, logDetail, db, closeDb, num, call, findAction, warm, rid, iso, addDays, legacyDraftStockPlan } from "./support/o2s-lib"
 
 assertSafeE2eEnvironment()
 const D = loadData()
@@ -118,6 +118,9 @@ test("[BT-01] 재고 생산(STOCK) 등록·조회 — 등록 화면에 유형 �
   await expect(sheet.getByTestId("pf-kind-order")).toContainText("수주 처리 화면의 생산의뢰에서 등록")
   await expect(sheet.getByTestId("pf-kind-extra")).toContainText("수주+여유 생산")
   await expect(sheet.getByRole("link", { name: /수주 처리 화면으로 이동/ })).toHaveAttribute("href", "/app/mes/sales-orders")
+  // 등록 화면에는 상태 선택(초안·확정)이 없고 "등록하면 바로 확정" 안내만 보인다
+  await expect(sheet.getByTestId("pf-status")).toHaveCount(0)
+  await expect(sheet.getByTestId("pf-status-auto")).toContainText("등록하면 바로 확정되어 작업지시를 만들 수 있습니다")
   await pickSelect(sheet, page, "공장", new RegExp(D.site.code))
   await sheet.locator('input[type="date"]').nth(0).fill("2026-11-03")
   await sheet.locator('input[type="date"]').nth(1).fill("2026-11-10")
@@ -132,7 +135,7 @@ test("[BT-01] 재고 생산(STOCK) 등록·조회 — 등록 화면에 유형 �
   // 계획번호는 서버가 부여한다(폼의 값은 미리보기) — 이 시험이 만든 계획을 줄 비고로 찾는다
   const plan = await db().productionPlan.findFirstOrThrow({ where: { tenantId: T, items: { some: { note: "안전재고 확보" } } }, orderBy: { createdAt: "desc" }, include: { items: true } })
   const planNo = plan.planNo
-  expect([plan.status, plan.items[0].productionKind, num(plan.items[0].plannedQty), num(plan.items[0].allocatedQty), plan.items[0].salesOrderItemId, plan.items[0].note]).toEqual(["DRAFT", "STOCK", 200, 0, null, "안전재고 확보"])
+  expect([plan.status, plan.items[0].productionKind, num(plan.items[0].plannedQty), num(plan.items[0].allocatedQty), plan.items[0].salesOrderItemId, plan.items[0].note]).toEqual(["CONFIRMED", "STOCK", 200, 0, null, "안전재고 확보"])
   await gotoPlans(page)
   const row = await findPlanRow(page, planNo)
   await expect(row.getByTestId(`plan-kind-${planNo}`)).toHaveText("재고 생산")
@@ -344,8 +347,9 @@ test("[BT-10] 진행 중 계획 수정 제한 — 작업지시가 생기면 자�
   expect(num((await db().productionPlanItem.findUniqueOrThrow({ where: { id: plan.items[0].id } })).plannedQty)).toBe(30)
 })
 
-test("[BT-11] 상태 선택지 — 등록·수정 화면에서 직접 고를 수 있는 상태는 초안·확정뿐이고 진행중·완료는 자동 변경 안내만 표시", async ({ page }) => {
-  const plan = await apiStockPlan(15)
+test("[BT-11] 상태 선택지 — 등록 화면에는 상태 선택이 없고(등록하면 바로 확정), 수정 화면은 초안·확정만 고를 수 있으며 진행중·완료는 자동 변경 안내만 표시", async ({ page }) => {
+  const plan = await legacyDraftStockPlan(D, 15, `E2E-PCB legacy draft ${RUN}-${++seq}`) // 기존 초안 데이터(서버는 이제 초안을 만들지 않는다)
+  const confirmedPlan = await apiStockPlan(16)
   await loginAdmin(page)
   await gotoPlans(page)
   const options = async (sheet: Locator) => {
@@ -355,12 +359,19 @@ test("[BT-11] 상태 선택지 — 등록·수정 화면에서 직접 고를 수
     return names.map((n) => n.trim())
   }
   await page.getByRole("button", { name: "생산계획 등록" }).click()
-  expect(await options(page.getByRole("dialog"))).toEqual(["초안", "확정"])
+  await expect(page.getByRole("dialog").getByTestId("pf-status")).toHaveCount(0)
+  await expect(page.getByRole("dialog").getByLabel("상태")).toHaveCount(0)
+  await expect(page.getByTestId("pf-status-auto")).toContainText("확정")
   await expect(page.getByTestId("pf-status-guide")).toContainText("진행중·완료 상태는 작업지시와 POP 생산실적에 따라 자동으로 바뀝니다")
   await page.keyboard.press("Escape")
   await expect(page.getByRole("dialog")).toHaveCount(0)
   await openRowMenu(page, plan.planNo, "수정")
-  expect(await options(page.getByRole("dialog"))).toEqual(["초안", "확정"])
+  expect(await options(page.getByRole("dialog")), "기존 초안 계획은 수정 화면에서 개별 확정 가능").toEqual(["초안", "확정"])
+  await page.keyboard.press("Escape")
+  await page.keyboard.press("Escape")
+  await expect(page.getByRole("dialog")).toHaveCount(0)
+  await openRowMenu(page, confirmedPlan.planNo, "수정")
+  expect(await options(page.getByRole("dialog")), "확정 계획은 현재 상태(확정) + 수동 전이(초안)").toEqual(["확정", "초안"])
 })
 
 // ───────────────────────── BT-12 권한 ─────────────────────────

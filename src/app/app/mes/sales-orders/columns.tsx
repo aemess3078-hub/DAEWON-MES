@@ -34,6 +34,9 @@ export type SalesOrderRow = {
   }[]
   totalAmount?: number | null
   currency: string
+  note?: string | null
+  /** 품목·수량을 수정할 수 없을 때의 사유(서버 정책과 동일). 수정할 수 있으면 null */
+  itemEditBlockedReason?: string | null
 }
 
 const STATUS_CONFIG: Record<
