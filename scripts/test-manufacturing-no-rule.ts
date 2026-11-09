@@ -14,7 +14,7 @@ ModuleInternals._resolveFilename = function (request: string, ...rest: unknown[]
 }
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const mod = require("../src/lib/lot-numbering/tenant-manufacturing-rule") as typeof import("../src/lib/lot-numbering/tenant-manufacturing-rule")
-const { computeNextTenantManufacturingNo, MFG_RULE_NOT_CONFIGURED_MESSAGE, MFG_RULE_INVALID_MESSAGE, parseManufacturingRuleTokens } = mod
+const { computeNextTenantManufacturingNo, MFG_RULE_NOT_CONFIGURED_MESSAGE, MFG_RULE_INVALID_MESSAGE, parseManufacturingRuleTokens, validateManufacturingRuleForSave } = mod
 
 let pass = 0
 const ok = (cond: unknown, name: string) => {
@@ -77,6 +77,28 @@ async function main() {
   ok(threw, "M9 순번 토큰 2개 거부(저장 검증)")
   const itemTokens = [{ id: "1", type: "CONTEXT", key: "ITEM_CODE" }, { id: "2", type: "SEPARATOR", value: "-" }, { id: "3", type: "SEQ", digits: 3 }]
   ok((await computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: itemTokens, isActive: true }, 4), "t", { itemCode: "BRK01" }, date)) === "BRK01-005", "M10 품목코드 토큰 사용")
+  // ─── 변수 연동 ────────────────────────────────────────────────────────
+  const clientTokens = [
+    { id: "1", type: "CONTEXT", key: "CLIENT_CODE" }, { id: "2", type: "SEPARATOR", value: "-" },
+    { id: "3", type: "CONTEXT", key: "ITEM_CODE" }, { id: "4", type: "SEPARATOR", value: "-" },
+    { id: "5", type: "DATE", format: "YY" }, { id: "6", type: "SEQ", digits: 3 },
+  ]
+  const cdb = () => fakeDb({ id: "r", tokens: clientTokens, isActive: true }, 0)
+  ok((await computeNextTenantManufacturingNo(cdb(), "t", { itemCode: "BRK01", extra: { CLIENT_CODE: "ACME" } }, date)) === `ACME-BRK01-${yy}001`, "V1 고객코드+품목코드+날짜+순번 조합 발행")
+  const noClient = await rejects(() => computeNextTenantManufacturingNo(cdb(), "t", { itemCode: "BRK01" }, date))
+  ok(noClient?.includes("고객코드") && !noClient.includes("품목코드(") && noClient.includes("기본값"), "V2 고객코드 없음 → 누락 변수(고객코드)를 짚은 안내")
+  const fbTokens = clientTokens.map((t) => (t.type === "CONTEXT" && t.key === "CLIENT_CODE" ? { ...t, fallback: "GEN" } : t))
+  ok((await computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: fbTokens, isActive: true }, 0), "t", { itemCode: "BRK01" }, date)) === `GEN-BRK01-${yy}001`, "V3 값 없으면 규칙 기본값(fallback) 적용")
+  ok((await computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: fbTokens, isActive: true }, 0), "t", { itemCode: "BRK01", extra: { CLIENT_CODE: "ACME" } }, date)) === `ACME-BRK01-${yy}001`, "V4 실제 값이 기본값보다 우선")
+  const multi = [{ id: "1", type: "CONTEXT", key: "LINE_CODE" }, { id: "2", type: "CONTEXT", key: "SHIFT" }, { id: "3", type: "SEQ", digits: 3 }]
+  const multiMsg = await rejects(() => computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: multi, isActive: true }, 0), "t", { itemCode: "A" }, date))
+  ok(multiMsg?.includes("라인코드") && multiMsg.includes("교대"), "V5 여러 변수 누락 시 모두 나열")
+  const noItem = await rejects(() => computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: [{ id: "1", type: "CONTEXT", key: "ITEM_CODE" }, { id: "2", type: "SEQ", digits: 3 }], isActive: true }, 0), "t", {}, date))
+  ok(noItem?.includes("품목코드"), "V6 품목코드 없음 안내")
+  ok(validateManufacturingRuleForSave(clientTokens) === null, "V7 고객코드·품목코드 규칙은 저장 허용")
+  ok(validateManufacturingRuleForSave(multi)?.includes("라인코드, 교대"), "V8 값을 받을 수 없는 변수에 기본값 없으면 저장 거부")
+  ok(validateManufacturingRuleForSave(multi.map((t) => (t.type === "CONTEXT" ? { ...t, fallback: "X" } : t))) === null, "V9 기본값을 주면 저장 허용")
+  ok(validateManufacturingRuleForSave(tokens.slice(0, 4)) === MFG_RULE_INVALID_MESSAGE, "V10 순번 없는 규칙 저장 거부")
   console.log(`\n${pass} passed`)
 }
 

@@ -864,10 +864,29 @@ async function validateManualManufacturingNoPolicy(
   return item.manualLotPolicy === "DISABLED"
 }
 
+/**
+ * 제조번호 규칙 변수 중 작업지시 연결 데이터로 채우는 값. 생산계획 품목 → 수주 품목 → 수주 → 고객(거래처) 코드.
+ * tenant 범위로만 조회하며, 수주 연결이 없으면 값을 만들지 않는다(규칙 기본값 또는 안내 오류로 이어진다).
+ */
+async function getWorkOrderRuleExtraContext(
+  tenantId: string,
+  productionPlanItemId?: string | null,
+): Promise<{ CLIENT_CODE?: string }> {
+  if (!productionPlanItemId) return {}
+  const planItem = await prisma.productionPlanItem.findFirst({
+    where: { id: productionPlanItemId, plan: { tenantId } },
+    select: { salesOrderItem: { select: { salesOrder: { select: { customer: { select: { code: true } } } } } } },
+  })
+  const code = planItem?.salesOrderItem?.salesOrder?.customer?.code?.trim()
+  return code ? { CLIENT_CODE: code } : {}
+}
+
 export async function generateManufacturingNo(
   tenantId: string,
   itemId?: string | null,
   sequenceOffset = 0,
+  /** 연결된 생산계획 품목 — 고객코드 등 규칙 변수를 수주 정보에서 조회하는 데 쓴다. */
+  productionPlanItemId?: string | null,
 ): Promise<string> {
   await requireTenantAccess(tenantId)
   const itemContext = await getCnsItemRuleContext(tenantId, itemId)
@@ -877,7 +896,11 @@ export async function generateManufacturingNo(
       return await computeNextTenantManufacturingNo(
         prisma,
         tenantId,
-        { itemCode: itemContext.itemCode, itemType: itemContext.itemType },
+        {
+          itemCode: itemContext.itemCode,
+          itemType: itemContext.itemType,
+          extra: await getWorkOrderRuleExtraContext(tenantId, productionPlanItemId),
+        },
         new Date(),
         sequenceOffset,
       )
@@ -969,7 +992,7 @@ export async function createWorkOrder(data: CreateWorkOrderInput, tenantId: stri
         const orderNo = await generateOrderNo(tenantId)
         const finalManufacturingNo = useManualManufacturingNo
           ? trimmed!
-          : await generateManufacturingNo(tenantId, headerFields.itemId, attempt)
+          : await generateManufacturingNo(tenantId, headerFields.itemId, attempt, headerFields.productionPlanItemId)
 
         await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {
           await lockProductionPlanItemsForUpdate(tx, tenantId, [headerFields.productionPlanItemId])
@@ -1084,7 +1107,7 @@ export async function updateWorkOrder(id: string, data: CreateWorkOrderInput) {
     { blankMeansAuto: false },
   )
   const nextManufacturingNo = trimmed && trimmed.length > 0
-    ? (manualDisabled ? await generateManufacturingNo(existing.tenantId, headerFields.itemId) : trimmed)
+    ? (manualDisabled ? await generateManufacturingNo(existing.tenantId, headerFields.itemId, 0, headerFields.productionPlanItemId) : trimmed)
     : null
 
   await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {

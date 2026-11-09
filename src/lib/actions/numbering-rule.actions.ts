@@ -12,7 +12,7 @@ import { assertSessionTenant, requireLotEntryReader } from "@/lib/lot-numbering/
 import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
 import { computeNextTenantRuleLotNo, parseLotRuleTokens } from "@/lib/lot-numbering/tenant-lot-rule"
-import { parseManufacturingRuleTokens } from "@/lib/lot-numbering/tenant-manufacturing-rule"
+import { validateManufacturingRuleForSave } from "@/lib/lot-numbering/tenant-manufacturing-rule"
 
 /** 번호 규칙 type 검증(지원: LOT, SERIAL). */
 function assertNumberingType(type: unknown): void {
@@ -53,13 +53,18 @@ export async function upsertNumberingRule(
   // LOT 규칙은 자동 발행에 쓰이므로 순번 토큰이 정확히 하나인 규칙만 저장한다(저장 후에야 발행 오류로 알게 되는 일을 막는다).
   if (type === "LOT") parseLotRuleTokens(tokens)
   // 제조번호 규칙(저장 type=SERIAL, 기존 데이터·DB 값 호환을 위해 type 값은 유지)도 같은 방식으로 순번 토큰 1개를 요구한다.
-  if (type === "SERIAL") parseManufacturingRuleTokens(tokens)
+  // 발급 불가능한 규칙(순번 없음, 값을 받을 수 없는 변수에 기본값 없음)은 저장하지 않고 이유를 화면에 돌려준다.
+  if (type === "SERIAL") {
+    const problem = validateManufacturingRuleForSave(tokens)
+    if (problem) return { success: false as const, message: problem }
+  }
   await prisma.numberingRule.upsert({
     where: { tenantId_type: { tenantId, type } },
     update: { tokens: tokens as any },
     create: { tenantId, type, tokens: tokens as any },
   })
   revalidatePath("/app/mes/lot-rules")
+  return { success: true as const }
 }
 
 // ─── 빌더용 공통코드 그룹 목록 ───────────────────────────────────────────────

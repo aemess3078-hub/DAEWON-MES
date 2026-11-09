@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client"
-import type { Token } from "@/lib/types/numbering-rule"
+import { CONTEXT_KEY_LABELS, type ContextKey, type Token } from "@/lib/types/numbering-rule"
 import { escapeCnsNumberingRegExp } from "./lot-number-generator"
 import {
   buildLotRuleTemplate,
@@ -23,6 +23,71 @@ export const MFG_RULE_NOT_CONFIGURED_MESSAGE =
   "제조번호 규칙이 설정되지 않았거나 사용 중지 상태입니다. 번호 규칙 관리에서 제조번호 규칙을 저장·활성화하거나 제조번호를 직접 입력해 주세요."
 export const MFG_RULE_INVALID_MESSAGE =
   "저장된 제조번호 규칙에 순번 토큰이 정확히 하나 있어야 합니다. 번호 규칙 관리에서 규칙을 확인해 주세요."
+
+/**
+ * 작업지시 등록 시 서버가 실제 데이터로 채울 수 있는 변수.
+ *  - ITEM_CODE / ITEM_TYPE : 작업지시 품목
+ *  - CLIENT_CODE           : 작업지시에 연결된 생산계획 품목 → 수주 품목 → 수주 → 고객(거래처) 코드. 재고 생산 등 수주 연결이 없으면 값이 없다.
+ * 그 외(LINE_CODE / PROD_CODE / SHIFT)는 작업지시 등록에서 받는 데이터가 없으므로 규칙의 기본값(fallback)으로만 채워진다.
+ */
+export const MFG_DATA_BACKED_KEYS: readonly ContextKey[] = ["ITEM_CODE", "ITEM_TYPE", "CLIENT_CODE"]
+
+const MISSING_REASON: Record<ContextKey, string> = {
+  CLIENT_CODE: "연결된 생산계획·수주에서 고객코드를 찾을 수 없음(재고 생산 등 수주 연결 없음)",
+  ITEM_CODE: "품목코드를 확인할 수 없음",
+  ITEM_TYPE: "품목유형을 확인할 수 없음",
+  LINE_CODE: "작업지시 등록 시 입력받지 않는 값",
+  PROD_CODE: "작업지시 등록 시 입력받지 않는 값",
+  SHIFT: "작업지시 등록 시 입력받지 않는 값",
+}
+
+function contextValue(token: Extract<Token, { type: "CONTEXT" }>, ctx: TenantLotRuleContext): string {
+  const data =
+    token.key === "ITEM_CODE" ? ctx.itemCode
+    : token.key === "ITEM_TYPE" ? ctx.itemType
+    : ctx.extra?.[token.key]
+  // ITEM_CODE 는 buildLotRuleTemplate 도 기본값을 쓰지 않는다(품목코드는 반드시 실제 값).
+  if (token.key === "ITEM_CODE") return data?.trim() ?? ""
+  return data?.trim() || token.fallback?.trim() || ""
+}
+
+/** 규칙의 변수 중 실제 값도 기본값도 없는 것의 목록(안내 메시지용). */
+export function findMissingManufacturingContext(tokens: Token[], ctx: TenantLotRuleContext): ContextKey[] {
+  const missing: ContextKey[] = []
+  for (const t of tokens) {
+    if (t.type !== "CONTEXT" || missing.includes(t.key)) continue
+    if (!contextValue(t, ctx)) missing.push(t.key)
+  }
+  return missing
+}
+
+export function missingManufacturingContextMessage(keys: ContextKey[]): string {
+  const detail = keys.map((k) => `${CONTEXT_KEY_LABELS[k]}(${MISSING_REASON[k]})`).join(", ")
+  return `제조번호를 자동 발행할 수 없습니다. 값이 없는 변수: ${detail}. 번호 규칙 관리에서 해당 변수에 기본값을 설정하거나 제조번호를 직접 입력해 주세요.`
+}
+
+/**
+ * 저장 시 검증: 순번 토큰 1개 + 작업지시에서 값을 얻을 방법이 없는 변수(라인코드·생산코드·교대)는 기본값이 있어야 한다.
+ * (고객코드는 수주 연결 여부에 따라 달라지므로 저장은 허용하고, 발행 시 값이 없으면 변수명을 짚어 안내한다.)
+ * 문제가 있으면 안내 메시지를, 없으면 null 을 돌려준다.
+ */
+export function validateManufacturingRuleForSave(raw: unknown): string | null {
+  let tokens: Token[]
+  try {
+    tokens = parseManufacturingRuleTokens(raw)
+  } catch (error) {
+    return error instanceof Error ? error.message : MFG_RULE_INVALID_MESSAGE
+  }
+  const unsupplied = tokens.filter(
+    (t): t is Extract<Token, { type: "CONTEXT" }> =>
+      t.type === "CONTEXT" && !MFG_DATA_BACKED_KEYS.includes(t.key) && !t.fallback?.trim(),
+  )
+  if (unsupplied.length > 0) {
+    const names = Array.from(new Set(unsupplied.map((t) => CONTEXT_KEY_LABELS[t.key]))).join(", ")
+    return `제조번호 규칙을 저장할 수 없습니다. ${names} 변수는 작업지시 등록에서 값을 받지 않으므로 기본값(직접 입력)을 설정해야 합니다(공통코드 연결을 해제하고 기본값을 입력해 주세요).`
+  }
+  return null
+}
 
 type RuleDb = {
   numberingRule: {
@@ -72,12 +137,14 @@ export async function computeNextTenantManufacturingNo(
 ): Promise<string> {
   const rule = await loadActiveManufacturingRule(db, tenantId)
   if (!rule) throw new Error(MFG_RULE_NOT_CONFIGURED_MESSAGE)
+  // 값도 기본값도 없는 변수는 어떤 것이 빠졌는지 짚어서 안내한다.
+  const missing = findMissingManufacturingContext(rule.tokens, context)
+  if (missing.length > 0) throw new Error(missingManufacturingContextMessage(missing))
   let template: LotRuleTemplate
   try {
     template = buildLotRuleTemplate(rule.tokens, context, date)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : ""
-    throw new Error(message.includes("품목 코드") ? message.replace("LOT 번호", "제조번호") : "제조번호 규칙에 필요한 값을 알 수 없어 자동 발행할 수 없습니다. 번호 규칙을 확인하거나 제조번호를 직접 입력해 주세요.")
+  } catch {
+    throw new Error(MFG_RULE_INVALID_MESSAGE)
   }
   if (options.serialize && typeof db.$executeRaw === "function") {
     await db.$executeRaw(Prisma.sql`SELECT pg_advisory_xact_lock(hashtext(${`mfgno:${tenantId}:${template.stem}|${template.suffix}`}))`)
