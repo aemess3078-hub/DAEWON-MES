@@ -7,7 +7,7 @@ import { revalidatePath } from "next/cache"
 import type { Token, ContextKey } from "@/lib/types/numbering-rule"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
-import { assertDeveloperOnly } from "@/lib/auth/daewon-scope.server"
+import { assertNumberingRuleManager } from "@/lib/auth/daewon-scope.server"
 import { assertSessionTenant, requireLotEntryReader } from "@/lib/lot-numbering/lot-session-access"
 import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
 import { toUserErrorMessage } from "@/lib/errors/user-error"
@@ -23,7 +23,7 @@ function assertNumberingType(type: unknown): void {
 
 export async function getNumberingRules(tenantId: string) {
   await requireTenantAccess(tenantId)
-  await assertDeveloperOnly()
+  await assertNumberingRuleManager()
   let rules: any[]
   try {
     rules = await prisma.numberingRule.findMany({
@@ -47,7 +47,7 @@ export async function upsertNumberingRule(
   tokens: Token[]
 ) {
   await requireTenantAccess(tenantId)
-  await assertDeveloperOnly()
+  await assertNumberingRuleManager()
   await requireResourcePermission("LOT", "UPDATE")
   assertNumberingType(type)
   // LOT 규칙은 자동 발행에 쓰이므로 순번 토큰이 정확히 하나인 규칙만 저장한다(저장 후에야 발행 오류로 알게 되는 일을 막는다).
@@ -71,7 +71,7 @@ export async function upsertNumberingRule(
 
 export async function getCodeGroupsForBuilder(tenantId: string) {
   await requireTenantAccess(tenantId)
-  await assertDeveloperOnly()
+  await assertNumberingRuleManager()
   return prisma.codeGroup.findMany({
     where: { tenantId, isActive: true },
     select: { groupCode: true, groupName: true },

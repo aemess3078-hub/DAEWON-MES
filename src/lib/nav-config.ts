@@ -127,6 +127,8 @@ export const MES_NAV: NavItem[] = [
         children: [
           { id: 'nav-lot', parentId: 'nav-history', label: 'LOT관리', icon: 'Tag', href: '/app/mes/lot', displayOrder: 1, children: [] },
           { id: 'nav-traceability', parentId: 'nav-history', label: 'LOT/제조이력추적', icon: 'Network', href: '/app/mes/traceability', displayOrder: 2, children: [] },
+          // 번호 규칙(LOT·제조번호): 오너·관리자(+개발자)에게 노출
+          { id: 'nav-lot-rules', parentId: 'nav-history', label: '번호 규칙', icon: 'Fingerprint', href: '/app/mes/lot-rules', displayOrder: 3, minRole: 'ADMIN', children: [] },
         ],
       },
     ],
@@ -171,8 +173,6 @@ export const MES_NAV: NavItem[] = [
     developerOnly: true,
     children: [
       { id: 'nav-features', parentId: 'section-system', label: '기능 관리', icon: 'Puzzle', href: '/app/mes/features', displayOrder: 1, children: [] },
-      // TODO(DAEWON): LOT 채번 규칙 미확정. 규칙 확정 전까지 이 화면에서 임의 규칙을 만들지 않는다.
-      { id: 'nav-lot-rules', parentId: 'section-system', label: '번호 규칙', icon: 'Fingerprint', href: '/app/mes/lot-rules', displayOrder: 2, children: [] },
     ],
   },
 ];

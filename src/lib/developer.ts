@@ -23,6 +23,17 @@ export function isDeveloperUser(
 }
 
 /**
+ * 번호 규칙(LOT·제조번호) 관리 가능 여부.
+ * 조건: 개발자 계정('test') OR role 이 OWNER / ADMIN
+ */
+export function canManageNumberingRules(
+  user: { loginId: string; role: UserRole } | null | undefined,
+): boolean {
+  if (!user) return false
+  return user.loginId === DEVELOPER_LOGIN_ID || user.role === 'OWNER' || user.role === 'ADMIN'
+}
+
+/**
  * 사용자관리 전체 탭 접근 가능 여부.
  * 조건: 로그인 ID가 'test' OR role이 OWNER
  */

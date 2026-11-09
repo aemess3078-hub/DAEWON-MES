@@ -184,7 +184,7 @@ async function main() {
   inject("next/cache", { revalidatePath: () => {} })
   // getTenantId 는 실제 구현처럼 세션이 없어도 DEFAULT_TENANT_ID 로 대체할 수 있다 — 조회 액션이 이 값을 쓰지 않아야 한다
   inject("../src/lib/auth", { getTenantId: async () => process.env.DEFAULT_TENANT_ID ?? session.tenantId, getCurrentUser: async () => null })
-  inject("../src/lib/auth/daewon-scope.server", { assertDeveloperOnly: async () => {}, assertDaewonFeatureScope: async () => {} })
+  inject("../src/lib/auth/daewon-scope.server", { assertDeveloperOnly: async () => {}, assertNumberingRuleManager: async () => {}, assertDaewonFeatureScope: async () => {} })
   // 권한 판정 함수(canReadMenuCode/hasResourcePermission)는 실제 모듈 것을 쓰고, 현재 사용자의 권한 스냅샷만 가짜로 대체한다
   const realPermissions = require("../src/lib/auth/role-permissions") as Record<string, unknown>
   inject("../src/lib/auth/role-permissions", { ...realPermissions, getCurrentPermissionSnapshot: async () => snapshot() })
@@ -344,7 +344,7 @@ async function main() {
 
   // 기존 기능 보호
   ok(fingerprint(lotStatusActionBlock(lotSrc) ?? "") === LOT_STATUS_ACTION_BASELINE_FINGERPRINT, "25 LOT 상태 변경 액션은 변경하지 않았다(지문 비교)")
-  ok(["getNumberingRules", "upsertNumberingRule", "getCodeGroupsForBuilder"].every((name) => (between(nrSrc, `export async function ${name}`, "\n}\n") ?? "").includes("assertDeveloperOnly()")), "25b 개발자 전용 채번 관리 액션(getNumberingRules·upsertNumberingRule·getCodeGroupsForBuilder)은 이번에 변경하지 않았다 — 개발자 가드 유지")
+  ok(["getNumberingRules", "upsertNumberingRule", "getCodeGroupsForBuilder"].every((name) => (between(nrSrc, `export async function ${name}`, "\n}\n") ?? "").includes("assertNumberingRuleManager()")), "25b 채번 관리 액션(getNumberingRules·upsertNumberingRule·getCodeGroupsForBuilder)은 개발자·오너·관리자 가드(assertNumberingRuleManager)로 보호된다")
   const pageSrc = readSource("src/app/app/mes/lot/page.tsx")
   ok(pageSrc.includes("getLots()") && pageSrc.includes("getItemsForLot()") && listFiles("src").filter((f) => /\.(ts|tsx)$/.test(f) && f !== "src/lib/actions/lot.actions.ts" && /getLotForwardTrace|getLotBackwardTrace|searchLotByNo|getSitesForLot/.test(readSource(f))).length === 0, "25c LOT 화면 호출(getLots·getItemsForLot) 형태 유지, 추적·검색·사업장 조회는 다른 화면의 호출처가 없다(영향 범위 없음)")
 
