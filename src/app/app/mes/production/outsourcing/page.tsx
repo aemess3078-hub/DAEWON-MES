@@ -17,6 +17,7 @@ export default async function OutsourcingPage({ searchParams }: Props) {
   const params = searchParams ? await searchParams : {}
 
   const rawStatus = params.status?.trim()
+  const showAll = rawStatus === "ALL"
   const status =
     rawStatus &&
     Object.values(PurchaseOrderStatus).includes(rawStatus as PurchaseOrderStatus)
@@ -28,6 +29,7 @@ export default async function OutsourcingPage({ searchParams }: Props) {
     to: params.to?.trim() || undefined,
     supplierId: params.supplierId?.trim() || undefined,
     status: status || undefined,
+    scope: showAll ? "all" : "active",
   })
 
   return (

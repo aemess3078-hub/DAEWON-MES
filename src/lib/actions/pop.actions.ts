@@ -632,7 +632,19 @@ export async function getPopWorkQueueRows(tenantId: string): Promise<PopWorkQueu
     ).map((w) => w.workOrderId)
   )
 
+  // 외주출고(OUTSOURCED)·외주입고 검사대기(RECEIVED) 재공이 있는 공정은 POP 작업/실적 등록을 막는다.
+  const outsourcedByOperation = new Map<string, "OUTSOURCED" | "RECEIVED">()
+  for (const w of await prisma.wipUnit.findMany({
+    where: { tenantId, workOrderId: { in: workOrderIds }, status: { in: ["OUTSOURCED", "RECEIVED"] } },
+    select: { workOrderOperationId: true, status: true },
+  })) {
+    const prev = outsourcedByOperation.get(w.workOrderOperationId)
+    if (prev !== "OUTSOURCED") outsourcedByOperation.set(w.workOrderOperationId, w.status as "OUTSOURCED" | "RECEIVED")
+  }
+
   return operations.flatMap((operation): PopWorkQueueRow[] => {
+    const outsourceState = outsourcedByOperation.get(operation.id) ?? null
+    const outsourceLabel = outsourceState === "OUTSOURCED" ? "외주 진행 중" : outsourceState === "RECEIVED" ? "외주 검사 대기" : null
     const previousOperations = operation.workOrder.operations.filter(
       (candidate) => candidate.seq < operation.seq
     )
@@ -641,7 +653,7 @@ export async function getPopWorkQueueRows(tenantId: string): Promise<PopWorkQueu
     )
     const materialIssuanceReady = issuedWorkOrderIds.has(operation.workOrder.id)
     const operationCanWork =
-      (operation.status === "IN_PROGRESS" || previousCompleted) && materialIssuanceReady
+      (operation.status === "IN_PROGRESS" || previousCompleted) && materialIssuanceReady && outsourceState === null
     const materialLotQty = operation.workOrder.materialLots.reduce(
       (sum, lot) => sum + Number(lot.qty),
       0
@@ -689,7 +701,9 @@ export async function getPopWorkQueueRows(tenantId: string): Promise<PopWorkQueu
             canWork,
             materialIssuanceReady,
             availabilityLabel:
-              assignment.status === "IN_PROGRESS"
+              outsourceLabel
+                ? outsourceLabel
+                : assignment.status === "IN_PROGRESS"
                 ? "진행중"
                 : !materialIssuanceReady
                   ? "자재출고 대기"
@@ -714,7 +728,9 @@ export async function getPopWorkQueueRows(tenantId: string): Promise<PopWorkQueu
       canWork: operationCanWork,
       materialIssuanceReady,
       availabilityLabel:
-        operation.status === "IN_PROGRESS"
+        outsourceLabel
+          ? outsourceLabel
+          : operation.status === "IN_PROGRESS"
           ? "진행중"
           : !materialIssuanceReady
             ? "자재출고 대기"
