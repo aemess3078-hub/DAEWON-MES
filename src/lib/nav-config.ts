@@ -115,6 +115,8 @@ export const MES_NAV: NavItem[] = [
           { id: 'nav-change-management', parentId: 'nav-quality', label: '변경관리', icon: 'GitPullRequest', href: '/app/mes/ecn', displayOrder: 4, children: [] },
           // 계측기 검교정관리: 한 화면에서 계측기 관리대장 / 검교정 일정관리 / 검교정 이력관리 탭으로 전환한다.
           { id: 'nav-calibration', parentId: 'nav-quality', label: '계측기 검교정관리', icon: 'Gauge', href: '/app/mes/quality/calibration', displayOrder: 5, children: [] },
+          // 불량코드관리: 기존 /app/mes/defects 화면(등록·수정·삭제)과 DEFECT_MANAGEMENT 권한을 그대로 사용한다. POP 불량 실적 사유로 쓰인다.
+          { id: 'nav-defects', parentId: 'nav-quality', label: '불량코드관리', icon: 'AlertTriangle', href: '/app/mes/defects', displayOrder: 6, children: [] },
         ],
       },
       // 7. 이력관리
@@ -200,7 +202,6 @@ export const DAEWON_HIDDEN_NAV: ReadonlyArray<{ id: string; label: string; href:
   { id: 'nav-recurrence-prevention', label: '재발방지관리', href: '/app/mes/quality/recurrence-prevention', reason: '목표 메뉴 외' },
   // 기준정보 부가
   { id: 'nav-common-codes', label: '코드관리', href: '/app/mes/common-codes', reason: '메뉴만 숨김(개발자 포함 전원 비노출) — 화면/API/DB/권한/공통코드 데이터 유지, 개발자는 URL 직접 접근' },
-  { id: 'nav-defects', label: '불량코드관리', href: '/app/mes/defects', reason: '메뉴만 숨김(화면/API/DB/권한 유지) — 불량 데이터는 다른 기능에서 계속 사용' },
   { id: 'nav-attachments', label: '첨부파일관리', href: '/app/mes/attachments', reason: '메뉴만 숨김(화면/API/DB/권한 유지)' },
   { id: 'nav-audit-log', label: '감사로그', href: '/app/mes/audit-log', reason: '메뉴만 숨김(화면/API/DB/권한 유지)' },
   { id: 'nav-mold-management', label: '금형·치공구관리', href: '/app/mes/master/molds', reason: '목표 메뉴 외' },
