@@ -33,8 +33,6 @@ import { generateReceivingRequestId } from "@/lib/receiving-request-id"
 function isLotManaged(item: MaterialRequirement["item"]): boolean {
   return item.isLotTracked || item.itemType === "SEMI_FINISHED"
 }
-import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
-import { buildIssueLabelPlan, type LabelPlan } from "@/lib/label/label-items"
 import { LotQrScanSection } from "./lot-qr-scan-section"
 import { applyScannedLot, type ApplyScannedLotResult } from "@/lib/material-issue/lot-scan"
 
@@ -70,10 +68,6 @@ export function IssueFormDialog({
   const [lotSplitsMap, setLotSplitsMap] = useState<Record<string, LotSplitRow[]>>({})  // LOT 품목 분할행
   const [lotStockMap, setLotStockMap] = useState<Record<string, LotStockOption[]>>({})
   const [lotLoadingMap, setLotLoadingMap] = useState<Record<string, boolean>>({})
-  const [printOpen, setPrintOpen] = useState(false)
-  // 출고 확정(서버 처리 성공) 직후의 라벨 대상 스냅샷. 이 값이 있어야 실제 LOT 라벨을 출력할 수 있다.
-  // 출고 후 router.refresh() 로 화면 데이터가 바뀌어도 확정 당시의 LOT/수량으로 출력한다.
-  const [confirmedIssuePlan, setConfirmedIssuePlan] = useState<LabelPlan | null>(null)
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null)
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
   // 출고 요청 멱등 키: 한 번의 출고 작업(재시도 포함)에 같은 값을 쓰고, 성공하거나 창을 새로 열 때만 새로 만든다
@@ -205,7 +199,6 @@ export function IssueFormDialog({
       setLotSplitsMap({})
       setLotStockMap({})
       setLotLoadingMap({})
-      setConfirmedIssuePlan(null)
     }
     onOpenChange(nextOpen)
   }
@@ -323,12 +316,7 @@ export function IssueFormDialog({
         }
         issueRequestIdRef.current = null
         router.refresh()
-        // 출고가 확정되었으므로 확정 당시 선택한 LOT 별 QR 라벨을 바로 출력할 수 있게 한다(라벨 창을 닫으면 출고 창도 닫힘).
-        if (issueLabelPlan.items.length > 0) {
-          setConfirmedIssuePlan(issueLabelPlan)
-          setPrintOpen(true)
-          return
-        }
+        // 자재 LOT 라벨은 최초 자재입고 시 발행하므로 출고 확정 후 라벨 창은 띄우지 않는다.
         handleOpen(false)
       })
     } catch (error) {
@@ -368,25 +356,6 @@ export function IssueFormDialog({
       })
       .filter((s): s is { itemName: string; lotNo: string; warehouseName: string; qty: number; unit: string } => s !== null)
   })
-
-  // ── 출고 LOT 라벨 ────────────────────────────────────────────────────────────
-  // 선택한 원자재 LOT 별 QR 라벨. LOT 분할 출고는 분할행마다 그 행의 출고수량으로 1장씩 만든다.
-  // LOT 관리 품목이 아니거나 LOT 가 선택되지 않은 항목은 임의 QR/LOT 번호 없이 사유(notices)로만 안내한다.
-  const issueLabelPlan = buildIssueLabelPlan(
-    pendingMaterials.map((material) => ({
-      itemId: material.itemId,
-      itemCode: material.item.code,
-      itemName: material.item.name,
-      uom: material.item.uom,
-      lotManaged: isLotManaged(material.item),
-      issueQty: Number(qtyMap[material.itemId] ?? material.pendingQty),
-    })),
-    lotSplitsMap,
-    (itemId, lotValue) => {
-      const lot = lotStockMap[itemId]?.find((l) => getLotSelectValue(l) === lotValue)
-      return lot ? { key: lotValue, lotNo: lot.lotNo } : null
-    },
-  )
 
   // ── 렌더 ─────────────────────────────────────────────────────────────────────
 
@@ -428,7 +397,7 @@ export function IssueFormDialog({
                   pendingQty: material.pendingQty,
                   lotManaged: isLotManaged(material.item),
                 }))}
-                disabled={isPending || confirmedIssuePlan !== null}
+                disabled={isPending}
                 title="출고 자재 목록"
                 onSelectLot={handleScannedLot}
                 isLotSelected={(itemId, lotId) => (lotSplitsRef.current[itemId] ?? []).some((row) => row.lotValue.startsWith(`${lotId}:`))}
@@ -779,52 +748,17 @@ export function IssueFormDialog({
         </div>
 
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => setPrintOpen(true)}
-            className="mr-auto"
-            disabled={pendingMaterials.length === 0}
-          >
-            LOT 라벨 출력
-          </Button>
           <Button variant="outline" onClick={() => handleOpen(false)} disabled={isPending}>
             취소
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={isPending || pendingMaterials.length === 0 || confirmedIssuePlan !== null}
+            disabled={isPending || pendingMaterials.length === 0}
           >
             {isPending ? "처리 중..." : "출고 처리"}
           </Button>
         </DialogFooter>
       </DialogContent>
-
-      <BarcodePrintDialog
-        open={printOpen}
-        onOpenChange={(next) => {
-          setPrintOpen(next)
-          // 출고가 확정된 뒤 라벨 창을 닫으면 출고 창도 닫는다(중복 출고 방지).
-          if (!next && confirmedIssuePlan) handleOpen(false)
-        }}
-        title={`출고 자재 LOT 라벨 - ${workOrder.orderNo}`}
-        purpose="ISSUE"
-        context={`출고 ${workOrder.orderNo}`}
-        printBlockedReason={
-          confirmedIssuePlan
-            ? undefined
-            : "출고 확정 후 LOT 라벨을 출력할 수 있습니다. 지금은 미리보기만 가능합니다(시험용 라벨은 지금도 출력할 수 있습니다)."
-        }
-        notices={(confirmedIssuePlan ?? issueLabelPlan).notices}
-        testCandidates={confirmedIssuePlan ? undefined : issueLabelPlan.candidates}
-        items={(confirmedIssuePlan ?? issueLabelPlan).items.map((l) => ({
-          itemCode: l.itemCode,
-          itemName: l.itemName,
-          lotNo: l.lotNo,
-          dateLabel: l.dateLabel,
-          quantity: l.quantity,
-          uom: l.uom,
-        }))}
-      />
     </Dialog>
   )
 }
