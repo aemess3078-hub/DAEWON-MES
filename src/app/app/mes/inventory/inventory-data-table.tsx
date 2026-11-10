@@ -8,6 +8,7 @@ import type { GroupedInventoryStock } from "@/lib/actions/inventory.actions"
 import { Input } from "@/components/ui/input"
 import { useUserRole } from "@/lib/contexts/user-role-context"
 import { StockAdjustmentDialog } from "./stock-adjustment-dialog"
+import { StockTransferDialog } from "./stock-transfer-dialog"
 import { formatQuantity } from "@/lib/utils"
 import {
   Select,
@@ -129,7 +130,24 @@ function InventoryDetailContent({ item }: { item: GroupedInventoryStock }) {
                   </td>
                   {canAdjust && (
                     <td className="px-3 py-2 text-right">
-                      <StockAdjustmentDialog
+                      <div className="flex items-center justify-end gap-2">
+                        <StockTransferDialog
+                              target={{
+                                balanceId: b.balanceId,
+                                itemId: item.itemId,
+                                itemCode: item.itemCode,
+                                itemName: item.itemName,
+                                uom: item.uom,
+                                siteName: b.siteName,
+                                warehouseId: b.warehouseId,
+                                warehouseCode: b.warehouseCode,
+                                warehouseName: b.warehouseName,
+                                lotNo: b.lotNo,
+                                qtyOnHand: b.qtyOnHand,
+                                qtyAvailable: b.qtyAvailable,
+                              }}
+                            />
+                        <StockAdjustmentDialog
                         target={{
                           balanceId: b.balanceId,
                           itemId: item.itemId,
@@ -146,6 +164,7 @@ function InventoryDetailContent({ item }: { item: GroupedInventoryStock }) {
                           qtyOnHand: b.qtyOnHand,
                         }}
                       />
+                      </div>
                     </td>
                   )}
                 </tr>

@@ -758,3 +758,261 @@ export async function getStockAdjustmentHistory(): Promise<StockAdjustmentHistor
     note: r.note,
   }))
 }
+
+// ─── 창고 간 재고이동 ─────────────────────────────────────────────────────────
+//
+// 설계 원칙:
+//   1) 출발 balance 에서 qty 만큼 차감, 도착 balance(동일 품목·LOT)에 qty 만큼 가산한다.
+//      전체 qtyOnHand 합계는 변하지 않는다.
+//   2) 같은 트랜잭션에서 InventoryTransaction(TRANSFER) 1건과 AuditLog 를 남긴다.
+//   3) LOT 는 그대로 유지한다(LOT 번호/ID 불변).
+//   4) 이동 가능 수량은 가용재고(qtyAvailable) 이내. 보류수량(qtyHold)은 이동하지 않는다.
+//   5) requestId 로 중복 요청(더블클릭/재전송)을 막는다.
+
+const STOCK_TRANSFER_REF_TYPE = "STOCK_TRANSFER"
+
+export type StockTransferInput = {
+  balanceId: string
+  toWarehouseId: string
+  qty: number
+  reason: string
+  requestId: string
+}
+
+export type StockTransferResult = {
+  success: boolean
+  error?: string
+  txNo?: string
+  qty?: number
+  duplicate?: boolean
+}
+
+export type TransferWarehouseOption = {
+  id: string
+  code: string
+  name: string
+  siteId: string
+  siteName: string
+}
+
+export async function getTransferWarehouses(): Promise<TransferWarehouseOption[]> {
+  const tenantId = await getTenantId()
+  const rows = await prisma.warehouse.findMany({
+    where: { tenantId },
+    select: { id: true, code: true, name: true, siteId: true, site: { select: { name: true } } },
+    orderBy: [{ siteId: "asc" }, { code: "asc" }],
+  })
+  return rows.map((w) => ({ id: w.id, code: w.code, name: w.name, siteId: w.siteId, siteName: w.site.name }))
+}
+
+export async function transferInventoryStock(input: StockTransferInput): Promise<StockTransferResult> {
+  await requireResourcePermission("INVENTORY", "UPDATE")
+  let actor
+  try {
+    actor = await requireRole("MANAGER")
+  } catch {
+    return { success: false, error: "재고이동 권한이 없습니다. (MANAGER 이상 필요)" }
+  }
+  const tenantId = actor.tenantId
+  const balanceId = input.balanceId?.trim()
+  const toWarehouseId = input.toWarehouseId?.trim()
+  const reason = input.reason?.trim()
+  const requestId = input.requestId?.trim()
+  const qty = Number(Number(input.qty).toFixed(6))
+
+  if (!balanceId) return { success: false, error: "출발 재고를 찾을 수 없습니다." }
+  if (!toWarehouseId) return { success: false, error: "도착 창고를 선택해 주세요." }
+  if (!reason) return { success: false, error: "이동 사유를 입력해 주세요." }
+  if (!requestId) return { success: false, error: "요청 식별자가 없습니다. 팝업을 다시 열어 주세요." }
+  if (!Number.isFinite(qty) || qty <= 0) return { success: false, error: "이동수량은 0보다 큰 숫자여야 합니다." }
+
+  try {
+    let finalTxNo: string | null = null
+    let duplicate = false
+    await withQuantityTransactionRetry(async () => {
+      let lastError: unknown
+      for (let attempt = 0; attempt < BUSINESS_NUMBER_MAX_ATTEMPTS; attempt++) {
+        try {
+          await prisma.$transaction(async (tx) => {
+            const owned = await tx.inventoryBalance.findFirst({
+              where: { id: balanceId, tenantId },
+              select: { id: true },
+            })
+            if (!owned) throw new Error("출발 재고를 찾을 수 없습니다.")
+
+            // 출발 balance 잠금 → 동일 요청/동시 이동 직렬화
+            await lockInventoryBalancesForUpdate(tx, [balanceId])
+
+            // 중복 요청 방지(잠금 이후 확인)
+            const prior = await tx.inventoryTransaction.findFirst({
+              where: { tenantId, refType: STOCK_TRANSFER_REF_TYPE, refId: requestId },
+              select: { txNo: true },
+            })
+            if (prior) {
+              finalTxNo = prior.txNo
+              duplicate = true
+              return
+            }
+
+            const from = await tx.inventoryBalance.findFirst({
+              where: { id: balanceId, tenantId },
+              include: {
+                item: { select: { id: true, tenantId: true, code: true, isLotTracked: true } },
+                warehouse: { select: { id: true, tenantId: true, siteId: true, code: true, name: true } },
+                lot: { select: { id: true, tenantId: true, itemId: true } },
+              },
+            })
+            if (!from) throw new Error("출발 재고를 찾을 수 없습니다.")
+            if (from.item.tenantId !== tenantId || from.warehouse.tenantId !== tenantId) {
+              throw new Error("재고의 테넌트 기준정보가 올바르지 않습니다.")
+            }
+            if (from.item.isLotTracked && !from.lotId) {
+              throw new Error("LOT 관리 품목의 LOT 미지정 재고는 이동할 수 없습니다.")
+            }
+            if (from.lotId && (!from.lot || from.lot.tenantId !== tenantId || from.lot.itemId !== from.itemId)) {
+              throw new Error("재고의 LOT 정보가 품목 또는 테넌트와 일치하지 않습니다.")
+            }
+            if (from.warehouseId === toWarehouseId) {
+              throw new Error("출발 창고와 도착 창고가 같습니다.")
+            }
+
+            const toWarehouse = await tx.warehouse.findFirst({
+              where: { id: toWarehouseId, tenantId },
+              select: { id: true, siteId: true, code: true, name: true },
+            })
+            if (!toWarehouse) throw new Error("도착 창고를 찾을 수 없습니다.")
+
+            const onHandBefore = Number(from.qtyOnHand)
+            const availableBefore = Number(from.qtyAvailable)
+            const hold = Number(from.qtyHold)
+            if (qty > availableBefore) {
+              throw new Error(`이동수량이 가용재고(${availableBefore})를 초과합니다. 보류수량은 이동할 수 없습니다.`)
+            }
+
+            // 도착 balance 생성 경합(LOT 없는 NULL 키 포함) 직렬화
+            const destKey = `${tenantId}|${from.itemId}|${toWarehouse.id}|${from.lotId ?? ""}`
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${destKey}))`
+
+            const dest = await tx.inventoryBalance.findFirst({
+              where: { tenantId, itemId: from.itemId, warehouseId: toWarehouse.id, lotId: from.lotId },
+            })
+            if (dest) await lockInventoryBalancesForUpdate(tx, [dest.id])
+
+            // 출발 차감 (조건부 갱신으로 음수 방지)
+            const dec = await tx.inventoryBalance.updateMany({
+              where: { id: from.id, qtyAvailable: { gte: qty }, qtyOnHand: { gte: qty } },
+              data: { qtyOnHand: { decrement: qty }, qtyAvailable: { decrement: qty } },
+            })
+            if (dec.count !== 1) throw new Error("다른 작업으로 가용재고가 변경되었습니다. 다시 시도해 주세요.")
+
+            // 도착 가산
+            let destId: string
+            let destOnHandBefore = 0
+            if (dest) {
+              destId = dest.id
+              destOnHandBefore = Number(dest.qtyOnHand)
+              await tx.inventoryBalance.update({
+                where: { id: dest.id },
+                data: { qtyOnHand: { increment: qty }, qtyAvailable: { increment: qty } },
+              })
+            } else {
+              const created = await tx.inventoryBalance.create({
+                data: {
+                  tenantId,
+                  siteId: toWarehouse.siteId,
+                  itemId: from.itemId,
+                  warehouseId: toWarehouse.id,
+                  lotId: from.lotId,
+                  qtyOnHand: qty,
+                  qtyAvailable: qty,
+                  qtyHold: 0,
+                },
+              })
+              destId = created.id
+            }
+
+            // 거래번호: 트랜잭션 안에서 (테넌트·일자) advisory lock 후 채번 → 동시 이동에도 중복 없음
+            const { yyyymmdd } = kstDateParts()
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`TRF|${tenantId}|${yyyymmdd}`}))`
+            const lastTx = await tx.inventoryTransaction.findFirst({
+              where: { tenantId, txNo: { startsWith: `TRF-${yyyymmdd}` } },
+              orderBy: { txNo: "desc" },
+              select: { txNo: true },
+            })
+            const nextSeq = lastTx ? (parseInt(lastTx.txNo.split("-")[2] ?? "0", 10) || 0) + 1 : 1
+            const txNo = `TRF-${yyyymmdd}-${String(nextSeq).padStart(4, "0")}`
+
+            await tx.inventoryTransaction.create({
+              data: {
+                tenantId,
+                itemId: from.itemId,
+                lotId: from.lotId,
+                fromLocationId: from.warehouseId,
+                toLocationId: toWarehouse.id,
+                txNo,
+                txType: TransactionType.TRANSFER,
+                qty,
+                refType: STOCK_TRANSFER_REF_TYPE,
+                refId: requestId,
+                note: `재고이동 | ${from.warehouse.code}→${toWarehouse.code} | 수량:${qty} | 사유:${reason}`,
+                txAt: new Date(),
+              },
+            })
+
+            await tx.auditLog.create({
+              data: {
+                tenantId,
+                actorId: actor.profileId,
+                actorType: "USER",
+                actorLabel: actor.name,
+                entityType: "InventoryBalance",
+                entityId: from.id,
+                action: "UPDATE",
+                menuName: "재고이동",
+                beforeData: {
+                  fromBalanceId: from.id,
+                  fromWarehouseId: from.warehouseId,
+                  fromQtyOnHand: onHandBefore,
+                  fromQtyAvailable: availableBefore,
+                  qtyHold: hold,
+                  toWarehouseId: toWarehouse.id,
+                  toQtyOnHand: destOnHandBefore,
+                },
+                afterData: {
+                  itemId: from.itemId,
+                  itemCode: from.item.code,
+                  lotId: from.lotId,
+                  qty,
+                  fromQtyOnHand: Number((onHandBefore - qty).toFixed(6)),
+                  toBalanceId: destId,
+                  toQtyOnHand: Number((destOnHandBefore + qty).toFixed(6)),
+                  reason,
+                  requestId,
+                  txNo,
+                },
+              },
+            })
+
+            finalTxNo = txNo
+          })
+          return
+        } catch (e) {
+          lastError = e
+          if (!isUniqueConstraintError(e, ["tenantId", "txNo"]) || attempt >= BUSINESS_NUMBER_MAX_ATTEMPTS - 1) break
+        }
+      }
+      if (lastError && isUniqueConstraintError(lastError, ["tenantId", "txNo"])) {
+        throw new Error("재고이동번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요.")
+      }
+      throw lastError
+    })
+
+    revalidatePath("/app/mes/inventory")
+    revalidatePath("/app/mes/material/stock")
+    revalidatePath("/app/mes/inventory-transactions")
+
+    return { success: true, txNo: finalTxNo ?? undefined, qty, duplicate }
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : "재고이동 중 오류가 발생했습니다." }
+  }
+}
