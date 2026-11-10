@@ -23,6 +23,13 @@ import {
   type TraceabilityLotGenealogyNode,
 } from "@/lib/actions/manufacturing-traceability.actions"
 import { formatQuantity } from "@/lib/utils"
+import {
+  formatTraceDateTime,
+  getSourceTypeLabel,
+  getWipMovementLabel,
+  isOutsourcingMovement,
+  type TraceabilityLabelTone,
+} from "@/lib/traceability-display"
 
 const WORK_ORDER_STATUS: Record<string, { label: string; className: string }> = {
   DRAFT: { label: "초안", className: "bg-slate-100 text-slate-700" },
@@ -58,21 +65,14 @@ const SHIPMENT_STATUS: Record<string, { label: string; className: string }> = {
   CANCELLED: { label: "취소", className: "bg-red-100 text-red-700" },
 }
 
-const WIP_MOVEMENT_TYPE: Record<string, { label: string; className: string }> = {
-  CREATED: { label: "재공품 생성", className: "bg-sky-100 text-sky-700" },
-  STARTED: { label: "작업시작", className: "bg-blue-100 text-blue-700" },
-  MOVED: { label: "공정이동", className: "bg-indigo-100 text-indigo-700" },
-  HOLD: { label: "보류", className: "bg-amber-100 text-amber-800" },
-  RELEASED: { label: "보류해제", className: "bg-emerald-100 text-emerald-700" },
-  SPLIT: { label: "수량 분리", className: "bg-purple-100 text-purple-700" },
-  MERGE: { label: "병합", className: "bg-purple-100 text-purple-700" },
-  DEFECT: { label: "불량 발생", className: "bg-red-100 text-red-700" },
-  REWORK: { label: "재작업", className: "bg-orange-100 text-orange-700" },
-  SCRAP: { label: "폐기", className: "bg-rose-100 text-rose-700" },
-  OUTSOURCED: { label: "외주출고", className: "bg-cyan-100 text-cyan-700" },
-  RETURNED: { label: "외주입고", className: "bg-cyan-100 text-cyan-700" },
-  COMPLETED: { label: "완료", className: "bg-green-100 text-green-800" },
-  ADJUSTED: { label: "조정", className: "bg-slate-100 text-slate-700" },
+const MOVEMENT_TONE_CLASS: Record<TraceabilityLabelTone, string> = {
+  cyan: "bg-cyan-100 text-cyan-700",
+  emerald: "bg-emerald-100 text-emerald-700",
+  red: "bg-red-100 text-red-700",
+  orange: "bg-orange-100 text-orange-700",
+  purple: "bg-purple-100 text-purple-700",
+  rose: "bg-rose-100 text-rose-700",
+  default: "bg-slate-100 text-slate-700",
 }
 
 function formatDate(value: Date | string | null | undefined): string {
@@ -83,10 +83,7 @@ function formatDate(value: Date | string | null | undefined): string {
 }
 
 function formatDateTime(value: Date | string | null | undefined): string {
-  if (!value) return "-"
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return "-"
-  return `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)}`
+  return formatTraceDateTime(value)
 }
 
 function formatNumber(value: number | null | undefined): string {
@@ -318,6 +315,14 @@ export function ManufacturingTraceabilityClient({
                 <span>{workOrder.item.spec ?? "-"}</span>
               </div>
               <div>
+                <span className="mb-0.5 block text-[13px] text-muted-foreground">작업시작시간</span>
+                <span className="font-mono text-[14px]">{formatDateTime(workOrder.startedAt)}</span>
+              </div>
+              <div>
+                <span className="mb-0.5 block text-[13px] text-muted-foreground">작업완료시간</span>
+                <span className="font-mono text-[14px]">{formatDateTime(workOrder.completedAt)}</span>
+              </div>
+              <div>
                 <span className="mb-0.5 block text-[13px] text-muted-foreground">계획수량</span>
                 <span className="font-semibold">
                   {formatNumber(workOrder.plannedQty)} {workOrder.item.uom}
@@ -400,7 +405,7 @@ export function ManufacturingTraceabilityClient({
                 </thead>
                 <tbody>
                   {result.wipMovements.map((movement) => {
-                    const typeConfig = WIP_MOVEMENT_TYPE[movement.movementType]
+                    const typeConfig = getWipMovementLabel(movement.movementType, movement.sourceType)
                     const fromLabel = movement.fromOperationName
                       ? displayProcessName(movement.fromOperationName)
                       : movement.fromWorkCenterName ?? "-"
@@ -412,8 +417,8 @@ export function ManufacturingTraceabilityClient({
                       <tr key={movement.id} className="border-b last:border-0 hover:bg-slate-50">
                         <td className="py-2.5 pr-4 text-[13px] text-muted-foreground">{formatDateTime(movement.createdAt)}</td>
                         <td className="py-2.5 pr-4">
-                          <span className={`rounded-full px-2 py-0.5 text-[13px] font-medium ${typeConfig?.className ?? "bg-slate-100 text-slate-700"}`}>
-                            {typeConfig?.label ?? movement.movementType}
+                          <span className={`rounded-full px-2 py-0.5 text-[13px] font-medium ${MOVEMENT_TONE_CLASS[typeConfig.tone]}`}>
+                            {typeConfig.label}
                           </span>
                         </td>
                         <td className="py-2.5 pr-4">
@@ -435,7 +440,7 @@ export function ManufacturingTraceabilityClient({
 
           {(() => {
             const outsourcingMovements = result.wipMovements.filter(
-              (m) => m.movementType === "OUTSOURCED" || m.movementType === "RETURNED",
+              (m) => isOutsourcingMovement(m),
             )
             return (
               <Section
@@ -458,22 +463,22 @@ export function ManufacturingTraceabilityClient({
                     </thead>
                     <tbody>
                       {outsourcingMovements.map((movement) => {
-                        const typeConfig = WIP_MOVEMENT_TYPE[movement.movementType]
+                        const typeConfig = getWipMovementLabel(movement.movementType, movement.sourceType)
                         const partnerName =
                           movement.movementType === "OUTSOURCED"
                             ? (movement.toPartnerName ?? "-")
-                            : (movement.fromPartnerName ?? "-")
+                            : (movement.fromPartnerName ?? movement.toPartnerName ?? "-")
                         return (
                           <tr key={movement.id} className="border-b last:border-0 hover:bg-slate-50">
                             <td className="py-2.5 pr-4 text-[13px] text-muted-foreground">{formatDateTime(movement.createdAt)}</td>
                             <td className="py-2.5 pr-4">
-                              <span className={`rounded-full px-2 py-0.5 text-[13px] font-medium ${typeConfig?.className ?? "bg-slate-100 text-slate-700"}`}>
-                                {typeConfig?.label ?? movement.movementType}
+                              <span className={`rounded-full px-2 py-0.5 text-[13px] font-medium ${MOVEMENT_TONE_CLASS[typeConfig.tone]}`}>
+                                {typeConfig.label}
                               </span>
                             </td>
                             <td className="py-2.5 pr-4 text-[13px] font-medium text-foreground">{partnerName}</td>
                             <td className="py-2.5 pr-4 text-right text-[13px]">{formatNumber(movement.qty)}</td>
-                            <td className="py-2.5 pr-4 text-[13px] text-muted-foreground">{movement.sourceType ?? "-"}</td>
+                            <td className="py-2.5 pr-4 text-[13px] text-muted-foreground">{getSourceTypeLabel(movement.sourceType)}</td>
                             <td className="py-2.5 text-[13px] text-muted-foreground">{movement.note ?? "-"}</td>
                           </tr>
                         )
@@ -497,8 +502,8 @@ export function ManufacturingTraceabilityClient({
                     <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">순서</th>
                     <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">공정명</th>
                     <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">상태</th>
-                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">시작일시</th>
-                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">완료일시</th>
+                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">작업시작시간</th>
+                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">작업완료시간</th>
                     <th className="pb-2 pr-4 text-right text-[13px] font-medium text-muted-foreground">양품</th>
                     <th className="pb-2 text-right text-[13px] font-medium text-muted-foreground">불량</th>
                   </tr>
@@ -519,6 +524,46 @@ export function ManufacturingTraceabilityClient({
                       <td className="py-2.5 text-right">
                         {history.defectQty > 0 ? (
                           <span className="font-medium text-red-600">{formatNumber(history.defectQty)}</span>
+                        ) : (
+                          <span className="text-muted-foreground">0</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Section>
+
+          <Section
+            icon={ClipboardList}
+            title="생산실적"
+            empty={(result.productionResults?.length ?? 0) === 0}
+            emptyText="생산실적이 없습니다."
+          >
+            <div className="overflow-x-auto">
+              <table className="w-full text-[14px]">
+                <thead>
+                  <tr className="border-b">
+                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">순서</th>
+                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">공정명</th>
+                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">작업시작시간</th>
+                    <th className="pb-2 pr-4 text-left text-[13px] font-medium text-muted-foreground">작업완료시간</th>
+                    <th className="pb-2 pr-4 text-right text-[13px] font-medium text-muted-foreground">양품</th>
+                    <th className="pb-2 text-right text-[13px] font-medium text-muted-foreground">불량</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.productionResults?.map((pr) => (
+                    <tr key={pr.id} className="border-b last:border-0 hover:bg-slate-50">
+                      <td className="py-2.5 pr-4 text-muted-foreground">{pr.operationSeq}</td>
+                      <td className="py-2.5 pr-4 font-medium">{displayProcessName(pr.processName)}</td>
+                      <td className="py-2.5 pr-4 font-mono text-[13px] text-muted-foreground">{formatDateTime(pr.startedAt)}</td>
+                      <td className="py-2.5 pr-4 font-mono text-[13px] text-muted-foreground">{formatDateTime(pr.endedAt)}</td>
+                      <td className="py-2.5 pr-4 text-right">{formatNumber(pr.goodQty)}</td>
+                      <td className="py-2.5 text-right">
+                        {pr.defectQty > 0 ? (
+                          <span className="font-medium text-red-600">{formatNumber(pr.defectQty)}</span>
                         ) : (
                           <span className="text-muted-foreground">0</span>
                         )}
