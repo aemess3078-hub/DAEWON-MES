@@ -11,6 +11,44 @@ export type TraceabilityLabelTone = "cyan" | "emerald" | "red" | "orange" | "pur
 
 export type MovementLabel = { label: string; tone: TraceabilityLabelTone }
 
+/** 이동 이력 라벨 톤 → 배지 색상 (두 이력추적 화면 공통) */
+export const MOVEMENT_TONE_CLASS: Record<TraceabilityLabelTone, string> = {
+  cyan: "bg-cyan-100 text-cyan-700",
+  emerald: "bg-emerald-100 text-emerald-700",
+  red: "bg-red-100 text-red-700",
+  orange: "bg-orange-100 text-orange-700",
+  purple: "bg-purple-100 text-purple-700",
+  rose: "bg-rose-100 text-rose-700",
+  default: "bg-slate-100 text-slate-700",
+}
+
+// ─── 그 외 코드값 한글 표시(두 이력추적 화면 공통, 알 수 없는 값은 원문 유지) ─────────────────────
+const lookup = (map: Record<string, string>, code: string | null | undefined, fallback = "-") =>
+  code ? (map[code] ?? code) : fallback
+
+const OPERATION_STATUS_LABEL: Record<string, string> = { PENDING: "대기", IN_PROGRESS: "진행중", COMPLETED: "완료", SKIPPED: "건너뜀", CANCELLED: "취소" }
+export const getOperationStatusLabel = (code: string | null | undefined) => lookup(OPERATION_STATUS_LABEL, code)
+
+const INSPECTION_STAGE_LABEL: Record<string, string> = { FIRST: "초물", MID: "중간", FINAL: "종물" }
+export const getInspectionStageLabel = (code: string | null | undefined) => lookup(INSPECTION_STAGE_LABEL, code)
+
+const INSPECTION_RESULT_LABEL: Record<string, string> = { PASS: "합격", FAIL: "불합격", CONDITIONAL: "조건부", PENDING: "대기" }
+export const getInspectionResultLabel = (code: string | null | undefined) => lookup(INSPECTION_RESULT_LABEL, code, "미판정")
+
+const LOT_RELATION_LABEL: Record<string, string> = { INPUT: "투입", OUTPUT: "산출", REWORK: "재작업" }
+export const getLotRelationLabel = (code: string | null | undefined) => lookup(LOT_RELATION_LABEL, code)
+
+const TX_TYPE_LABEL: Record<string, string> = {
+  RECEIPT: "입고", ISSUE: "출고", TRANSFER: "이동", ADJUST: "조정", RETURN: "반품입고", SCRAP: "폐기", SUPPLIER_RETURN: "공급사 반품",
+}
+export const getTxTypeLabel = (code: string | null | undefined) => lookup(TX_TYPE_LABEL, code)
+
+const ITEM_TYPE_LABEL: Record<string, string> = { RAW_MATERIAL: "원자재", SEMI_FINISHED: "반제품", FINISHED: "완제품", CONSUMABLE: "소모품" }
+export const getItemTypeLabel = (code: string | null | undefined) => lookup(ITEM_TYPE_LABEL, code)
+
+const ACTION_STATUS_LABEL: Record<string, string> = { OPEN: "등록", IN_PROGRESS: "진행", VERIFYING: "효과확인", COMPLETED: "완료" }
+export const getActionStatusLabel = (code: string | null | undefined) => lookup(ACTION_STATUS_LABEL, code)
+
 const BASE_MOVEMENT_LABEL: Record<string, MovementLabel> = {
   CREATED: { label: "재공품 생성", tone: "default" },
   STARTED: { label: "작업시작", tone: "default" },

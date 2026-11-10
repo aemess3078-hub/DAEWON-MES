@@ -6,6 +6,20 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { getLotLineageByNo, type LotLineageResult } from "@/lib/actions/lot-lineage.actions"
 import { formatQuantity } from "@/lib/utils"
+import {
+  MOVEMENT_TONE_CLASS,
+  formatTraceDateTime,
+  getActionStatusLabel,
+  getInspectionResultLabel,
+  getInspectionStageLabel,
+  getItemTypeLabel,
+  getLotRelationLabel,
+  getOperationStatusLabel,
+  getSourceTypeLabel,
+  getTxTypeLabel,
+  getWipMovementLabel,
+  summarizeResultTimes,
+} from "@/lib/traceability-display"
 
 type Lineage = NonNullable<LotLineageResult>
 
@@ -67,7 +81,7 @@ function LotSummary({ lineage }: { lineage: Lineage }) {
       <div className="mt-3 grid gap-3 text-[14px] sm:grid-cols-3">
         <div>현재고 <b>{formatQuantity(lineage.inventory.qtyOnHand)}</b></div>
         <div>가용재고 <b>{formatQuantity(lineage.inventory.qtyAvailable)}</b></div>
-        <div>품목유형 <b>{lineage.lot.item.itemType}</b></div>
+        <div>품목유형 <b>{getItemTypeLabel(lineage.lot.item.itemType)}</b></div>
       </div>
     </div>
   )
@@ -208,7 +222,7 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
                 {lineage.parentLots.map((lot) => (
                   <div key={lot.id} className="rounded-lg border p-3 text-[14px]">
                     <div className="font-mono font-semibold">{lot.lotNo}</div>
-                    <div className="text-slate-600">{lot.item.code} · {lot.item.name} · {formatQuantity(lot.qty)} · {lot.relationType}</div>
+                    <div className="text-slate-600">{lot.item.code} · {lot.item.name} · {formatQuantity(lot.qty)} · {getLotRelationLabel(lot.relationType)}</div>
                   </div>
                 ))}
               </div>
@@ -221,7 +235,7 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
                 {lineage.childLots.map((lot) => (
                   <div key={lot.id} className="rounded-lg border p-3 text-[14px]">
                     <div className="font-mono font-semibold">{lot.lotNo}</div>
-                    <div className="text-slate-600">{lot.item.code} · {lot.item.name} · {formatQuantity(lot.qty)} · {lot.relationType}</div>
+                    <div className="text-slate-600">{lot.item.code} · {lot.item.name} · {formatQuantity(lot.qty)} · {getLotRelationLabel(lot.relationType)}</div>
                   </div>
                 ))}
               </div>
@@ -234,8 +248,8 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
                 {lineage.materialIssues.map((issue) => (
                   <div key={issue.id} className="rounded-lg border p-3 text-[14px]">
                     <div className="font-semibold">{issue.workOrder.orderNo} {issue.workOrder.manufacturingNo && `· ${issue.workOrder.manufacturingNo}`}</div>
-                    <div className="text-slate-600">투입 {formatQuantity(issue.qty)} {issue.materialItem.uom} · {issue.materialItem.code} · {new Date(issue.issuedAt).toLocaleString()}</div>
-                    {issue.transaction && <div className="text-[13px] text-slate-500">재고거래 {issue.transaction.txNo} · {issue.transaction.txType}</div>}
+                    <div className="text-slate-600">투입 {formatQuantity(issue.qty)} {issue.materialItem.uom} · {issue.materialItem.code} · {formatTraceDateTime(issue.issuedAt)}</div>
+                    {issue.transaction && <div className="text-[13px] text-slate-500">재고거래 {issue.transaction.txNo} · {getTxTypeLabel(issue.transaction.txType)}</div>}
                   </div>
                 ))}
               </div>
@@ -247,7 +261,7 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
               <div className="space-y-3 text-[14px]">
                 {lineage.receipts.map((receipt) => (
                   <div key={receipt.id} className="rounded-lg border border-green-200 bg-green-50 p-3">
-                    <b>입고</b> {formatQuantity(receipt.receiptQty)} · {receipt.workOrder.orderNo} · {receipt.warehouse.name}/{receipt.location.name} · {new Date(receipt.receiptAt).toLocaleString()}
+                    <b>입고</b> {formatQuantity(receipt.receiptQty)} · {receipt.workOrder.orderNo} · {receipt.warehouse.name}/{receipt.location.name} · {formatTraceDateTime(receipt.receiptAt)}
                   </div>
                 ))}
                 {lineage.shipments.map((shipment) => (
@@ -262,18 +276,23 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
           <Section title="외주 이력">
             {lineage.outsourcingHistory.length === 0 ? <Empty /> : (
               <div className="space-y-2">
-                {lineage.outsourcingHistory.map((movement) => (
-                  <div key={movement.id} className="rounded-lg border border-violet-100 bg-violet-50 p-3 text-[14px]">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <b>{movement.movementType}</b>
-                      {movement.purchaseOrder && <Badge>{movement.purchaseOrder.orderNo}</Badge>}
-                      <span className="text-slate-700">{movement.partner?.name ?? "외주처 미지정"}</span>
+                {lineage.outsourcingHistory.map((movement) => {
+                  // 같은 RELEASED 라도 외주 입고검사(sourceType)에서 발생한 것은 보류해제가 아니라 '외주 검사완료'다.
+                  const typeConfig = getWipMovementLabel(movement.movementType, movement.sourceType)
+                  return (
+                    <div key={movement.id} className="rounded-lg border border-violet-100 bg-violet-50 p-3 text-[14px]">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge className={MOVEMENT_TONE_CLASS[typeConfig.tone]}>{typeConfig.label}</Badge>
+                        {movement.purchaseOrder && <Badge>{movement.purchaseOrder.orderNo}</Badge>}
+                        <span className="text-slate-700">{movement.partner?.name ?? "외주처 미지정"}</span>
+                        <span className="text-[12px] text-slate-500">{getSourceTypeLabel(movement.sourceType)}</span>
+                      </div>
+                      <div className="mt-1 text-[13px] text-slate-600">
+                        {movement.workOrder?.orderNo ?? "-"} · {movement.operation.seq}. {movement.operation.name} · {formatQuantity(movement.qty)} · {formatTraceDateTime(movement.createdAt)}
+                      </div>
                     </div>
-                    <div className="mt-1 text-[13px] text-slate-600">
-                      {movement.workOrder?.orderNo ?? "-"} · {movement.operation.seq}. {movement.operation.name} · {formatQuantity(movement.qty)} · {new Date(movement.createdAt).toLocaleString()}
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </Section>
@@ -294,12 +313,26 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
                   <div className="space-y-2">
                     {workOrder.operations.map((operation) => (
                       <div key={operation.id} className="rounded-lg bg-slate-50 p-3 text-[14px]">
-                        <div className="font-medium">{operation.seq}. {operation.routingOperation.name} · {operation.routingOperation.workCenter.name}</div>
+                        <div className="flex flex-wrap items-center gap-2 font-medium">
+                          <span>{operation.seq}. {operation.routingOperation.name} · {operation.routingOperation.workCenter.name}</span>
+                          <Badge>{getOperationStatusLabel(operation.status)}</Badge>
+                        </div>
+                        {(() => {
+                          // 기록된 생산실적 시각만 사용(완료시간은 공정 완료 시에만, 없으면 '-')
+                          const times = summarizeResultTimes(operation.productionResults, operation.status === "COMPLETED")
+                          return (
+                            <div className="mt-1 flex flex-wrap gap-x-6 gap-y-0.5 text-[13px] text-slate-600">
+                              <span>작업시작시간 <span className="font-mono">{formatTraceDateTime(times.startedAt)}</span></span>
+                              <span>작업완료시간 <span className="font-mono">{formatTraceDateTime(times.completedAt)}</span></span>
+                            </div>
+                          )
+                        })()}
                         {operation.productionResults.length === 0 ? (
                           <div className="mt-1 text-[13px] text-slate-500">생산실적 없음</div>
                         ) : operation.productionResults.map((result) => (
                           <div key={result.id} className="mt-1 text-[13px] text-slate-600">
-                            양품 {formatQuantity(result.goodQty)} · 불량 {formatQuantity(result.defectQty)} · 작업자 {result.operator?.name ?? "미지정"} · 설비 {result.equipment?.name ?? "미지정"}
+                            양품 {formatQuantity(result.goodQty)} · 불량 {formatQuantity(result.defectQty)}{result.reworkQty > 0 ? ` · 재작업 ${formatQuantity(result.reworkQty)}` : ""} · 작업자 {result.operator?.name ?? "미지정"} · 설비 {result.equipment?.name ?? "미지정"}
+                            <span className="ml-2 font-mono text-slate-500">{formatTraceDateTime(result.startedAt)} ~ {formatTraceDateTime(result.endedAt)}</span>
                           </div>
                         ))}
                       </div>
@@ -321,8 +354,8 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
                 return (
                   <div key={inspection.id} className="rounded-lg border p-4 text-[14px]">
                     <div className="flex flex-wrap items-center gap-2">
-                      <b>{inspection.stage}</b>
-                      {inspection.result && <Badge className={result?.className}>{result?.label ?? inspection.result}</Badge>}
+                      <b>{getInspectionStageLabel(inspection.stage)}</b>
+                      {inspection.result && <Badge className={result?.className}>{result?.label ?? getInspectionResultLabel(inspection.result)}</Badge>}
                       <span className="text-slate-600">{inspection.workOrder.orderNo} · {inspection.operation.name} · 검사자 {inspection.inspector.name}</span>
                     </div>
                     {inspection.measurements.length > 0 && (
@@ -340,8 +373,8 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
                           <div key={defect.id} className="rounded border border-red-100 bg-red-50 p-3 text-[13px] text-red-900">
                             불량 {defect.defectCode.code} · {defect.defectCode.name} · {formatQuantity(defect.qty)}
                             {defect.causeAnalysis && <div>원인분석: {defect.causeAnalysis.rootCause}</div>}
-                            {defect.correctiveActions.map((a) => <div key={a.id}>시정조치: {a.status} · {a.actionContent}</div>)}
-                            {defect.recurrencePreventions.map((p) => <div key={p.id}>재발방지: {p.status} · {p.preventionContent}</div>)}
+                            {defect.correctiveActions.map((a) => <div key={a.id}>시정조치: {getActionStatusLabel(a.status)} · {a.actionContent}</div>)}
+                            {defect.recurrencePreventions.map((p) => <div key={p.id}>재발방지: {getActionStatusLabel(p.status)} · {p.preventionContent}</div>)}
                           </div>
                         ))}
                       </div>
@@ -351,7 +384,7 @@ export function TraceabilityClient({ initialLotNo, tenantId }: TraceabilityClien
               })}
               {lineage.legacyWorkOrderInspections.map((inspection) => (
                 <div key={inspection.id} className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-[14px]">
-                  <b>{inspection.stage}</b> · {inspection.result ?? "미판정"} · {inspection.workOrder.orderNo} · {inspection.operation.name}
+                  <b>{getInspectionStageLabel(inspection.stage)}</b> · {getInspectionResultLabel(inspection.result)} · {inspection.workOrder.orderNo} · {inspection.operation.name}
                   <div className="text-[13px] text-amber-700">이 검사는 LOT 직접 귀속 전의 작업지시 기준 이력입니다.</div>
                 </div>
               ))}

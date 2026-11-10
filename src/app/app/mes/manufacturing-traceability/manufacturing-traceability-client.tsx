@@ -24,11 +24,13 @@ import {
 } from "@/lib/actions/manufacturing-traceability.actions"
 import { formatQuantity } from "@/lib/utils"
 import {
+  MOVEMENT_TONE_CLASS,
   formatTraceDateTime,
+  getInspectionStageLabel,
+  getOperationStatusLabel,
   getSourceTypeLabel,
   getWipMovementLabel,
   isOutsourcingMovement,
-  type TraceabilityLabelTone,
 } from "@/lib/traceability-display"
 
 const WORK_ORDER_STATUS: Record<string, { label: string; className: string }> = {
@@ -37,19 +39,6 @@ const WORK_ORDER_STATUS: Record<string, { label: string; className: string }> = 
   IN_PROGRESS: { label: "진행중", className: "bg-amber-100 text-amber-800" },
   COMPLETED: { label: "완료", className: "bg-green-100 text-green-800" },
   CANCELLED: { label: "취소", className: "bg-red-100 text-red-700" },
-}
-
-const OPERATION_STATUS: Record<string, string> = {
-  PENDING: "대기",
-  IN_PROGRESS: "진행중",
-  COMPLETED: "완료",
-  CANCELLED: "취소",
-}
-
-const INSPECTION_STAGE: Record<string, string> = {
-  FIRST: "초물",
-  MID: "중간",
-  FINAL: "종물",
 }
 
 const INSPECTION_RESULT: Record<string, { label: string; className: string }> = {
@@ -63,16 +52,6 @@ const SHIPMENT_STATUS: Record<string, { label: string; className: string }> = {
   CONFIRMED: { label: "확정", className: "bg-blue-100 text-blue-700" },
   SHIPPED: { label: "출하", className: "bg-green-100 text-green-800" },
   CANCELLED: { label: "취소", className: "bg-red-100 text-red-700" },
-}
-
-const MOVEMENT_TONE_CLASS: Record<TraceabilityLabelTone, string> = {
-  cyan: "bg-cyan-100 text-cyan-700",
-  emerald: "bg-emerald-100 text-emerald-700",
-  red: "bg-red-100 text-red-700",
-  orange: "bg-orange-100 text-orange-700",
-  purple: "bg-purple-100 text-purple-700",
-  rose: "bg-rose-100 text-rose-700",
-  default: "bg-slate-100 text-slate-700",
 }
 
 function formatDate(value: Date | string | null | undefined): string {
@@ -515,7 +494,7 @@ export function ManufacturingTraceabilityClient({
                       <td className="py-2.5 pr-4 font-medium">{displayProcessName(history.processName)}</td>
                       <td className="py-2.5 pr-4">
                         <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[13px] text-slate-700">
-                          {OPERATION_STATUS[history.status] ?? history.status}
+                          {getOperationStatusLabel(history.status)}
                         </span>
                       </td>
                       <td className="py-2.5 pr-4 text-[13px] text-muted-foreground">{formatDateTime(history.startedAt)}</td>
@@ -601,7 +580,7 @@ export function ManufacturingTraceabilityClient({
                         <td className="py-2.5 pr-4 font-medium">{displayProcessName(inspection.processName)}</td>
                         <td className="py-2.5 pr-4">
                           <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[13px] text-violet-700">
-                            {INSPECTION_STAGE[inspection.stage] ?? inspection.stage}
+                            {getInspectionStageLabel(inspection.stage)}
                           </span>
                         </td>
                         <td className="py-2.5 pr-4">
