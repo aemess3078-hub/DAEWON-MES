@@ -832,7 +832,6 @@ export function ReceivingFormDialog({
           uom: l.uom,
         }))}
         notices={labelPlan.notices}
-        testCandidates={isConfirmedPrint ? undefined : previewPlan.candidates}
         onBeforePrint={isConfirmedPrint ? undefined : handleBeforePrint}
       />
     </Dialog>

@@ -377,17 +377,10 @@ async function main() {
   // 화면 연결 구조
   const recvSrc = read("src/app/app/mes/material-receipt/receiving-form-dialog.tsx")
   ok(recvSrc.includes("disabled={printableItems.length === 0}") && !recvSrc.includes("!printableItems.some((ins) => ins.isLotTracked)"), "I30 자재입고: 미리보기 버튼이 품목의 LOT 설정/번호 유무로 비활성화되지 않는다")
-  ok(recvSrc.includes("buildReceiptLabelPlan") && recvSrc.includes("testCandidates={isConfirmedPrint ? undefined : previewPlan.candidates}"), "I31 자재입고: 사유 안내(notices) + 확정 전에만 시험용 라벨")
+  ok(recvSrc.includes("buildReceiptLabelPlan") && !recvSrc.includes("testCandidates"), "I31 자재입고: 사유 안내(notices) 유지 · 시험용 라벨 테스트 제거")
   const issueSrc = read("src/app/app/mes/material-issue/issue-form-dialog.tsx")
-  ok(issueSrc.includes("buildIssueLabelPlan") && issueSrc.includes('purpose="ISSUE"') && !issueSrc.includes("? getLotSplitTotal(material.itemId)"), "I32 자재출고: LOT 별 QR 라벨(ISSUE) 연결 · 합계 수량 단일 라벨 제거")
-  ok(
-    issueSrc.includes("setConfirmedIssuePlan(issueLabelPlan)") &&
-      issueSrc.indexOf("await issueMaterialsForWorkOrder") < issueSrc.indexOf("setConfirmedIssuePlan(issueLabelPlan)") &&
-      issueSrc.includes("printBlockedReason={") &&
-      issueSrc.includes("testCandidates={confirmedIssuePlan ? undefined : issueLabelPlan.candidates}"),
-    "I32b 자재출고: 실제 LOT 라벨은 출고 확정(서버 성공) 이후에만 출력 · 확정 전에는 미리보기 + 시험용만",
-  )
-  ok(issueSrc.includes("confirmedIssuePlan !== null") && issueSrc.includes("if (!next && confirmedIssuePlan) handleOpen(false)"), "I32c 자재출고: 확정 후 중복 출고 방지(출고 버튼 비활성 · 라벨 창 닫으면 출고 창 닫힘)")
+  ok(!issueSrc.includes("BarcodePrintDialog") && !issueSrc.includes("buildIssueLabelPlan") && !issueSrc.includes("LOT 라벨 출력") && !issueSrc.includes("setPrintOpen") && !issueSrc.includes("confirmedIssuePlan"), "I32 자재출고: LOT 라벨 출력 버튼·출고 후 자동 라벨 창·시험용 라벨 제거")
+  ok(issueSrc.indexOf("await issueMaterialsForWorkOrder") < issueSrc.lastIndexOf("handleOpen(false)") && !issueSrc.includes("testCandidates"), "I32b 자재출고: 출고 확정(서버 성공) 후 출고 창이 바로 닫힌다")
   ok(issueSrc.includes("issueMaterialsForWorkOrder(") && !issueSrc.includes("lot-label.actions"), "I32d 자재출고 서버 처리 호출은 그대로 · 라벨 모듈이 출고 액션에 개입하지 않는다")
   const dlg = read("src/components/common/barcode/barcode-print-dialog.tsx")
   const testBranch = dlg.slice(dlg.indexOf("if (testMode) {"), dlg.indexOf("// 1) 읽기 전용 사전 확인"))
