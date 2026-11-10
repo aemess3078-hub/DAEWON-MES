@@ -347,6 +347,7 @@ export async function getWipInventoryRows(tenantId: string) {
             select: {
               movementType: true,
               relatedWipUnitId: true,
+              sourceType: true,
               qty: true,
               note: true,
               createdAt: true,

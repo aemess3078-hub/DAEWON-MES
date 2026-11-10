@@ -155,6 +155,13 @@ export function ReceiptDialog({
             </div>
           </div>
 
+          {workOrder.reworkHoldQty > 0 ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-[14px] text-amber-800">
+              재작업 중인 {formatQuantity(workOrder.reworkHoldQty)} {workOrder.item.uom}은(는) 입고에서 제외됩니다.
+              재작업/보류관리에서 종결하면 양품 복귀분은 추가 입고할 수 있습니다.
+            </div>
+          ) : null}
+
           {workOrder.receiptBlockedReason ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-[14px] text-amber-800">
               {workOrder.receiptBlockedReason}
