@@ -353,10 +353,12 @@ async function main() {
 
   // C1 기존 수동 선택/등록/확정/삭제 코드는 QR 작업 이전과 동일(지문)
   const block = (src: string, from: string, to: string | null) => src.slice(src.indexOf(from), to === null ? src.length : src.indexOf(to))
+  // [갱신] createShipment/confirmShipment 지문: 수주 상태 전이 규칙(efde4e0, N-18)으로 '잠금 후 수주 출하 가능 상태 재확인'이 추가됐다.
+  //        QR 작업과 무관한 의도된 변경이며, 나머지 지문(available/delete/UI)은 그대로다.
   const FP = {
     available: "67037726927f87b5",
-    create: "133b60f6cef5c101",
-    confirm: "444c3e01f3878259",
+    create: "67fa77870b7200f1",
+    confirm: "6ab25382cd5000b3",
     delete: "6b607dff06f95f6e",
     schema: "ffc372fca1b87ff7",
     handleLotChange: "94f14ed1784010c9",
