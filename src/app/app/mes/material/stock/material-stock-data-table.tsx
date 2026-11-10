@@ -185,6 +185,7 @@ export function MaterialStockDataTable({ data }: MaterialStockDataTableProps) {
       options: [
         { label: "원자재", value: "RAW_MATERIAL" },
         { label: "소모품", value: "CONSUMABLE" },
+        { label: "반제품", value: "SEMI_FINISHED" },
       ],
     },
   ]

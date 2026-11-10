@@ -24,20 +24,26 @@ export function DataTableColumnHeader<TData, TValue>({
   title,
   className,
 }: DataTableColumnHeaderProps<TData, TValue>) {
+  // 정렬은 컬럼 meta.align 을 따른다. 미지정(left)이면 기존과 동일하다.
+  const isRight = column.columnDef.meta?.align === "right"
+
   if (!column.getCanSort()) {
     return (
-      <div className={cn("text-[13px] font-medium", className)}>{title}</div>
+      <div className={cn("text-[13px] font-medium", isRight && "text-right", className)}>{title}</div>
     )
   }
 
   return (
-    <div className={cn("flex items-center space-x-2", className)}>
+    <div className={cn("flex items-center space-x-2", isRight && "justify-end", className)}>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
             size="sm"
-            className="-ml-3 h-8 data-[state=open]:bg-accent text-[13px] font-medium"
+            className={cn(
+              "h-8 data-[state=open]:bg-accent text-[13px] font-medium",
+              isRight ? "-mr-3" : "-ml-3",
+            )}
           >
             <span>{title}</span>
             {column.getIsSorted() === "desc" ? (

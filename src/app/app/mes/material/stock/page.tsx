@@ -27,7 +27,7 @@ export default async function MaterialStockPage() {
           자재재고현황
         </h1>
         <p className="mt-1 text-[15px] text-muted-foreground">
-          원자재와 소모품의 LOT별 현재고를 조회합니다.
+          원자재·소모품과 구매입고된 반제품의 LOT별 현재고를 조회합니다.
           품목 행을 클릭하면 LOT별 상세 재고를 확인할 수 있습니다.
         </p>
       </div>
