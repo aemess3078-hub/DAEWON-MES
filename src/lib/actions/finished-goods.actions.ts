@@ -145,7 +145,8 @@ export async function getWorkOrdersForReceipt(
 ): Promise<WorkOrderForReceipt[]> {
   await requireTenantAccess(tenantId)
   const workOrders = await prisma.workOrder.findMany({
-    where: { tenantId, status: "COMPLETED" },
+    // 재작업 복귀(ISSUE-014)로 후속공정이 재개된 작업지시는 IN_PROGRESS 로 돌아가지만, 이미 최종공정을 끝낸 양품은 계속 입고할 수 있다.
+    where: { tenantId, status: { in: ["COMPLETED", "IN_PROGRESS"] } },
     include: {
       item: { select: { id: true, code: true, name: true, uom: true, itemType: true } },
       site: { select: { id: true, name: true } },
@@ -196,8 +197,12 @@ export async function getWorkOrdersForReceipt(
     orderBy: { updatedAt: "desc" },
   })
 
-  return Promise.all(workOrders.map(async (wo) => {
-    const receiptQuantity = calculateReceiptQuantity(wo)
+  const receivable = workOrders
+    .map((wo) => ({ wo, receiptQuantity: calculateReceiptQuantity(wo) }))
+    // 진행 중 작업지시는 최종공정을 완료한 양품(완료 root)이 있을 때만 입고 대상으로 본다.
+    .filter(({ wo, receiptQuantity }) => wo.status === "COMPLETED" || (receiptQuantity.isWipTracked && receiptQuantity.receiptBasisQty > 0))
+
+  return Promise.all(receivable.map(async ({ wo, receiptQuantity }) => {
     const latestRootWipUnit = receiptQuantity.rootWipUnits[0] ?? null
 
     const qualityRelease = await getWorkOrderQualityReleaseStatus(prisma, {

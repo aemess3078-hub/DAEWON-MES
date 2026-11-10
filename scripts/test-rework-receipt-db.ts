@@ -201,13 +201,16 @@ async function main() {
     assert.equal(r.reworkHoldQty, 10)
     assert.equal((await receive(B.wo.id, 90)).ok, true)
   })
-  await t("B2 중간공정 재작업 종결은 기존대로 거절(후속 routing 반영 전) — 별도 개선사항", async () => {
+  await t("B2 중간공정 재작업 종결(ISSUE-014): 합격 6 은 다음(최종) 공정부터 복귀 root 로 재개, 폐기 4 는 이력만", async () => {
     const res = await pp.completeRework({ reworkWipUnitId: B.child.id, mergedQty: 6, scrapQty: 4 })
-    assert.equal(res.ok, false)
-    assert.match(res.error ?? "", /중간공정/)
-    const child = await prisma.wipUnit.findUniqueOrThrow({ where: { id: B.child.id } })
-    assert.equal(child.status, "REWORK", "거절 시 상태·수량 변경 없음")
-    assert.equal(N(child.qty), 10)
+    assert.equal(res.ok, true, res.error)
+    const roots = await prisma.wipUnit.findMany({ where: { workOrderId: B.wo.id, parentWipUnitId: null, sourceProductionResultId: null } })
+    assert.equal(roots.length, 2)
+    assert.equal(N(roots.find((r) => r.status === "WAITING")!.qty), 6)
+    // 복귀분은 최종공정 완료 전이라 입고 대상이 아니다(기존 입고 90 이후 추가 입고 불가).
+    const row = await listRow(B.wo.id)
+    assert.equal(row.pendingQty, 0)
+    assert.equal((await receive(B.wo.id, 1)).ok, false)
   })
 
   // ── 시나리오 C: 기존 보류 조건 유지(판별 불가 레거시 재작업은 계속 차단) ──────────────────────

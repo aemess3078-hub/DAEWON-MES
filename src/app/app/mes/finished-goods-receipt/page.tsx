@@ -22,7 +22,7 @@ export default async function FinishedGoodsReceiptPage({ searchParams }: Finishe
 
   const pendingCount = workOrders.filter((wo) => wo.pendingQty > 0).length
   const completedCount = workOrders.filter(
-    (wo) => !wo.receiptBlockedReason && wo.pendingQty === 0 && wo.totalReceiptQty > 0,
+    (wo) => wo.status === "COMPLETED" && !wo.receiptBlockedReason && wo.pendingQty === 0 && wo.totalReceiptQty > 0,
   ).length
 
   return (
