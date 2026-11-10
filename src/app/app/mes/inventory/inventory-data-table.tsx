@@ -6,6 +6,7 @@ import { DataTable } from "@/components/common/data-table"
 import { getGroupedInventoryColumns } from "./columns"
 import type { GroupedInventoryStock } from "@/lib/actions/inventory.actions"
 import { Input } from "@/components/ui/input"
+import { Checkbox } from "@/components/ui/checkbox"
 import { useUserRole } from "@/lib/contexts/user-role-context"
 import { StockAdjustmentDialog } from "./stock-adjustment-dialog"
 import { StockTransferDialog } from "./stock-transfer-dialog"
@@ -195,6 +196,7 @@ export function InventoryDataTable({ data, sites }: InventoryDataTableProps) {
   const [selectedSiteId, setSelectedSiteId] = useState<string>("all")
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>("all")
   const [keyword, setKeyword] = useState("")
+  const [includeZero, setIncludeZero] = useState(false)
 
   // 선택된 사이트 기준으로 창고 목록 생성
   const warehouseOptions = useMemo(() => {
@@ -220,6 +222,8 @@ export function InventoryDataTable({ data, sites }: InventoryDataTableProps) {
       const filteredBalances = group.balances.filter((b) => {
         if (selectedSiteId !== "all" && b.siteId !== selectedSiteId) return false
         if (selectedWarehouseId !== "all" && b.warehouseId !== selectedWarehouseId) return false
+        // 재고 0 정책: 현재고 0인 LOT·창고 행은 기본 숨김
+        if (!includeZero && b.qtyOnHand === 0) return false
         return true
       })
 
@@ -263,7 +267,7 @@ export function InventoryDataTable({ data, sites }: InventoryDataTableProps) {
     }
 
     return result
-  }, [data, selectedSiteId, selectedWarehouseId, keyword])
+  }, [data, selectedSiteId, selectedWarehouseId, keyword, includeZero])
 
   const filterableColumns = [
     {
@@ -330,6 +334,14 @@ export function InventoryDataTable({ data, sites }: InventoryDataTableProps) {
             className="h-9 w-[260px] pl-9 text-[14px]"
           />
         </div>
+
+        <label className="flex items-center gap-2 text-[14px] text-muted-foreground">
+          <Checkbox
+            checked={includeZero}
+            onCheckedChange={(checked) => setIncludeZero(checked === true)}
+          />
+          재고 0 포함
+        </label>
       </div>
 
       {/* 품목 그룹 테이블 — 행 클릭 시 inline 펼침 */}

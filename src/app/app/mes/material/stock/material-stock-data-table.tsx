@@ -11,6 +11,7 @@ import { useUserRole } from "@/lib/contexts/user-role-context"
 import { StockAdjustmentDialog } from "../../inventory/stock-adjustment-dialog"
 import { StockTransferDialog } from "../../inventory/stock-transfer-dialog"
 import { formatQuantity } from "@/lib/utils"
+import { applyZeroStockPolicyToGroup } from "@/lib/stock-zero-policy"
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return "-"
@@ -179,13 +180,23 @@ interface MaterialStockDataTableProps {
 export function MaterialStockDataTable({ data }: MaterialStockDataTableProps) {
   const columns = getGroupedColumns()
   const [keyword, setKeyword] = useState("")
-  const [inStockOnly, setInStockOnly] = useState(true)
+  const [includeZero, setIncludeZero] = useState(false)
+
+  // 재고 0 정책: 현재고 0인 LOT·창고 행은 기본 숨김, 합계/LOT 개수는 보이는 행 기준으로 재계산
+  const visibleData = useMemo(() => {
+    const result: GroupedMaterialStock[] = []
+    for (const group of data) {
+      const applied = applyZeroStockPolicyToGroup(group, group.lotBalances, includeZero)
+      if (!applied) continue
+      result.push({ ...applied.group, lotBalances: applied.rows })
+    }
+    return result
+  }, [data, includeZero])
 
   const filteredData = useMemo(() => {
     const kw = keyword.trim().toLowerCase()
-    return data.filter((group) => {
-      if (inStockOnly && group.totalQtyOnHand <= 0) return false
-      if (kw.length === 0) return true
+    if (kw.length === 0) return visibleData
+    return visibleData.filter((group) => {
       const hay = [
         group.itemCode,
         group.itemName,
@@ -195,7 +206,18 @@ export function MaterialStockDataTable({ data }: MaterialStockDataTableProps) {
       ].join(" ").toLowerCase()
       return hay.includes(kw)
     })
-  }, [data, keyword, inStockOnly])
+  }, [visibleData, keyword])
+
+  const totalItems = filteredData.length
+  const totalLines = filteredData.reduce((s, g) => s + g.lotBalances.length, 0)
+  const lotCount = filteredData.reduce((s, g) => s + g.lotCount, 0)
+  const totalOnHand = filteredData.reduce((s, g) => s + g.totalQtyOnHand, 0)
+  const totalAvailable = filteredData.reduce((s, g) => s + g.totalQtyAvailable, 0)
+  const unlottedBalances = filteredData.flatMap((g) =>
+    g.isLotTracked ? g.lotBalances.filter((b) => !b.lotId && b.qtyOnHand > 0) : [],
+  )
+  const unlottedLines = unlottedBalances.length
+  const unlottedOnHand = unlottedBalances.reduce((s, b) => s + b.qtyOnHand, 0)
 
   const filterableColumns = [
     {
@@ -211,6 +233,21 @@ export function MaterialStockDataTable({ data }: MaterialStockDataTableProps) {
 
   return (
     <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-6">
+        <SummaryCard label="원자재 품목" value={formatQuantity(totalItems)} suffix="종" />
+        <SummaryCard label="재고 라인" value={formatQuantity(totalLines)} suffix="건" />
+        <SummaryCard label="관리 LOT" value={formatQuantity(lotCount)} suffix="개" />
+        <SummaryCard label="총 현재고" value={formatQuantity(totalOnHand)} />
+        <SummaryCard label="총 가용재고" value={formatQuantity(totalAvailable)} accent />
+        <SummaryCard
+          label="LOT 미지정 데드재고"
+          value={formatQuantity(unlottedOnHand)}
+          suffix={`/ ${formatQuantity(unlottedLines)}건`}
+          description="LOT 관리 품목 중 LOT 없이 남아 있어 출고/출하 대상에서 제외되는 재고"
+          warn
+        />
+      </div>
+
       {/* 툴바 */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative">
@@ -224,10 +261,10 @@ export function MaterialStockDataTable({ data }: MaterialStockDataTableProps) {
         </div>
         <label className="flex items-center gap-2 text-[14px] text-muted-foreground">
           <Checkbox
-            checked={inStockOnly}
-            onCheckedChange={(checked) => setInStockOnly(checked === true)}
+            checked={includeZero}
+            onCheckedChange={(checked) => setIncludeZero(checked === true)}
           />
-          재고 있음만 보기
+          재고 0 포함
         </label>
         <span className="text-[13px] text-muted-foreground">
           품목 행을 클릭하면 바로 아래에 재고 상세가 펼쳐집니다.
@@ -242,6 +279,50 @@ export function MaterialStockDataTable({ data }: MaterialStockDataTableProps) {
         expandOnRowClick
         renderExpandedRow={(row) => <LotDetailContent item={row} />}
       />
+    </div>
+  )
+}
+
+function SummaryCard({
+  label,
+  value,
+  suffix,
+  description,
+  accent,
+  warn,
+}: {
+  label: string
+  value: string
+  suffix?: string
+  description?: string
+  accent?: boolean
+  warn?: boolean
+}) {
+  const containerClass = warn
+    ? "rounded-lg border border-amber-300 bg-amber-50 px-4 py-3"
+    : "rounded-lg border border-border bg-card px-4 py-3"
+  const labelClass = warn ? "text-[13px] text-amber-800" : "text-[13px] text-muted-foreground"
+  const valueClass = warn
+    ? "text-amber-800"
+    : accent
+      ? "text-emerald-700"
+      : "text-foreground"
+  return (
+    <div className={containerClass}>
+      <p className={labelClass}>{label}</p>
+      <p className={`mt-1 text-[20px] font-semibold tabular-nums ${valueClass}`}>
+        {value}
+        {suffix ? (
+          <span className={`ml-1 text-[14px] font-normal ${warn ? "text-amber-700" : "text-muted-foreground"}`}>
+            {suffix}
+          </span>
+        ) : null}
+      </p>
+      {description ? (
+        <p className={`mt-1 text-[12px] leading-snug ${warn ? "text-amber-700" : "text-muted-foreground"}`}>
+          {description}
+        </p>
+      ) : null}
     </div>
   )
 }
