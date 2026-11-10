@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useUserRole } from "@/lib/contexts/user-role-context"
 import { StockAdjustmentDialog } from "../../inventory/stock-adjustment-dialog"
+import { StockTransferDialog } from "../../inventory/stock-transfer-dialog"
 import { formatQuantity } from "@/lib/utils"
 
 function formatDate(value: string | null | undefined): string {
@@ -118,7 +119,24 @@ function LotDetailContent({ item }: { item: GroupedMaterialStock }) {
                   )}
                   {canAdjust && (
                     <td className="px-3 py-2 text-right">
-                      <StockAdjustmentDialog
+                      <div className="flex items-center justify-end gap-2">
+                        <StockTransferDialog
+                              target={{
+                                balanceId: b.balanceId,
+                                itemId: item.itemId,
+                                itemCode: item.itemCode,
+                                itemName: item.itemName,
+                                uom: item.uom,
+                                siteName: b.siteName,
+                                warehouseId: b.warehouseId,
+                                warehouseCode: b.warehouseCode,
+                                warehouseName: b.warehouseName,
+                                lotNo: b.lotNo,
+                                qtyOnHand: b.qtyOnHand,
+                                qtyAvailable: b.qtyAvailable,
+                              }}
+                            />
+                        <StockAdjustmentDialog
                         target={{
                           balanceId: b.balanceId,
                           itemId: item.itemId,
@@ -135,6 +153,7 @@ function LotDetailContent({ item }: { item: GroupedMaterialStock }) {
                           qtyOnHand: b.qtyOnHand,
                         }}
                       />
+                      </div>
                     </td>
                   )}
                 </tr>
