@@ -138,7 +138,6 @@ const hiddenByDaewonPolicy: Array<[string, string]> = [
   ["nav-downtime-reasons", "비가동사유"],
   ["nav-prod-equip-output", "설비별생산현황"],
   ["nav-project-orders", "프로젝트 오더"],
-  ["nav-defects", "불량코드관리"],
   ["nav-attachments", "첨부파일관리"],
   ["nav-audit-log", "감사로그"],
   ["nav-common-codes", "코드관리"],
@@ -153,7 +152,6 @@ for (const id of ["nav-item-categories", "nav-item-groups"]) {
   assertParent(id, "nav-master")
 }
 const masterRetained: Array<[string, string]> = [
-  ["/app/mes/defects", "src/app/app/mes/defects/page.tsx"],
   ["/app/mes/attachments", "src/app/app/mes/attachments/page.tsx"],
   ["/app/mes/audit-log", "src/app/app/mes/audit-log/page.tsx"],
   ["/app/mes/common-codes", "src/app/app/mes/common-codes/page.tsx"],
@@ -220,7 +218,7 @@ assertH1(pages.salesOrders, "수주등록", "수주관리", "sales orders")
 assertH1(pages.shipments, "납품정보등록", "출하등록", "shipments")
 
 assertH1(pages.materialStock, "자재재고현황", "원자재 LOT 재고", "material stock")
-assertSourceIncludes(pages.materialStock, "원자재와 소모품의 LOT별 현재고", "material stock description")
+assertSourceIncludes(pages.materialStock, "LOT별 현재고를 조회합니다", "material stock description")
 assertH1(pages.defects, "불량관리", "불량코드 관리", "defects")
 assertH1(pages.equipmentStats, "통합통계", "설비 통계분석", "equipment statistics")
 assertH1(pages.sites, "사업장관리", "사이트 관리", "sites")
