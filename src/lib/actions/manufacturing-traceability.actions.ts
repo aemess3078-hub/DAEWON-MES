@@ -293,7 +293,7 @@ export async function getManufacturingTraceability(
   const inspections: TraceabilityInspection[] = workOrder.operations.flatMap((op) =>
     op.qualityInspections.map((qi) => ({
       id: qi.id,
-      processName: qi.inspectionSpec.routingOperation.name,
+      processName: qi.inspectionSpec?.routingOperation.name ?? "자주검사(검사표준 없음)",
       stage: qi.stage,
       result: qi.result,
       inspectedQty: Number(qi.inspectedQty),

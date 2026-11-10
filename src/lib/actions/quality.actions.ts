@@ -76,7 +76,7 @@ export type InspectionMeasurementRow = {
 export type QualityInspectionWithDetails = {
   id: string
   workOrderOperationId: string
-  inspectionSpecId: string
+  inspectionSpecId: string | null
   inspectorId: string
   lotId: string | null
   stage: InspectionStage
@@ -97,7 +97,7 @@ export type QualityInspectionWithDetails = {
     }
     routingOperation: { id: string; name: string; seq: number }
   }
-  inspectionSpec: { id: string; version: string; item: { name: string } }
+  inspectionSpec: { id: string; version: string; item: { name: string } } | null
   inspector: { id: string; name: string }
   defectRecords: DefectRecordRow[]
   measurements: InspectionMeasurementRow[]
@@ -266,11 +266,13 @@ function serializeQualityInspection(inspection: QualityInspectionRecord): Qualit
       },
       routingOperation: inspection.workOrderOperation.routingOperation,
     },
-    inspectionSpec: {
-      id: inspection.inspectionSpec.id,
-      version: inspection.inspectionSpec.version,
-      item: inspection.inspectionSpec.item,
-    },
+    inspectionSpec: inspection.inspectionSpec
+      ? {
+          id: inspection.inspectionSpec.id,
+          version: inspection.inspectionSpec.version,
+          item: inspection.inspectionSpec.item,
+        }
+      : null,
     inspector: inspection.inspector,
     defectRecords: inspection.defectRecords.map((record) => ({
       id: record.id,

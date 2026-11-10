@@ -28,7 +28,7 @@ export function evaluateQualityRelease(input: {
   inspectionSpecId: string | null
   inspections: Array<{
     id: string
-    inspectionSpecId: string
+    inspectionSpecId: string | null
     stage: InspectionStage
     result: InspectionResult | null
     inspectedAt: Date

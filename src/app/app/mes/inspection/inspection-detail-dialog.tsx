@@ -101,7 +101,11 @@ export function InspectionDetailDialog({
           <InfoRow label="공정" value={`${op.name} (seq.${op.seq})`} />
           <InfoRow
             label="검사기준"
-            value={`${inspection.inspectionSpec.item.name} v${inspection.inspectionSpec.version}`}
+            value={
+              inspection.inspectionSpec
+                ? `${inspection.inspectionSpec.item.name} v${inspection.inspectionSpec.version}`
+                : "검사표준 없음 (POP 자주검사)"
+            }
           />
           <InfoRow label="검사자" value={inspection.inspector.name} />
           <InfoRow

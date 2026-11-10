@@ -107,6 +107,7 @@
     "test:f27-inventory-adjustment-integrity": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-f27-inventory-adjustment-integrity.ts",
     "test:stock-transfer-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-stock-transfer-db.ts",
     "test:stock-zero-policy": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-stock-zero-policy.ts",
+    "test:pop-no-inspection-spec-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-pop-no-inspection-spec-db.ts",
     "db:status": "prisma migrate status",
     "preflight:env": "node scripts/deploy-preflight.js env",
     "preflight:bundle": "node scripts/deploy-preflight.js bundle",

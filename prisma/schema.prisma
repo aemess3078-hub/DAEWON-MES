@@ -1896,7 +1896,8 @@ enum InspectionStage {
 model QualityInspection {
   id                   String            @id @default(cuid())
   workOrderOperationId String
-  inspectionSpecId     String
+  // 검사표준 없이 POP 불량 실적이 등록될 수 있어 nullable(검사표준 미등록 자주검사 = null)
+  inspectionSpecId     String?
   inspectorId          String
   stage                InspectionStage   @default(MID)
   result               InspectionResult?
@@ -1905,7 +1906,7 @@ model QualityInspection {
   lotId                String?
 
   workOrderOperation WorkOrderOperation @relation(fields: [workOrderOperationId], references: [id])
-  inspectionSpec     InspectionSpec     @relation(fields: [inspectionSpecId], references: [id])
+  inspectionSpec     InspectionSpec?    @relation(fields: [inspectionSpecId], references: [id], onDelete: Restrict)
   inspector          Profile            @relation(fields: [inspectorId], references: [id])
   lot                Lot?               @relation(fields: [lotId], references: [id])
 
