@@ -39,6 +39,7 @@
     "test:outsourcing-flow-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-outsourcing-flow-db.ts",
     "test:rework-complete-qty": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-rework-complete-qty.ts",
     "test:intermediate-rework-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-intermediate-rework-db.ts",
+    "test:traceability-display": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-traceability-display.ts",
     "test:pop-process-filter": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-pop-process-filter.ts",
     "test:numbering-rule-access": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-numbering-rule-access.ts",
     "test:material-issue-search-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-material-issue-search-db.ts",

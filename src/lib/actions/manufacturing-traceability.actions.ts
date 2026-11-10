@@ -5,6 +5,7 @@ import { requireTenantAccess } from "@/lib/auth"
 import { prisma } from "@/lib/db/prisma"
 import { getLotGenealogyForTraceability, type LotGenealogyNode } from "./lot-genealogy.helpers"
 import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { summarizeResultTimes } from "@/lib/traceability-display"
 
 // ─── 의료기기 제조번호 추적성 ────────────────────────────────────────────────
 //
@@ -43,6 +44,18 @@ export type TraceabilityProcessHistory = {
   goodQty: number
   defectQty: number
   note: string | null
+}
+
+/** 생산실적 1건(ProductionResult). 시간은 기록된 값 그대로이며 없으면 null. */
+export type TraceabilityProductionResult = {
+  id: string
+  operationId: string
+  operationSeq: number
+  processName: string
+  startedAt: string | null
+  endedAt: string | null
+  goodQty: number
+  defectQty: number
 }
 
 export type TraceabilityInspection = {
@@ -134,6 +147,10 @@ export type ManufacturingTraceability = {
     orderNo: string
     status: string
     plannedQty: number
+    /** 생산실적 중 가장 이른 시작시간 (기록 없으면 null) */
+    startedAt: string | null
+    /** 작업지시 완료 상태일 때 생산실적 중 가장 늦은 종료시간 (진행 중/기록 없으면 null) */
+    completedAt: string | null
     item: {
       id: string
       code: string
@@ -144,6 +161,7 @@ export type ManufacturingTraceability = {
   } | null
   materialLots: TraceabilityMaterialLot[]
   processHistory: TraceabilityProcessHistory[]
+  productionResults: TraceabilityProductionResult[]
   inspections: TraceabilityInspection[]
   // @deprecated — finishedGoodsReceipts 배열을 사용하세요. 호환성 위해 마지막 1건 유지.
   packaging: TraceabilityPackaging
@@ -190,6 +208,7 @@ export async function getManufacturingTraceability(
           productionResults: {
             orderBy: { startedAt: "asc" },
             select: {
+              id: true,
               startedAt: true,
               endedAt: true,
               goodQty: true,
@@ -228,6 +247,7 @@ export async function getManufacturingTraceability(
       workOrder: null,
       materialLots: [],
       processHistory: [],
+      productionResults: [],
       inspections: [],
       packaging: null,
       finishedGoodsReceipt: null,
@@ -270,24 +290,41 @@ export async function getManufacturingTraceability(
       (s, r) => s + Number(r.defectQty),
       0,
     )
-    const startedAt = op.productionResults.find((r) => r.startedAt)?.startedAt ?? null
-    const completedAt = [...op.productionResults]
-      .reverse()
-      .find((r) => r.endedAt)?.endedAt ?? null
+    // 완료시간은 공정이 완료 상태일 때만 표시 (진행 중 공정의 중간 실적 종료시각을 완료로 오인 방지)
+    const times = summarizeResultTimes(op.productionResults, op.status === "COMPLETED")
 
     return {
       operationId: op.id,
       seq: op.seq,
       processName: op.routingOperation.name,
       status: op.status,
-      startedAt: startedAt?.toISOString() ?? null,
-      completedAt: completedAt?.toISOString() ?? null,
+      startedAt: times.startedAt,
+      completedAt: times.completedAt,
       workerName: null,
       goodQty: totalGood,
       defectQty: totalDefect,
       note: null,
     }
   })
+
+  // 생산실적 (공정 순서 → 시작시간 순). 기록된 startedAt/endedAt만 그대로 노출한다.
+  const productionResults: TraceabilityProductionResult[] = workOrder.operations.flatMap((op) =>
+    op.productionResults.map((r) => ({
+      id: r.id,
+      operationId: op.id,
+      operationSeq: op.seq,
+      processName: op.routingOperation.name,
+      startedAt: r.startedAt?.toISOString() ?? null,
+      endedAt: r.endedAt?.toISOString() ?? null,
+      goodQty: Number(r.goodQty),
+      defectQty: Number(r.defectQty),
+    })),
+  )
+
+  const workOrderTimes = summarizeResultTimes(
+    workOrder.operations.flatMap((op) => op.productionResults),
+    workOrder.status === "COMPLETED",
+  )
 
   // 검사 결과 (모든 공정 검사 합산)
   const inspections: TraceabilityInspection[] = workOrder.operations.flatMap((op) =>
@@ -496,6 +533,8 @@ export async function getManufacturingTraceability(
       orderNo: workOrder.orderNo,
       status: workOrder.status,
       plannedQty: Number(workOrder.plannedQty),
+      startedAt: workOrderTimes.startedAt,
+      completedAt: workOrderTimes.completedAt,
       item: {
         id: workOrder.item.id,
         code: workOrder.item.code,
@@ -506,6 +545,7 @@ export async function getManufacturingTraceability(
     },
     materialLots,
     processHistory,
+    productionResults,
     inspections,
     packaging: packagingInfo,
     finishedGoodsReceipt: packagingInfo,
