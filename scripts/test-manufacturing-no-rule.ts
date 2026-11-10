@@ -99,6 +99,13 @@ async function main() {
   ok(validateManufacturingRuleForSave(multi)?.includes("라인코드, 교대"), "V8 값을 받을 수 없는 변수에 기본값 없으면 저장 거부")
   ok(validateManufacturingRuleForSave(multi.map((t) => (t.type === "CONTEXT" ? { ...t, fallback: "X" } : t))) === null, "V9 기본값을 주면 저장 허용")
   ok(validateManufacturingRuleForSave(tokens.slice(0, 4)) === MFG_RULE_INVALID_MESSAGE, "V10 순번 없는 규칙 저장 거부")
+  // ─── ISSUE-009: 수주생산 고객코드는 기본값으로 대체 금지, 재고생산은 STK ─────────────────────
+  const strict = { requireRealContextKeys: ["CLIENT_CODE" as const] }
+  const strictMsg = await rejects(() => computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: fbTokens, isActive: true }, 0), "t", { itemCode: "BRK01" }, date, 0, strict))
+  ok(strictMsg === mod.MFG_ORDER_CLIENT_REQUIRED_MESSAGE, "S1 수주생산 고객 누락 → fallback 이 있어도 대체하지 않고 오류")
+  ok((await computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: fbTokens, isActive: true }, 0), "t", { itemCode: "BRK01", extra: { CLIENT_CODE: "ACME" } }, date, 0, strict)) === `ACME-BRK01-${yy}001`, "S2 수주생산 고객코드 있으면 정상 발행")
+  ok((await computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: clientTokens, isActive: true }, 0), "t", { itemCode: "BRK01", extra: { CLIENT_CODE: mod.MFG_STOCK_CLIENT_CODE } }, date)) === `STK-BRK01-${yy}001`, "S3 재고생산 STK 적용")
+  ok((await computeNextTenantManufacturingNo(fakeDb({ id: "r", tokens: itemTokens, isActive: true }, 0), "t", { itemCode: "BRK01" }, date, 0, strict)) === "BRK01-001", "S4 규칙에 고객코드가 없으면 strict 여도 기존대로 발행")
   console.log(`\n${pass} passed`)
 }
 

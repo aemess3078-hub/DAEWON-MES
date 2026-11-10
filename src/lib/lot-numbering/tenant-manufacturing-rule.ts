@@ -21,6 +21,10 @@ import {
 
 export const MFG_RULE_NOT_CONFIGURED_MESSAGE =
   "제조번호 규칙이 설정되지 않았거나 사용 중지 상태입니다. 번호 규칙 관리에서 제조번호 규칙을 저장·활성화하거나 제조번호를 직접 입력해 주세요."
+/** 재고생산(STOCK) 제조번호에서 고객코드 변수에 자동 적용하는 값. */
+export const MFG_STOCK_CLIENT_CODE = "STK"
+export const MFG_ORDER_CLIENT_REQUIRED_MESSAGE =
+  "수주생산 제조번호에 고객코드가 필요하지만 연결된 수주의 고객 정보를 찾을 수 없어 자동 발행할 수 없습니다. 수주의 고객 정보를 확인하거나 제조번호를 직접 입력해 주세요."
 export const MFG_RULE_INVALID_MESSAGE =
   "저장된 제조번호 규칙에 순번 토큰이 정확히 하나 있어야 합니다. 번호 규칙 관리에서 규칙을 확인해 주세요."
 
@@ -133,11 +137,18 @@ export async function computeNextTenantManufacturingNo(
   context: TenantLotRuleContext,
   date: Date = new Date(),
   sequenceOffset = 0,
-  options: { serialize?: boolean } = {},
+  options: { serialize?: boolean; requireRealContextKeys?: ContextKey[] } = {},
 ): Promise<string> {
   const rule = await loadActiveManufacturingRule(db, tenantId)
   if (!rule) throw new Error(MFG_RULE_NOT_CONFIGURED_MESSAGE)
   // 값도 기본값도 없는 변수는 어떤 것이 빠졌는지 짚어서 안내한다.
+  // 수주생산(ORDER/ORDER_EXTRA)의 고객코드처럼 규칙 기본값으로 대체하면 안 되는 변수는 실제 값이 반드시 있어야 한다.
+  for (const key of options.requireRealContextKeys ?? []) {
+    const used = rule.tokens.some((t) => t.type === "CONTEXT" && t.key === key)
+    if (used && !context.extra?.[key]?.trim()) {
+      throw new Error(key === "CLIENT_CODE" ? MFG_ORDER_CLIENT_REQUIRED_MESSAGE : missingManufacturingContextMessage([key]))
+    }
+  }
   const missing = findMissingManufacturingContext(rule.tokens, context)
   if (missing.length > 0) throw new Error(missingManufacturingContextMessage(missing))
   let template: LotRuleTemplate

@@ -8,7 +8,8 @@ import { failureResult, UserFacingError, type ActionResult } from "@/lib/errors/
 import { safeRevalidate } from "@/lib/revalidate-safe"
 import { isCnsLotRuleAllowed } from "@/lib/lot-numbering/lot-brand-guard"
 import { decideManufacturingNo } from "@/lib/lot-numbering/manufacturing-no-policy"
-import { computeNextTenantManufacturingNo } from "@/lib/lot-numbering/tenant-manufacturing-rule"
+import type { ContextKey } from "@/lib/types/numbering-rule"
+import { computeNextTenantManufacturingNo, MFG_STOCK_CLIENT_CODE } from "@/lib/lot-numbering/tenant-manufacturing-rule"
 import { WorkOrderStatus, OperationStatus, Prisma } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { computeWipReceiptStatus } from "./wip-receipt.helpers"
@@ -871,14 +872,23 @@ async function validateManualManufacturingNoPolicy(
 async function getWorkOrderRuleExtraContext(
   tenantId: string,
   productionPlanItemId?: string | null,
-): Promise<{ CLIENT_CODE?: string }> {
-  if (!productionPlanItemId) return {}
+): Promise<{ extra: { CLIENT_CODE?: string }; requireRealContextKeys: ContextKey[] }> {
+  if (!productionPlanItemId) return { extra: {}, requireRealContextKeys: [] }
   const planItem = await prisma.productionPlanItem.findFirst({
     where: { id: productionPlanItemId, plan: { tenantId } },
-    select: { salesOrderItem: { select: { salesOrder: { select: { customer: { select: { code: true } } } } } } },
+    select: {
+      productionKind: true,
+      salesOrderItem: { select: { salesOrder: { select: { customer: { select: { code: true } } } } } },
+    },
   })
+  // 재고생산(STOCK): 수주 고객이 없으므로 고객코드 변수에 STK 를 자동 적용한다(규칙에 고객코드가 없으면 쓰이지 않는다).
+  if (planItem?.productionKind === "STOCK") return { extra: { CLIENT_CODE: MFG_STOCK_CLIENT_CODE }, requireRealContextKeys: [] }
   const code = planItem?.salesOrderItem?.salesOrder?.customer?.code?.trim()
-  return code ? { CLIENT_CODE: code } : {}
+  // 수주생산(ORDER/ORDER_EXTRA): 연결된 수주의 고객코드만 사용. 없으면 STK 등으로 대체하지 않고 규칙에 고객코드가 있을 때 오류 처리한다.
+  if (planItem && (planItem.productionKind === "ORDER" || planItem.productionKind === "ORDER_EXTRA")) {
+    return { extra: code ? { CLIENT_CODE: code } : {}, requireRealContextKeys: ["CLIENT_CODE"] }
+  }
+  return { extra: code ? { CLIENT_CODE: code } : {}, requireRealContextKeys: [] }
 }
 
 export async function generateManufacturingNo(
@@ -893,16 +903,18 @@ export async function generateManufacturingNo(
   // 대원정밀: 번호 규칙 관리의 '제조번호 규칙'(SERIAL)으로 발행. CNS 규칙은 NEXT_PUBLIC_BRAND=newmes 에서만 쓴다.
   if (!isCnsLotRuleAllowed()) {
     try {
+      const ruleExtra = await getWorkOrderRuleExtraContext(tenantId, productionPlanItemId)
       return await computeNextTenantManufacturingNo(
         prisma,
         tenantId,
         {
           itemCode: itemContext.itemCode,
           itemType: itemContext.itemType,
-          extra: await getWorkOrderRuleExtraContext(tenantId, productionPlanItemId),
+          extra: ruleExtra.extra,
         },
         new Date(),
         sequenceOffset,
+        { requireRealContextKeys: ruleExtra.requireRealContextKeys },
       )
     } catch (error) {
       // 규칙 미설정·값 부족 등 업무 안내는 프로덕션에서도 화면에 보이도록 UserFacingError 로 감싼다.
