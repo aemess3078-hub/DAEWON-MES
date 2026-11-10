@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import { useRouter } from "next/navigation"
 import { format, isPast } from "date-fns"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -53,6 +54,7 @@ export function MaterialReceiptDataTable({
   siteId,
 }: MaterialReceiptDataTableProps) {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
+  const router = useRouter()
   const [receivingOrder, setReceivingOrder] = useState<MaterialReceiptOrderRow | null>(null)
 
   function toggleExpand(id: string) {
@@ -67,16 +69,15 @@ export function MaterialReceiptDataTable({
     })
   }
 
-  if (data.length === 0) {
-    return (
-      <div className="rounded-lg border bg-muted/20 py-16 text-center">
-        <p className="text-[14px] text-muted-foreground">입고 대기 중인 발주가 없습니다.</p>
-      </div>
-    )
-  }
-
+  // 주의: 목록이 비어도 early return 하지 않는다. 마지막 발주 입고 후 router.refresh() 로 목록이 비면
+  // 이 컴포넌트가 언마운트되어 입고 확정 후의 라벨 출력창(ReceivingFormDialog 내부)이 함께 사라진다.
   return (
     <>
+      {data.length === 0 ? (
+        <div className="rounded-lg border bg-muted/20 py-16 text-center">
+          <p className="text-[14px] text-muted-foreground">입고 대기 중인 발주가 없습니다.</p>
+        </div>
+      ) : (
       <div className="rounded-lg border overflow-hidden">
         {/* 테이블 헤더 */}
         <div className="grid grid-cols-[40px_1fr_1fr_1fr_1fr_1fr_120px] bg-muted/30 border-b">
@@ -214,6 +215,7 @@ export function MaterialReceiptDataTable({
           })}
         </div>
       </div>
+      )}
 
       {/* ReceivingFormDialog */}
       {receivingOrder && (
@@ -223,7 +225,11 @@ export function MaterialReceiptDataTable({
           tenantId={tenantId}
           siteId={siteId}
           open={!!receivingOrder}
-          onClose={() => setReceivingOrder(null)}
+          onClose={() => {
+            setReceivingOrder(null)
+            // 라벨 출력 또는 닫기 후 입고 대기 목록을 최신 상태로 갱신한다(이미 입고된 발주는 목록에서 빠짐)
+            router.refresh()
+          }}
         />
       )}
     </>
