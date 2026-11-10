@@ -17,8 +17,8 @@ export type SelfInspectionDefectDetail = {
  * POP 자주검사용 InspectionSpec을 조회한다.
  * 1) 해당 (품목 + 공정) 정확 매칭 ACTIVE 스펙
  * 2) 해당 품목의 ACTIVE 스펙(공정 무관)
- * 3) 테넌트의 임의 ACTIVE 스펙
- * 모두 없으면 null. (호출부에서 명확한 에러 처리)
+ * 둘 다 없으면 null → 검사표준 없이(inspectionSpecId = null) 자주검사를 기록한다.
+ * 다른 품목의 검사표준을 임의로 연결하지 않는다.
  */
 async function resolveSelfInspectionSpecId(
   tx: SelfInspectionTx,
@@ -45,14 +45,7 @@ async function resolveSelfInspectionSpecId(
     orderBy: [{ updatedAt: "desc" }, { version: "desc" }],
     select: { id: true },
   })
-  if (byItem) return byItem.id
-
-  const anySpec = await tx.inspectionSpec.findFirst({
-    where: { tenantId: params.tenantId, status: "ACTIVE" },
-    orderBy: [{ updatedAt: "desc" }, { version: "desc" }],
-    select: { id: true },
-  })
-  return anySpec?.id ?? null
+  return byItem?.id ?? null
 }
 
 /**
@@ -90,16 +83,12 @@ export async function recordSelfInspectionDefects(
     itemId: params.itemId,
     routingOperationId: params.routingOperationId,
   })
-  if (!inspectionSpecId) {
-    throw new Error(
-      "POP 자주검사를 위한 검사표준이 없습니다. 검사표준관리에서 해당 품목의 검사표준을 먼저 등록해 주세요."
-    )
-  }
+  // 검사표준이 없어도 불량 실적/불량내역은 저장한다(inspectionSpecId = null).
 
   const inspection = await tx.qualityInspection.create({
     data: {
       workOrderOperationId: params.workOrderOperationId,
-      inspectionSpecId,
+      inspectionSpecId, // 없으면 null
       inspectorId: params.inspectorProfileId,
       stage: InspectionStage.MID,
       result: InspectionResult.FAIL,

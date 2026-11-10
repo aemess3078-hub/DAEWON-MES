@@ -11,7 +11,7 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 export type InspectionStageRow = {
   id: string
   workOrderOperationId: string
-  inspectionSpecId: string
+  inspectionSpecId: string | null // 검사표준 없이 등록된 POP 자주검사는 null
   inspectorId: string
   lotId: string | null
   stage: InspectionStage
