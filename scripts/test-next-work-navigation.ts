@@ -22,10 +22,16 @@ function assertRegex(relativePath: string, pattern: RegExp, description: string)
 }
 
 const checks: Array<() => void> = [
+  // 생산의뢰 폼이 별도 컴포넌트(sales-order-production-request-form)로 분리되어, 생성 후 '생산계획 보기' 링크로 수주 컨텍스트를 전달한다.
   () => assertIncludes(
-    "src/app/app/mes/sales-orders/sales-order-process-dialog.tsx",
+    "src/app/app/mes/sales-orders/sales-order-production-request-form.tsx",
     "/app/mes/production-plan?salesOrderId=",
     "수주 생산의뢰 후 생산계획 컨텍스트 이동"
+  ),
+  () => assertIncludes(
+    "src/app/app/mes/sales-orders/sales-order-process-dialog.tsx",
+    "SalesOrderProductionRequestForm",
+    "수주 처리 팝업에서 생산의뢰 폼 사용"
   ),
   () => assertIncludes(
     "src/app/app/mes/sales-orders/sales-order-process-dialog.tsx",

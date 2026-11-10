@@ -86,7 +86,7 @@ const origLoad = (Module as any)._load
   try { resolved = (Module as any)._resolveFilename(request, parent, isMain) } catch { /* ignore */ }
   const norm = resolved.split(sep).join("/")
   if (norm.endsWith("/src/lib/db/prisma.ts")) return { prisma: fakePrisma, default: fakePrisma }
-  if (norm.endsWith("/src/lib/auth.ts")) return { getTenantId: async () => currentTenant }
+  if (norm.endsWith("/src/lib/auth.ts")) return { getTenantId: async () => currentTenant, requireRole: async () => ({ tenantId: currentTenant }) } // 보안 커밋(c89e6d4) 이후 모니터 액션은 세션 tenant(requireRole)를 사용한다
   return origLoad.call(this, request, parent, isMain)
 }
 

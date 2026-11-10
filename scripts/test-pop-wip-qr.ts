@@ -243,11 +243,17 @@ async function main() {
   ok(!/wip-label|wip-label-eligibility|computeIssueProgress|material-issue/.test(code0 + stripComments(readSource("src/lib/pop/wip-scan.ts"))), "C3 WIP 라벨 발행 조건(wip-label · 자재출고 완료 판정)을 POP 선택 조건으로 재사용하지 않는다")
 
   // 기존 POP 업무 로직 불변(QR 작업 이전 코드의 지문 — 4-2단계에서 수정하지 않았다)
+  // [갱신] 4-2 이후 의도된 기능 변경으로 아래 지문을 다시 고정했다(QR 조회 코드는 이 파일들을 수정하지 않는다는 점은 C1~C3 가 계속 검증).
+  //   wip-traceability.helpers.ts 는 4-2 당시 그대로다. 변경 내역:
+  //   - src/lib/actions/pop.actions.ts: 복귀 root 투입 가능 수량 계산(getGoodQtySoFarForRoot, ISSUE-014)·외주/검사 대기 작업 큐 표시(ISSUE-017)
+  //   - src/lib/operation-status-integrity.ts: 외주 진행/검사 대기 전용 차단 메시지(ISSUE-017)
+  //   - src/lib/actions/process-progress.actions.ts: 테넌트 접근 검증(보안 c89e6d4)·재작업 종결 본체 분리(completeReworkInTx, ISSUE-014)
+  //   변경된 업무 동작은 실DB 테스트(test:intermediate-rework-db, test:outsourcing-flow-db 등)로 검증한다.
   const pinned: Array<[string, string]> = [
-    ["src/lib/actions/pop.actions.ts", "f87314790c8ff683"],
+    ["src/lib/actions/pop.actions.ts", "37dc4b6ac1d5b44c"],
     ["src/lib/actions/wip-traceability.helpers.ts", "2f9f7bcd2f8591af"],
-    ["src/lib/operation-status-integrity.ts", "b721e14ca2af7122"],
-    ["src/lib/actions/process-progress.actions.ts", "d7143fa7d79b9c1f"],
+    ["src/lib/operation-status-integrity.ts", "9b67d1de5e840674"],
+    ["src/lib/actions/process-progress.actions.ts", "1098928f20fd7955"],
   ]
   const changed = pinned.filter(([file, expected]) => fingerprint(readSource(file)) !== expected).map(([file]) => file)
   ok(changed.length === 0, `C4 [기존 POP 업무 로직 불변] 작업 시작·실적 등록·WIP 자동 공정이동·공정 상태·공정진행 서버 코드가 4-2 이전과 동일(지문 비교)${changed.length ? " — 변경됨: " + changed.join(", ") : ""}`)
@@ -258,8 +264,11 @@ async function main() {
   const scanCode = stripComments(scanSrc)
   ok(!/pop\.actions|startOperation|submitProductionResult|updateOperationStatus|next\/navigation|useRouter|router\.|window\.location|location\.(href|assign|replace)|history\.(push|replace)State/.test(scanCode), "C6 [QR 스캔만으로 상태 변경 없음] QR 컴포넌트는 POP 시작·실적 액션을 import 하거나 호출하지 않고 화면 이동도 하지 않는다")
   ok((clientSrc.match(/startOperation\(/g) ?? []).length === 1 && (clientSrc.match(/submitProductionResult\(/g) ?? []).length === 1 && clientSrc.includes("await startOperation(row.operationId, row.assignmentId)") && clientSrc.includes("workOrderOperationId: row.operationId"), "C7 [기존 시작·실적 액션 유지] 작업시작/실적등록은 여전히 각 버튼 핸들러의 기존 서버 액션 호출 하나뿐(QR 전용 경로 없음)")
-  ok(clientSrc.includes('placeholder="작업지시번호, 제조번호, 품목, 공정 검색"') && clientSrc.includes("FILTERS.map") && clientSrc.includes("row.orderNo,") && clientSrc.includes("row.manufacturingNo ??"), "C8 [수동 선택 유지] 검색창·필터·작업지시 카드 목록 등 기존 수동 선택 UI 가 그대로 있다")
-  ok(clientSrc.includes("if (qrWip && row.workOrderId !== qrWip.workOrderId) return false") && clientSrc.includes("onClear={() => setQrWip(null)}") && clientSrc.includes("workOrderIdsInList={workOrderIdsInList}"), "C9 QR 는 표시 필터일 뿐이며 해제하면 전체 목록으로 돌아가고, 현재 목록에 없는 작업지시는 표시하지 않는다")
+  // [갱신] 공정 필터·통합 검색 추가(987af90)로 검색 문구가 '…, 공정, 설비 검색'이 되고 검색 로직이 pop-process-filter(filterQueueRows)로 이동했다.
+  const filterLib = readSource("src/lib/pop-process-filter.ts")
+  ok(clientSrc.includes('placeholder="작업지시번호, 제조번호, 품목, 공정, 설비 검색"') && clientSrc.includes("FILTERS.map") && clientSrc.includes("filterQueueRows(") && filterLib.includes("wo.orderNo,") && filterLib.includes("wo.manufacturingNo,") && clientSrc.includes("row.manufacturingNo ??"), "C8 [수동 선택 유지] 검색창·필터·작업지시 카드 목록 등 기존 수동 선택 UI 가 그대로 있다")
+  // [갱신] 통합 검색 리팩터링(987af90)으로 QR 표시 필터가 'qrWip ? rows.filter(...) : rows' 형태가 됐다(동작 동일: 해제하면 전체 목록).
+  ok(clientSrc.includes("const base = qrWip ? rows.filter((row) => row.workOrderId === qrWip.workOrderId) : rows") && clientSrc.includes("onClear={() => setQrWip(null)}") && clientSrc.includes("workOrderIdsInList={workOrderIdsInList}"), "C9 QR 는 표시 필터일 뿐이며 해제하면 전체 목록으로 돌아가고, 현재 목록에 없는 작업지시는 표시하지 않는다")
   ok(scanSrc.includes('process.env.NEXT_PUBLIC_QR_SCAN_DISABLED === "true"') && scanSrc.includes("if (QR_DISABLED) return null") && scanSrc.includes('result.kind !== "WIP"') && scanSrc.includes("if (busyRef.current) return"), "C10 [QR 는 선택 기능] 스위치로 끄면 버튼이 사라지고, LOT QR 은 거부하며, 조회 중 중복 스캔을 막는다")
   ok(scanSrc.includes("QrScannerDialog") && !/new BarcodeDetector|jsQR|jsqr/.test(scanCode) && scanSrc.includes('role={message.tone === "error" ? "alert" : "status"}') && scanSrc.includes("목록에서 직접 선택"), "C11 새 스캐너를 만들지 않고 공통 QrScannerDialog 를 재사용하며, 실패 시 수동 선택 안내를 표시한다")
   ok(scanSrc.includes("onSelect(found)") && !/setFilter|setKeyword/.test(scanCode) && clientSrc.includes('setFilter("ALL")') && clientSrc.includes('setKeyword("")'), "C12 필터/검색어 초기화는 QR 로 작업지시를 찾았을 때 화면 쪽 콜백에서만 일어나며, 조회가 실패하면 기존 필터·검색어·입력값을 건드리지 않는다")
@@ -285,12 +294,14 @@ async function main() {
 
   const fieldSrc = readSource("src/app/pop/work-select/work-select-client.tsx")
   const fieldCode = stripComments(fieldSrc)
-  ok(fieldSrc.includes('import { PopWipQrScan, type PopWipFound } from "@/components/pop/pop-wip-qr-scan"') && clientSrc.includes('from "@/components/pop/pop-wip-qr-scan"') && fieldSrc.includes('<PopWipQrScan variant="field"'), "D5 [관리자 POP QR 재사용] 현장 화면과 관리자 작업대기가 같은 공용 컴포넌트(조회 액션·스캐너·판정)를 쓰고 표시 크기만 variant 로 다르다")
+  ok(fieldSrc.includes('import { PopWipQrScan, type PopWipFound } from "@/components/pop/pop-wip-qr-scan"') && clientSrc.includes('from "@/components/pop/pop-wip-qr-scan"') && /<PopWipQrScan\s+variant="field"/.test(fieldSrc), "D5 [관리자 POP QR 재사용] 현장 화면과 관리자 작업대기가 같은 공용 컴포넌트(조회 액션·스캐너·판정)를 쓰고 표시 크기만 variant 로 다르다")
   const cardClick = between(readSource("src/app/pop/work-select/work-select-client.tsx"), "const handleCardClick", "  if (workOrders.length === 0)") ?? ""
   const cardMarkup = between(readSource("src/app/pop/work-select/work-select-client.tsx"), "        const totalOps = wo.operations.length", "      })}") ?? ""
-  ok(fingerprint(cardClick) === "2ac94a51ff6e6541" && fingerprint(cardMarkup) === "5fbfb3dbf4588252" && fingerprint(readSource("src/app/pop/work-select/page.tsx")) === "c82c87b8713a31f7", "D6 [기존 카드 클릭·카드 표시·목록 조회 불변] 카드 클릭 처리(handleCardClick), 카드 마크업, 작업지시 목록 페이지가 4-2.1 이전과 동일(지문)")
+  // [갱신] 공정 필터(987af90)로 카드 클릭이 targetOperation/operationHref 를 쓰고 카드에 제조번호·선택 공정 정보가 추가됐다(전체 보기의 이동 대상은 동일 — test:pop-process-filter 로 검증). 작업목록 조회 페이지(page.tsx)는 그대로다.
+  ok(fingerprint(cardClick) === "832e056dc4fd23d6" && fingerprint(cardMarkup) === "fb6bffa00dc57c77" && fingerprint(readSource("src/app/pop/work-select/page.tsx")) === "c82c87b8713a31f7", "D6 [기존 카드 클릭·카드 표시·목록 조회 불변] 카드 클릭 처리(handleCardClick), 카드 마크업, 작업지시 목록 페이지가 4-2.1 이전과 동일(지문)")
   ok((fieldCode.match(/router\.push\(/g) ?? []).length === 1 && cardClick.includes("router.push(") && !/pop\.actions|startOperation|submitProductionResult|updateOperationStatus/.test(fieldCode), "D7 [스캔만으로 화면 이동·작업 시작·실적 등록 없음] 화면 이동은 기존 카드 클릭의 router.push 1곳뿐이고, 현장 화면은 시작·실적 액션을 import 하지 않는다")
-  ok(fieldSrc.includes("const visibleWorkOrders = qrWip ? workOrders.filter((wo) => wo.id === qrWip.workOrderId) : workOrders") && fieldSrc.includes("onClear={() => setQrWip(null)}") && fieldSrc.includes("workOrderIdsInList={workOrderIdsInList}") && /visibleWorkOrders\.map\(\(wo\) => \{/.test(fieldSrc), "D8 [기존 카드 재사용] QR 는 기존 카드를 걸러 보여 줄 뿐 새 카드를 만들지 않고, 해제하면 전체 목록으로 돌아가며, 이 화면의 목록에 있는 작업지시만 인정한다")
+  // [갱신] 공정 필터(987af90): QR 가 없을 때의 기본 목록이 공정·상태·검색 필터를 거친 filteredWorkOrders 가 됐다(QR 표시 동작은 동일).
+  ok(fieldSrc.includes("const visibleWorkOrders = qrWip ? workOrders.filter((wo) => wo.id === qrWip.workOrderId) : filteredWorkOrders") && fieldSrc.includes("onClear={() => setQrWip(null)}") && fieldSrc.includes("workOrderIdsInList={workOrderIdsInList}") && /visibleWorkOrders\.map\(\(wo\) => \{/.test(fieldSrc), "D8 [기존 카드 재사용] QR 는 기존 카드를 걸러 보여 줄 뿐 새 카드를 만들지 않고, 해제하면 전체 목록으로 돌아가며, 이 화면의 목록에 있는 작업지시만 인정한다")
   ok(fieldSrc.indexOf("workOrders.length === 0") < fieldSrc.indexOf("<PopWipQrScan"), "D9 오늘 배정된 작업이 없는 빈 화면은 기존 그대로(QR 버튼도 목록이 있을 때만)")
 
   console.log(`\n${passed} checks passed`)
