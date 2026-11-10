@@ -233,3 +233,154 @@ export async function completeIntermediateRework(
   await tx.wipMovement.createMany({ data: movements })
   return { mode: "REOPEN", returnedToOperationSeq: nextOp.seq }
 }
+
+export type CompleteReworkCoreInput = { reworkWipUnitId: string; mergedQty: number; scrapQty: number }
+
+/**
+ * 재작업 WipUnit 종결 본체(트랜잭션 안에서 호출). 재작업/보류관리 화면(completeRework)과 외주 재외주 검사(outsourcing)가 함께 쓴다.
+ * 최종공정 재작업은 완료 root 에 복귀, 중간공정 재작업은 다음 공정부터 정상 흐름에 복귀(completeIntermediateRework).
+ */
+export async function completeReworkInTx(tx: ReworkReturnTx, input: CompleteReworkCoreInput): Promise<void> {
+  const { reworkWipUnitId, mergedQty, scrapQty } = input
+  if (
+    !Number.isFinite(mergedQty) ||
+    !Number.isFinite(scrapQty) ||
+    mergedQty < 0 ||
+    scrapQty < 0 ||
+    mergedQty + scrapQty <= 0
+  ) {
+    throw new Error("복귀 수량과 폐기 수량을 올바르게 입력하세요.")
+  }
+
+  const child = await tx.wipUnit.findUnique({
+    where: { id: reworkWipUnitId },
+    include: {
+      parentWipUnit: {
+        select: {
+          id: true,
+          qty: true,
+          status: true,
+          parentWipUnitId: true,
+          workOrderOperationId: true,
+          currentWorkCenterId: true,
+        },
+      },
+      workOrderOperation: {
+        select: {
+          id: true,
+          workOrder: {
+            select: {
+              operations: {
+                select: { id: true, seq: true },
+                orderBy: { seq: "desc" },
+                take: 1,
+              },
+            },
+          },
+        },
+      },
+    },
+  })
+  if (
+    !child ||
+    child.status !== WipUnitStatus.REWORK ||
+    child.parentWipUnitId == null ||
+    child.sourceProductionResultId == null
+  ) {
+    throw new Error("처리 가능한 REWORK WipUnit을 찾을 수 없습니다.")
+  }
+
+  const existingCompletion = await tx.wipMovement.findFirst({
+    where: {
+      sourceType: { in: ["ReworkCompletion", "ReworkMerge", "ReworkReturn"] },
+      sourceId: child.id,
+    },
+    select: { id: true },
+  })
+  if (existingCompletion) {
+    throw new Error("이미 종결 처리된 REWORK WipUnit입니다.")
+  }
+
+  const childQty = Number(child.qty)
+  if (Math.abs(mergedQty + scrapQty - childQty) > 0.000001) {
+    throw new Error(
+      `복귀 수량과 폐기 수량의 합계는 재작업 수량(${childQty})과 같아야 합니다.`
+    )
+  }
+
+  const lastOperation = child.workOrderOperation.workOrder.operations[0] ?? null
+  if (!lastOperation) {
+    throw new Error("작업지시 공정 정보를 확인할 수 없습니다.")
+  }
+  if (lastOperation.id !== child.workOrderOperationId) {
+    // 중간공정 재작업(ISSUE-014): 합격 수량은 재작업 발생 공정 다음 공정부터 정상 흐름에 복귀하고, 폐기 수량은 이력으로 기록한다.
+    await completeIntermediateRework(tx, { child, mergedQty, scrapQty })
+    return
+  }
+
+  const parent = child.parentWipUnit
+  if (
+    !parent ||
+    parent.parentWipUnitId != null ||
+    parent.status !== WipUnitStatus.COMPLETED ||
+    parent.workOrderOperationId !== child.workOrderOperationId
+  ) {
+    throw new Error("최종공정 완료 root WipUnit에만 재작업 수량을 복귀할 수 있습니다.")
+  }
+
+  const childStatus =
+    mergedQty > 0 ? WipUnitStatus.COMPLETED : WipUnitStatus.SCRAPPED
+  const claimed = await tx.wipUnit.updateMany({
+    where: { id: child.id, status: WipUnitStatus.REWORK },
+    data: { status: childStatus },
+  })
+  if (claimed.count !== 1) {
+    throw new Error("이미 처리 중이거나 종결된 REWORK WipUnit입니다.")
+  }
+
+  if (mergedQty > 0) {
+    await tx.wipUnit.update({
+      where: { id: parent.id },
+      data: { qty: { increment: mergedQty } },
+    })
+  }
+
+  const movements = []
+  if (mergedQty > 0) {
+    movements.push({
+      tenantId: child.tenantId,
+      siteId: child.siteId,
+      wipUnitId: parent.id,
+      relatedWipUnitId: child.id,
+      movementType: WipMovementType.MERGE,
+      fromOperationId: child.workOrderOperationId,
+      toOperationId: parent.workOrderOperationId,
+      fromWorkCenterId: child.currentWorkCenterId,
+      toWorkCenterId: parent.currentWorkCenterId,
+      qty: mergedQty,
+      sourceType: "ReworkCompletion",
+      sourceId: child.id,
+      note: `재작업 양품 복귀: ${mergedQty}`,
+    })
+  }
+  if (scrapQty > 0) {
+    movements.push({
+      tenantId: child.tenantId,
+      siteId: child.siteId,
+      wipUnitId: child.id,
+      relatedWipUnitId: parent.id,
+      movementType: WipMovementType.SCRAP,
+      fromOperationId: child.workOrderOperationId,
+      toOperationId: child.workOrderOperationId,
+      fromWorkCenterId: child.currentWorkCenterId,
+      toWorkCenterId: child.currentWorkCenterId,
+      qty: scrapQty,
+      sourceType: "ReworkCompletion",
+      sourceId: child.id,
+      note: `재작업 후 폐기: ${scrapQty}`,
+    })
+  }
+  await tx.wipMovement.createMany({
+    data: movements,
+  })
+}

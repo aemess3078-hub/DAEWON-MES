@@ -13,6 +13,8 @@ import {
 } from "@/lib/quantity-concurrency"
 import { recordAuditLog } from "@/lib/audit-log"
 import { delay, kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
+import { completeOutsourcedOperationOnInspection, syncOutsourcingOrderStatus } from "@/lib/actions/outsourcing-flow.helpers"
+import { completeReworkInTx, getGoodQtySoFarForRoot } from "@/lib/actions/rework-return.helpers"
 
 // ─── Filter & Types ───────────────────────────────────────────────────────────
 
@@ -21,6 +23,8 @@ export type OutsourcingFilter = {
   to?: string
   supplierId?: string
   status?: PurchaseOrderStatus
+  /** active(기본): 완료(입고완료·종료·취소)된 발주는 목록에서 제외 / all: 전체 조회. status 를 직접 지정하면 그 상태만 조회한다. */
+  scope?: "active" | "all"
 }
 
 export type OutsourcingOrderRow = {
@@ -298,9 +302,28 @@ export async function issueWipUnitToOutsourcing(data: IssueWipUnitToOutsourcingI
   if (purchaseOrder.siteId !== wipUnit.workOrderOperation.workOrder.siteId) {
     throw new Error("외주발주 사업장과 작업지시 사업장이 일치하지 않습니다.")
   }
+  if (["RECEIVED", "CLOSED", "CANCELLED"].includes(purchaseOrder.status)) {
+    throw new Error("입고완료·종료·취소된 외주발주에는 외주출고할 수 없습니다. 새 외주발주를 등록해 주세요.")
+  }
 
   await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {
     await lockWorkOrderOperationForUpdate(tx, wipUnit.workOrderOperationId)
+
+    // 외주공정 = 이 재공이 현재 위치한 작업지시 공정. 이미 POP 실적이 등록된 공정은 외주로 중복 수행할 수 없다(재작업 child 는 해당 없음).
+    const isReworkChildUnit = wipUnit.parentWipUnitId != null && wipUnit.sourceProductionResultId != null
+    const operationRow = await tx.workOrderOperation.findUniqueOrThrow({
+      where: { id: wipUnit.workOrderOperationId },
+      select: { id: true, status: true, startedAt: true, workOrderId: true },
+    })
+    if (!isReworkChildUnit) {
+      if (operationRow.status === "COMPLETED") {
+        throw new Error("이미 완료된 공정입니다. 외주출고할 수 없습니다.")
+      }
+      const rootForGuard = await tx.wipUnit.findUniqueOrThrow({ where: { id: wipUnit.id }, select: { id: true, createdAt: true } })
+      if ((await getGoodQtySoFarForRoot(tx, operationRow.id, rootForGuard)) > 0.000001) {
+        throw new Error("이미 POP 생산실적이 등록된 공정입니다. 남은 수량을 POP에서 완료한 뒤 외주출고해 주세요.")
+      }
+    }
 
     let orderItem = await tx.purchaseOrderItem.findFirst({
       where: { purchaseOrderId: purchaseOrder.id, itemId: wipUnit.itemId },
@@ -349,6 +372,18 @@ export async function issueWipUnitToOutsourcing(data: IssueWipUnitToOutsourcingI
     if (updated.count !== 1) {
       throw new Error("이미 외주 처리되었거나 외주출고 가능한 상태가 아닙니다.")
     }
+
+    // 외주공정 진행 표시: 공정 진행중(시작 시각), 작업지시 진행중. (POP 작업시작·실적은 재공 상태(OUTSOURCED)로 차단된다.)
+    if (!isReworkChildUnit) {
+      if (operationRow.status === "PENDING") {
+        await tx.workOrderOperation.update({
+          where: { id: operationRow.id },
+          data: { status: "IN_PROGRESS", ...(operationRow.startedAt ? {} : { startedAt: new Date() }) },
+        })
+      }
+      await tx.workOrder.updateMany({ where: { id: operationRow.workOrderId, status: "RELEASED" }, data: { status: "IN_PROGRESS" } })
+    }
+    await syncOutsourcingOrderStatus(tx, purchaseOrder.id)
 
     await tx.wipMovement.create({
       data: {
@@ -449,6 +484,8 @@ export async function receiveWipUnitFromOutsourcing(data: ReceiveWipUnitFromOuts
       where: { id: lockedItem.id },
       data: { receivedQty: { increment: wipUnit.qty } },
     })
+    // 외주발주 상태: 미입고 발주완료 / 부분입고 / 전량입고 입고완료 (ISSUE-017)
+    await syncOutsourcingOrderStatus(tx, lockedItem.purchaseOrderId)
 
     await tx.wipMovement.create({
       data: {
@@ -578,137 +615,229 @@ export async function inspectOutsourcedWipUnit(
 
   // 5. siteId 조회
   const site = await prisma.site.findFirst({ where: { tenantId } })
-  const siteId = site?.id ?? null
+  const siteId = wipUnit.siteId ?? site?.id ?? null
+  const isReworkChild = wipUnit.parentWipUnitId != null && wipUnit.sourceProductionResultId != null
 
   let createdDefectWipUnitId: string | undefined
   let createdReworkWipUnitId: string | undefined
 
-  await prisma.$transaction(async (tx) => {
+  await withQuantityTransactionRetry(() => prisma.$transaction(async (tx) => {
+    // 같은 공정의 외주검사·POP 실적·재작업 종결과 직렬화
+    await lockWorkOrderOperationForUpdate(tx, wipUnit.workOrderOperationId)
     const movements: Prisma.WipMovementCreateManyInput[] = []
+    const noteSuffix = input.note ? ` - ${input.note}` : ""
 
-    // ── 합격분: 부모 WipUnit 복귀 ────────────────────────────────────────────
-    //   acceptedQty=0이면 부모는 qty=0 / SCRAPPED (배치 전량 불합격)
-    //
-    //   status='RECEIVED' 를 where 에 포함한 updateMany 로 갱신하여 검사대기 상태를
-    //   원자적으로 선점한다. 앞의 조회 기반 중복 검사는 동시 요청 사이에 틈이 있으므로
-    //   더블클릭·동시 요청은 이 조건에서 count=0 이 되어 차단된다.
-    const parentNewStatus = acceptedQty > 0 ? "IN_PROCESS" : "SCRAPPED"
-    const parentUpdate = await tx.wipUnit.updateMany({
-      where: { id: input.wipUnitId, tenantId, status: "RECEIVED" },
-      data: { status: parentNewStatus, qty: acceptedQty },
-    })
-    if (parentUpdate.count !== 1) {
-      throw new Error("이미 검사처리되었거나 검사대기 상태가 아닙니다.")
-    }
+    // ── 재외주(재작업 child) 검사: 합격분은 재작업 종결 로직으로 정상 흐름에 복귀, 불량은 폐기, 재외주 잔여는 REWORK 로 남긴다 ──
+    if (isReworkChild) {
+      // RECEIVED(검사대기)를 원자적으로 선점해 REWORK 로 되돌린다(더블클릭·동시 요청 차단). 종결 대상 수량 = 합격 + 불량.
+      const settledQty = acceptedQty + defectQty
+      const claimed = await tx.wipUnit.updateMany({
+        where: { id: input.wipUnitId, tenantId, status: "RECEIVED" },
+        data: { status: "REWORK", qty: reworkQty > 0 && settledQty > 0 ? settledQty : wipQty },
+      })
+      if (claimed.count !== 1) throw new Error("이미 검사처리되었거나 검사대기 상태가 아닙니다.")
 
-    if (acceptedQty > 0) {
+      if (reworkQty > 0 && settledQty > 0) {
+        const sibling = await tx.wipUnit.create({
+          data: {
+            tenantId,
+            siteId: wipUnit.siteId,
+            workOrderId: wipUnit.workOrderId,
+            workOrderOperationId: wipUnit.workOrderOperationId,
+            itemId: wipUnit.itemId,
+            lotId: wipUnit.lotId,
+            manufacturingNo: wipUnit.manufacturingNo,
+            currentWorkCenterId: wipUnit.currentWorkCenterId,
+            currentWarehouseId: wipUnit.currentWarehouseId,
+            currentLocationId: wipUnit.currentLocationId,
+            parentWipUnitId: wipUnit.parentWipUnitId,
+            sourceProductionResultId: wipUnit.sourceProductionResultId,
+            qty: reworkQty,
+            status: "REWORK",
+          },
+        })
+        createdReworkWipUnitId = sibling.id
+        movements.push({
+          tenantId,
+          siteId,
+          wipUnitId: input.wipUnitId,
+          relatedWipUnitId: sibling.id,
+          movementType: "SPLIT",
+          qty: reworkQty,
+          sourceType: "OutsourcingInspection",
+          sourceId: orderItem.id,
+          note: `외주검사 재외주 잔여 분리: ${orderItem.purchaseOrder.orderNo}${noteSuffix} (재외주=${reworkQty})`,
+        })
+      }
       movements.push({
         tenantId,
         siteId,
         wipUnitId: input.wipUnitId,
         movementType: "RELEASED",
-        qty: acceptedQty,
+        qty: wipQty,
         sourceType: "OutsourcingInspection",
         sourceId: orderItem.id,
-        note: `외주검사 합격 복귀: ${orderItem.purchaseOrder.orderNo}${input.note ? ` - ${input.note}` : ""} (합격=${acceptedQty})`,
+        note: `재외주 입고검사: ${orderItem.purchaseOrder.orderNo}${noteSuffix} (합격=${acceptedQty}, 불량=${defectQty}, 재외주=${reworkQty})`,
       })
+      await tx.wipMovement.createMany({ data: movements })
+
+      if (settledQty > 0) {
+        await completeReworkInTx(tx, { reworkWipUnitId: input.wipUnitId, mergedQty: acceptedQty, scrapQty: defectQty })
+      }
+    } else {
+      // ── 합격분: 부모 WipUnit 복귀 ────────────────────────────────────────────
+      //   acceptedQty=0이면 부모는 qty=0 / SCRAPPED (배치 전량 불합격)
+      //   status='RECEIVED' 를 where 에 포함한 updateMany 로 검사대기 상태를 원자적으로 선점한다(중복 처리 차단).
+      const parentNewStatus = acceptedQty > 0 ? "IN_PROCESS" : "SCRAPPED"
+      const parentUpdate = await tx.wipUnit.updateMany({
+        where: { id: input.wipUnitId, tenantId, status: "RECEIVED" },
+        data: { status: parentNewStatus, qty: acceptedQty },
+      })
+      if (parentUpdate.count !== 1) {
+        throw new Error("이미 검사처리되었거나 검사대기 상태가 아닙니다.")
+      }
+
+      // 합격/불량/재외주 수량을 외주공정의 완료 실적으로 반영하고 합격 WIP 를 다음 공정으로 이동한다.
+      const startedMovement = await tx.wipMovement.findFirst({
+        where: { tenantId, wipUnitId: input.wipUnitId, movementType: "OUTSOURCED" },
+        orderBy: { createdAt: "desc" },
+        select: { createdAt: true },
+      })
+      const flow = await completeOutsourcedOperationOnInspection(tx, {
+        tenantId,
+        siteId,
+        workOrderId: wipUnit.workOrderId ?? orderItem.workOrderOperation?.workOrderId ?? "",
+        workOrderOperationId: wipUnit.workOrderOperationId,
+        acceptedQty,
+        defectQty,
+        reworkQty,
+        startedAt: startedMovement?.createdAt ?? null,
+        operatorProfileId: actor.profileId ?? null,
+      })
+
+      if (acceptedQty > 0) {
+        movements.push({
+          tenantId,
+          siteId,
+          wipUnitId: input.wipUnitId,
+          movementType: "RELEASED",
+          qty: acceptedQty,
+          sourceType: "OutsourcingInspection",
+          sourceId: orderItem.id,
+          note: `외주검사 합격 → 공정 완료 실적 반영·${flow.nextOperationSeq ? `공정 ${flow.nextOperationSeq} 로 이동` : "최종공정 완료"}: ${orderItem.purchaseOrder.orderNo}${noteSuffix} (합격=${acceptedQty})`,
+        })
+      }
+
+      // ── 불량분: SCRAPPED 자식 WipUnit 생성 ──────────────────────────────────
+      if (defectQty > 0) {
+        const defectChild = await tx.wipUnit.create({
+          data: {
+            tenantId,
+            siteId: wipUnit.siteId,
+            workOrderId: wipUnit.workOrderId,
+            workOrderOperationId: wipUnit.workOrderOperationId,
+            itemId: wipUnit.itemId,
+            lotId: wipUnit.lotId,
+            manufacturingNo: wipUnit.manufacturingNo,
+            currentWorkCenterId: wipUnit.currentWorkCenterId,
+            currentWarehouseId: wipUnit.currentWarehouseId,
+            currentLocationId: wipUnit.currentLocationId,
+            parentWipUnitId: input.wipUnitId,
+            sourceProductionResultId: flow.productionResultId,
+            qty: defectQty,
+            status: "SCRAPPED",
+          },
+        })
+        createdDefectWipUnitId = defectChild.id
+
+        movements.push(
+          {
+            tenantId,
+            siteId,
+            wipUnitId: input.wipUnitId,
+            relatedWipUnitId: defectChild.id,
+            movementType: "DEFECT",
+            qty: defectQty,
+            sourceType: "OutsourcingInspection",
+            sourceId: orderItem.id,
+            note: `외주검사 불량: ${orderItem.purchaseOrder.orderNo}${noteSuffix} (불량=${defectQty})`,
+          },
+          {
+            tenantId,
+            siteId,
+            wipUnitId: input.wipUnitId,
+            relatedWipUnitId: defectChild.id,
+            movementType: "SPLIT",
+            qty: defectQty,
+            sourceType: "OutsourcingInspection",
+            sourceId: orderItem.id,
+            note: `외주검사 불량 수량 분리·폐기 (defectQty=${defectQty})`,
+          },
+          {
+            tenantId,
+            siteId,
+            wipUnitId: defectChild.id,
+            relatedWipUnitId: input.wipUnitId,
+            movementType: "SCRAP",
+            qty: defectQty,
+            sourceType: "OutsourcingInspection",
+            sourceId: orderItem.id,
+            note: `외주검사 불량 폐기 (defectQty=${defectQty})`,
+          }
+        )
+      }
+
+      // ── 재외주분: REWORK 자식 WipUnit 생성(정상 후속공정에 투입되지 않는 별도 관리 수량) ────────
+      if (reworkQty > 0) {
+        const reworkChild = await tx.wipUnit.create({
+          data: {
+            tenantId,
+            siteId: wipUnit.siteId,
+            workOrderId: wipUnit.workOrderId,
+            workOrderOperationId: wipUnit.workOrderOperationId,
+            itemId: wipUnit.itemId,
+            lotId: wipUnit.lotId,
+            manufacturingNo: wipUnit.manufacturingNo,
+            currentWorkCenterId: wipUnit.currentWorkCenterId,
+            currentWarehouseId: wipUnit.currentWarehouseId,
+            currentLocationId: wipUnit.currentLocationId,
+            parentWipUnitId: input.wipUnitId,
+            sourceProductionResultId: flow.productionResultId,
+            qty: reworkQty,
+            status: "REWORK",
+          },
+        })
+        createdReworkWipUnitId = reworkChild.id
+
+        movements.push(
+          {
+            tenantId,
+            siteId,
+            wipUnitId: input.wipUnitId,
+            relatedWipUnitId: reworkChild.id,
+            movementType: "REWORK",
+            qty: reworkQty,
+            sourceType: "OutsourcingInspection",
+            sourceId: orderItem.id,
+            note: `외주검사 재외주 대상: ${orderItem.purchaseOrder.orderNo}${noteSuffix} (재외주=${reworkQty})`,
+          },
+          {
+            tenantId,
+            siteId,
+            wipUnitId: input.wipUnitId,
+            relatedWipUnitId: reworkChild.id,
+            movementType: "SPLIT",
+            qty: reworkQty,
+            sourceType: "OutsourcingInspection",
+            sourceId: orderItem.id,
+            note: `외주검사 재외주 수량 분리 (reworkQty=${reworkQty})`,
+          }
+        )
+      }
+
+      await tx.wipMovement.createMany({ data: movements })
     }
 
-    // ── 불량분: SCRAPPED 자식 WipUnit 생성 ──────────────────────────────────
-    if (defectQty > 0) {
-      const defectChild = await tx.wipUnit.create({
-        data: {
-          tenantId,
-          siteId: wipUnit.siteId,
-          workOrderId: wipUnit.workOrderId,
-          workOrderOperationId: wipUnit.workOrderOperationId,
-          itemId: wipUnit.itemId,
-          lotId: wipUnit.lotId,
-          manufacturingNo: wipUnit.manufacturingNo,
-          currentWorkCenterId: wipUnit.currentWorkCenterId,
-          currentWarehouseId: wipUnit.currentWarehouseId,
-          currentLocationId: wipUnit.currentLocationId,
-          parentWipUnitId: input.wipUnitId,
-          qty: defectQty,
-          status: "SCRAPPED",
-        },
-      })
-      createdDefectWipUnitId = defectChild.id
-
-      movements.push(
-        {
-          tenantId,
-          siteId,
-          wipUnitId: input.wipUnitId,
-          relatedWipUnitId: defectChild.id,
-          movementType: "DEFECT",
-          qty: defectQty,
-          sourceType: "OutsourcingInspection",
-          sourceId: orderItem.id,
-          note: `외주검사 불량: ${orderItem.purchaseOrder.orderNo}${input.note ? ` - ${input.note}` : ""} (불량=${defectQty})`,
-        },
-        {
-          tenantId,
-          siteId,
-          wipUnitId: input.wipUnitId,
-          relatedWipUnitId: defectChild.id,
-          movementType: "SPLIT",
-          qty: defectQty,
-          sourceType: "OutsourcingInspection",
-          sourceId: orderItem.id,
-          note: `외주검사 불량 수량 분리 (defectQty=${defectQty})`,
-        }
-      )
-    }
-
-    // ── 재외주분: REWORK 자식 WipUnit 생성 ──────────────────────────────────
-    if (reworkQty > 0) {
-      const reworkChild = await tx.wipUnit.create({
-        data: {
-          tenantId,
-          siteId: wipUnit.siteId,
-          workOrderId: wipUnit.workOrderId,
-          workOrderOperationId: wipUnit.workOrderOperationId,
-          itemId: wipUnit.itemId,
-          lotId: wipUnit.lotId,
-          manufacturingNo: wipUnit.manufacturingNo,
-          currentWorkCenterId: wipUnit.currentWorkCenterId,
-          currentWarehouseId: wipUnit.currentWarehouseId,
-          currentLocationId: wipUnit.currentLocationId,
-          parentWipUnitId: input.wipUnitId,
-          qty: reworkQty,
-          status: "REWORK",
-        },
-      })
-      createdReworkWipUnitId = reworkChild.id
-
-      movements.push(
-        {
-          tenantId,
-          siteId,
-          wipUnitId: input.wipUnitId,
-          relatedWipUnitId: reworkChild.id,
-          movementType: "REWORK",
-          qty: reworkQty,
-          sourceType: "OutsourcingInspection",
-          sourceId: orderItem.id,
-          note: `외주검사 재외주 대상: ${orderItem.purchaseOrder.orderNo}${input.note ? ` - ${input.note}` : ""} (재외주=${reworkQty})`,
-        },
-        {
-          tenantId,
-          siteId,
-          wipUnitId: input.wipUnitId,
-          relatedWipUnitId: reworkChild.id,
-          movementType: "SPLIT",
-          qty: reworkQty,
-          sourceType: "OutsourcingInspection",
-          sourceId: orderItem.id,
-          note: `외주검사 재외주 수량 분리 (reworkQty=${reworkQty})`,
-        }
-      )
-    }
-
-    await tx.wipMovement.createMany({ data: movements })
     await recordAuditLog(tx, {
       tenantId,
       actor,
@@ -725,14 +854,17 @@ export async function inspectOutsourcedWipUnit(
         reworkQty,
         createdDefectWipUnitId,
         createdReworkWipUnitId,
+        reworkChild: isReworkChild,
       },
       menuName: "외주관리",
     })
-  })
+  }))
 
   revalidatePath("/app/mes/production/outsourcing")
   revalidatePath("/app/mes/production/wip-inventory")
   revalidatePath("/app/mes/manufacturing-traceability")
+  revalidatePath("/app/mes/finished-goods-receipt")
+  revalidatePath("/app/mes/rework")
 
   return {
     success: true,
@@ -763,7 +895,11 @@ export async function getOutsourcingData(
         { note: { contains: "[OUTSOURCING]" } },
       ],
       ...(filter.supplierId ? { supplierId: filter.supplierId } : {}),
-      ...(filter.status ? { status: filter.status } : {}),
+      ...(filter.status
+        ? { status: filter.status }
+        : filter.scope === "all"
+          ? {}
+          : { status: { in: ["DRAFT", "ORDERED", "PARTIAL_RECEIVED"] as PurchaseOrderStatus[] } }),
       ...(from || to
         ? { orderDate: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } }
         : {}),
@@ -1026,20 +1162,31 @@ export async function getOutsourcingData(
     )
   ).slice(0, 10)
 
-  // ── 요약 ─────────────────────────────────────────────────────────────────────
-  const pendingOrders = orderRows.filter(
-    (o) => o.status === "DRAFT" || o.status === "ORDERED"
-  ).length
-  const partialReceived = orderRows.filter((o) => o.status === "PARTIAL_RECEIVED").length
-  const completed = orderRows.filter(
-    (o) => o.status === "RECEIVED" || o.status === "CLOSED"
-  ).length
+  // ── 요약 (진행 중 목록에서 제외된 완료 발주도 건수에는 포함: 전체 기준) ──────────────────────
+  const statusCounts = await prisma.purchaseOrder.groupBy({
+    by: ["status"],
+    where: {
+      tenantId,
+      OR: [{ orderNo: { startsWith: "OS-" } }, { note: { contains: "[OUTSOURCING]" } }],
+      ...(filter.supplierId ? { supplierId: filter.supplierId } : {}),
+      ...(from || to
+        ? { orderDate: { ...(from ? { gte: from } : {}), ...(to ? { lte: to } : {}) } }
+        : {}),
+    },
+    _count: { _all: true },
+  })
+  const countOf = (...statuses: PurchaseOrderStatus[]) =>
+    statusCounts.filter((c) => statuses.includes(c.status)).reduce((s, c) => s + c._count._all, 0)
+  const totalAllOrders = statusCounts.reduce((s, c) => s + c._count._all, 0)
+  const pendingOrders = countOf("DRAFT", "ORDERED")
+  const partialReceived = countOf("PARTIAL_RECEIVED")
+  const completed = countOf("RECEIVED", "CLOSED")
   const overdue = orderRows.filter((o) => o.isOverdue).length
 
   return {
     filter,
     summary: {
-      totalOrders: orderRows.length,
+      totalOrders: totalAllOrders,
       pendingOrders,
       partialReceived,
       completed,

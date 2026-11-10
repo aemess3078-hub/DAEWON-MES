@@ -15,6 +15,10 @@ export const OPERATION_RESULT_REQUIRED_MESSAGE =
   "생산실적을 등록해야 공정을 완료할 수 있습니다."
 export const MATERIAL_NOT_ISSUED_MESSAGE =
   "자재출고 후 작업을 시작할 수 있습니다."
+export const OUTSOURCED_IN_PROGRESS_MESSAGE =
+  "외주 진행 중인 재공품입니다. 외주입고·입고검사 합격 처리 후 다음 공정에서 작업할 수 있습니다."
+export const OUTSOURCED_INSPECTION_PENDING_MESSAGE =
+  "외주입고 후 검사 대기 중인 재공품입니다. 외주 입고검사 합격 처리 후 다음 공정에서 작업할 수 있습니다."
 export const PREVIOUS_OPERATION_NOT_COMPLETED_MESSAGE =
   "선행공정이 완료되지 않아 작업을 시작할 수 없습니다."
 
@@ -44,6 +48,8 @@ export function assertOperationStartAllowed(input: OperationStartInput): void {
       "보류 중인 재공품입니다. 재작업/보류관리에서 보류를 해제한 후 작업을 시작해 주세요."
     )
   }
+  if (input.wipStatus === "OUTSOURCED") throw new Error(OUTSOURCED_IN_PROGRESS_MESSAGE)
+  if (input.wipStatus === "RECEIVED") throw new Error(OUTSOURCED_INSPECTION_PENDING_MESSAGE)
   if (!(input.wipStatus === "WAITING" || input.wipStatus === "IN_PROCESS")) {
     throw new Error("현재 재공 상태에서는 일반 공정을 시작할 수 없습니다.")
   }
@@ -69,6 +75,8 @@ export function assertOperationResultAllowed(input: {
       "보류 중인 재공품입니다. 재작업/보류관리에서 보류를 해제한 후 실적을 등록해 주세요."
     )
   }
+  if (input.wipStatus === "OUTSOURCED") throw new Error(OUTSOURCED_IN_PROGRESS_MESSAGE)
+  if (input.wipStatus === "RECEIVED") throw new Error(OUTSOURCED_INSPECTION_PENDING_MESSAGE)
   if (input.wipStatus !== "IN_PROCESS") {
     throw new Error("현재 재공 상태에서는 생산실적을 등록할 수 없습니다.")
   }

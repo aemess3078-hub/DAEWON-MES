@@ -825,7 +825,10 @@ export function OutsourcingClient({ data }: Props) {
   const [from, setFrom] = useState(data.filter.from ?? "")
   const [to, setTo] = useState(data.filter.to ?? "")
   const [supplierId, setSupplierId] = useState(data.filter.supplierId ?? "__all__")
-  const [filterStatus, setFilterStatus] = useState(data.filter.status ?? "__all__")
+  // 기본값(__all__)은 "진행 중"(완료된 발주 제외), ALL 은 완료 포함 전체 조회
+  const [filterStatus, setFilterStatus] = useState(
+    data.filter.status ?? (data.filter.scope === "all" ? "ALL" : "__all__"),
+  )
 
   // Dialog state
   const [createOpen, setCreateOpen] = useState(false)
@@ -1213,10 +1216,11 @@ export function OutsourcingClient({ data }: Props) {
             <Label className="text-[13px]">상태</Label>
             <Select value={filterStatus} onValueChange={setFilterStatus}>
               <SelectTrigger className="text-[14px] h-9 w-40">
-                <SelectValue placeholder="전체" />
+                <SelectValue placeholder="진행 중" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="__all__" className="text-[14px]">전체</SelectItem>
+                <SelectItem value="__all__" className="text-[14px]">진행 중 (완료 제외)</SelectItem>
+                <SelectItem value="ALL" className="text-[14px]">전체 (완료 포함)</SelectItem>
                 {Object.entries(STATUS_LABEL).map(([v, label]) => (
                   <SelectItem key={v} value={v} className="text-[14px]">
                     {label}
