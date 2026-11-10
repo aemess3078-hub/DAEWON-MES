@@ -10,12 +10,14 @@ import { formatQuantity } from "@/lib/utils"
 const itemTypeLabels: Record<string, string> = {
   RAW_MATERIAL: "원자재",
   CONSUMABLE: "소모품",
+  SEMI_FINISHED: "반제품",
 }
 
 export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
   return [
     {
       id: "itemCode",
+      meta: { align: "left", width: 130 },
       accessorFn: (row) => row.itemCode,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="품목코드" />
@@ -26,6 +28,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "itemName",
+      meta: { align: "left", minWidth: 240 },
       accessorFn: (row) => row.itemName,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="소재명/품목명" />
@@ -58,6 +61,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "totalQtyOnHand",
+      meta: { align: "right", minWidth: 120 },
       accessorFn: (row) => row.totalQtyOnHand,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="총 현재고" />
@@ -70,6 +74,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "totalQtyAvailable",
+      meta: { align: "right", minWidth: 120 },
       accessorFn: (row) => row.totalQtyAvailable,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="가용재고" />
@@ -85,6 +90,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "totalQtyHold",
+      meta: { align: "right", minWidth: 120 },
       accessorFn: (row) => row.totalQtyHold,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="보류재고" />
@@ -97,6 +103,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "uom",
+      meta: { align: "left", width: 72 },
       accessorFn: (row) => row.uom,
       header: "단위",
       cell: ({ row }) => (
@@ -105,6 +112,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "lotCount",
+      meta: { align: "left", minWidth: 110 },
       accessorFn: (row) => row.lotCount,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="LOT" />
@@ -123,6 +131,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "warehouseCount",
+      meta: { align: "left", minWidth: 96 },
       accessorFn: (row) => row.warehouseCount,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="창고" />
@@ -135,6 +144,7 @@ export function getGroupedColumns(): ColumnDef<GroupedMaterialStock>[] {
     },
     {
       id: "itemType",
+      meta: { align: "left", minWidth: 96 },
       accessorFn: (row) => row.itemType,
       header: ({ column }) => (
         <DataTableColumnHeader column={column} title="유형" />

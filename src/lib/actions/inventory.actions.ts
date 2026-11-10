@@ -90,7 +90,18 @@ export async function getMaterialInventoryBalances(): Promise<InventoryBalanceWi
   const rows = await prisma.inventoryBalance.findMany({
     where: {
       tenantId,
-      item: { tenantId, itemType: { in: ["RAW_MATERIAL", "CONSUMABLE"] } },
+      // 자재재고 = 원자재·소모품 + 구매입고(PO RECEIPT) 이력이 있는 반제품.
+      // 반제품·완제품 전체를 넣지 않고, 실제로 발주 입고된 반제품만 포함한다.
+      item: {
+        tenantId,
+        OR: [
+          { itemType: { in: ["RAW_MATERIAL", "CONSUMABLE"] } },
+          {
+            itemType: "SEMI_FINISHED",
+            inventoryTxns: { some: { tenantId, txType: "RECEIPT", refType: "PURCHASE_ORDER" } },
+          },
+        ],
+      },
       site: { tenantId },
       warehouse: { tenantId },
       OR: [{ lotId: null }, { lot: { tenantId } }],

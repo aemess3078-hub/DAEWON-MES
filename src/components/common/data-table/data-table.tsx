@@ -57,6 +57,21 @@ interface DataTableProps<TData, TValue> {
   clearSelectionSignal?: number | string
 }
 
+// 헤더와 셀에 같은 정렬 클래스를 적용해 숫자 컬럼이 어긋나지 않도록 한다. 미지정 시 undefined(기존 동작).
+function cellAlignClass(align?: "left" | "right" | "center") {
+  if (align === "right") return "text-right"
+  if (align === "center") return "text-center"
+  return undefined
+}
+
+function cellSizeStyle(meta?: { width?: number; minWidth?: number }): React.CSSProperties | undefined {
+  if (!meta?.width && !meta?.minWidth) return undefined
+  return {
+    ...(meta.width ? { width: meta.width } : {}),
+    ...(meta.minWidth ? { minWidth: meta.minWidth } : {}),
+  }
+}
+
 function isInteractiveElement(target: EventTarget | null) {
   return target instanceof HTMLElement
     ? Boolean(target.closest("button,a,input,select,textarea,[role='button'],[role='menuitem']"))
@@ -179,7 +194,12 @@ export function DataTable<TData, TValue>({
             {table.getHeaderGroups().map((headerGroup) => (
               <TableRow key={headerGroup.id}>
                 {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id} colSpan={header.colSpan}>
+                  <TableHead
+                    key={header.id}
+                    colSpan={header.colSpan}
+                    className={cellAlignClass(header.column.columnDef.meta?.align)}
+                    style={cellSizeStyle(header.column.columnDef.meta)}
+                  >
                     {header.isPlaceholder
                       ? null
                       : flexRender(
@@ -216,7 +236,11 @@ export function DataTable<TData, TValue>({
                     )}
                   >
                     {row.getVisibleCells().map((cell) => (
-                      <TableCell key={cell.id}>
+                      <TableCell
+                        key={cell.id}
+                        className={cellAlignClass(cell.column.columnDef.meta?.align)}
+                        style={cellSizeStyle(cell.column.columnDef.meta)}
+                      >
                         {flexRender(
                           cell.column.columnDef.cell,
                           cell.getContext()
