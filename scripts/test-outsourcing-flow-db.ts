@@ -45,6 +45,7 @@ const { prisma } = require("../src/lib/db/prisma") as typeof import("../src/lib/
 const pop = require("../src/lib/actions/pop.actions") as typeof import("../src/lib/actions/pop.actions")
 const os = require("../src/lib/actions/outsourcing.actions") as typeof import("../src/lib/actions/outsourcing.actions")
 const fg = require("../src/lib/actions/finished-goods.actions") as typeof import("../src/lib/actions/finished-goods.actions")
+const lot = require("../src/lib/actions/lot-lineage.actions") as typeof import("../src/lib/actions/lot-lineage.actions")
 
 let pass = 0
 async function t(name: string, fn: () => Promise<void>) {
@@ -209,6 +210,21 @@ async function main() {
     assert.equal(row.totalReceivedQty, 100)
     assert.ok(all.wipReceivingHistory.some((h) => h.outsourcingOrderNo === po1.orderNo), "외주입고 이력 유지")
     assert.equal(active.summary.completed >= 1, true, "요약 건수는 완료 발주 포함")
+  })
+
+  await t("S1-8 LOT 이력추적 데이터: 외주 이력(반출·입고·검사완료)이 sourceType 과 함께 조회되고, 외주공정 실적에 시작·종료 시각이 있다", async () => {
+    const receiptLot = await prisma.finishedGoodsReceipt.findFirstOrThrow({ where: { workOrderId: S1.wo.id }, include: { lot: true } })
+    const lineage = await lot.getLotLineageByNo(receiptLot.lot!.lotNo, tenant.id)
+    assert.ok(lineage, "LOT 이력추적 결과")
+    const hist = lineage!.outsourcingHistory.map((h) => `${h.movementType}:${h.sourceType ?? "-"}`)
+    assert.ok(hist.includes("OUTSOURCED:PurchaseOrderItem"), "외주 반출")
+    assert.ok(hist.includes("RETURNED:PurchaseOrderItem"), "외주 입고")
+    assert.ok(hist.includes("RELEASED:OutsourcingInspection"), "외주 검사완료(보류해제와 sourceType 으로 구분)")
+    const wo = lineage!.workOrders.find((w) => w.id === S1.wo.id)!
+    const op = wo.operations.find((o) => o.id === S1.ops[1].id)!
+    assert.equal(op.productionResults.length, 1)
+    assert.ok(op.productionResults[0].startedAt && op.productionResults[0].endedAt, "외주공정 작업시작·완료 시각 기록")
+    assert.ok(new Date(op.productionResults[0].startedAt!).getTime() <= new Date(op.productionResults[0].endedAt!).getTime())
   })
 
   // ═══ S1b: 발주 상태 — 발주완료 / 부분입고 / 입고완료 ═══════════════════════════════════════
