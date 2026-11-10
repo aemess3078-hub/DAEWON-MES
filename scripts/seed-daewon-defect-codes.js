@@ -4,13 +4,13 @@
  *   node scripts/seed-daewon-defect-codes.js            # dry-run (기본, DB 쓰기 없음)
  *   node scripts/seed-daewon-defect-codes.js --apply    # 없는 코드만 생성
  *
- * - 대상 테넌트는 code === TENANT_CODE 한 곳뿐이다(다른 테넌트는 읽지도 쓰지도 않는다).
+ * - 대상 테넌트는 id === TENANT_ID 한 곳뿐이다(다른 테넌트는 읽지도 쓰지도 않는다).
  * - 같은 (tenantId, code)가 이미 있으면 건드리지 않는다(이름/유형도 덮어쓰지 않음).
  * - 삭제·수정은 하지 않는다. 생성만 한다.
  */
 const { PrismaClient } = require("@prisma/client")
 
-const TENANT_CODE = "daewon-001"
+const TENANT_ID = "daewon-001" // Tenant.id (code 는 DAEWON)
 const CODES = [
   { code: "D001", name: "치수 불량", defectCategory: "DIMENSIONAL" },
   { code: "D002", name: "가공 누락", defectCategory: "FUNCTIONAL" },
@@ -26,9 +26,9 @@ async function main() {
   const prisma = new PrismaClient()
   try {
     const host = (process.env.DATABASE_URL || "").match(/@([^:/?]+)/)?.[1] ?? "?"
-    console.log(`mode=${apply ? "APPLY" : "DRY-RUN"} host=${host} tenant=${TENANT_CODE}`)
-    const tenants = await prisma.tenant.findMany({ where: { code: TENANT_CODE }, select: { id: true, code: true } })
-    if (tenants.length !== 1) throw new Error(`테넌트 ${TENANT_CODE} 가 정확히 1건이 아님(${tenants.length})`)
+    console.log(`mode=${apply ? "APPLY" : "DRY-RUN"} host=${host} tenant=${TENANT_ID}`)
+    const tenants = await prisma.tenant.findMany({ where: { id: TENANT_ID }, select: { id: true, code: true } })
+    if (tenants.length !== 1) throw new Error(`테넌트 ${TENANT_ID} 가 정확히 1건이 아님(${tenants.length})`)
     const tenantId = tenants[0].id
 
     const existing = await prisma.defectCode.findMany({ where: { tenantId, code: { in: CODES.map((c) => c.code) } } })
