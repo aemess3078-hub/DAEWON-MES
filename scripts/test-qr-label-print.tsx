@@ -420,6 +420,7 @@ async function main() {
   ok(receiving.includes("printBlockedReason") && receiving.includes("setConfirmedLabels(plan)"), "H17 입고 확정(영속화) 후에만 인쇄 · 확정 후 라벨 단계")
   const fg = read("src/app/app/mes/finished-goods-receipt/receipt-dialog.tsx")
   ok(fg.includes("createFinishedGoodsReceiptAction(") && fg.includes("setReceivedLotNo(res.lotNo)") && fg.includes("lotNo: receivedLotNo ?? undefined"), "H18 완제품 입고 후 서버가 발번한 LOT 로 라벨 출력")
+  ok(!fg.includes("바코드 라벨 출력") && fg.includes("setReceivedLotNo(res.lotNo)") && fg.includes("setPrintOpen(true)") && fg.indexOf("setPrintOpen(true)") > fg.indexOf("await createFinishedGoodsReceiptAction") || (!fg.includes("바코드 라벨 출력") && fg.indexOf("setPrintOpen(true)") > fg.indexOf("createFinishedGoodsReceiptAction(")), "H18b 완제품/반제품 입고: [바코드 라벨 출력] 버튼 제거 · 입고 확정 후에만 라벨 창 자동 표시")
   ok(!read("src/app/app/mes/material-issue/issue-form-dialog.tsx").includes("legacyItemBarcode") && read("src/app/app/mes/shipments/shipment-form-sheet.tsx").includes("legacyItemBarcode"), "H19 자재출고는 QR 전용(CODE128 옵션 제거) · 출하 일괄 라벨만 기존 품목 바코드 옵션 유지")
 
   // 입고·재고·LOT 서버 로직은 이 작업에서 수정하지 않는다(안정화 PR #5 기능 보존)

@@ -228,14 +228,6 @@ export function ReceiptDialog({
         <DialogFooter>
           <Button
             variant="outline"
-            onClick={() => setPrintOpen(true)}
-            disabled={Boolean(workOrder.receiptBlockedReason)}
-            className="mr-auto"
-          >
-            바코드 라벨 출력
-          </Button>
-          <Button
-            variant="outline"
             onClick={() => handleOpen(false)}
             disabled={isPending}
           >
