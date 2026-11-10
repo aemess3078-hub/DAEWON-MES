@@ -36,10 +36,9 @@ ok(popActions.includes("currentUsage: { increment: usageCount }"), "selected too
 ok(popActions.includes("selectedToolIds = normalizePopToolIds(data.toolIds)"), "server normalizes duplicate selected tool ids")
 ok(!/recordPopToolUsage\(tx,[\s\S]*toolIds:\s*operation\.routingOperation/.test(popActions), "operation mapped tools are not automatically converted to actual usage")
 
-ok(productionClient.includes("const [selectedToolIds, setSelectedToolIds] = useState<string[]>([])"), "POP production detail defaults to no actual tool selected")
-ok(productionClient.includes("사용 안 함"), "POP production detail exposes explicit 사용 안 함 option")
-ok(productionClient.includes("toolIds: selectedToolIds"), "POP production detail submits only user-selected tools")
-ok(productionClient.includes("선택하지 않으면 공구 사용이력과 수명 사용량을 남기지 않습니다."), "POP detail explains the optional tool policy")
+ok(!productionClient.includes("selectedToolIds") && !productionClient.includes("실제 사용 공구"), "POP production detail no longer shows a tool selection area")
+ok(!productionClient.includes("toolIds"), "POP production detail submits results without tool selection (toolIds is optional)")
+ok(!productionClient.includes("작업표준서") && !productionClient.includes("workStandards"), "POP production detail no longer shows the work standard area")
 
 ok(workQueueClient.includes("toolIds: []"), "POP work queue inline form defaults to no actual tool selected")
 ok(workQueueClient.includes("toolIds: form.toolIds"), "POP work queue submits only selected tools")
