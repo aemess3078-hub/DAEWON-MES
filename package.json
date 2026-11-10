@@ -36,6 +36,7 @@
     "test:manufacturing-no-rule": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-manufacturing-no-rule.ts",
     "test:manufacturing-no-kind-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-manufacturing-no-kind-db.ts",
     "test:rework-receipt-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-rework-receipt-db.ts",
+    "test:intermediate-rework-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-intermediate-rework-db.ts",
     "test:pop-process-filter": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-pop-process-filter.ts",
     "test:numbering-rule-access": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-numbering-rule-access.ts",
     "test:material-issue-search-db": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" --project tsconfig.json scripts/test-material-issue-search-db.ts",

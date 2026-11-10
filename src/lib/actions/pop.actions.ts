@@ -28,6 +28,7 @@ import {
   type SelfInspectionDefectDetail,
 } from "@/lib/actions/self-inspection.helpers"
 import { syncProductionPlanStatusForWorkOrder } from "@/lib/production-plan-sync"
+import { getGoodQtySoFarForRoot } from "@/lib/actions/rework-return.helpers"
 import {
   assertDirectOperationStatusRequestAllowed,
   assertOperationResultAllowed,
@@ -807,20 +808,18 @@ export async function getOperationDetail(operationId: string, assignmentId?: str
           },
         },
         orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-        select: { qty: true },
+        select: { id: true, qty: true, createdAt: true },
       })
     : null
 
-  const goodSoFarAgg = rootWipForDisplay
-    ? await prisma.productionResult.aggregate({
-        where: { workOrderOperationId: operation.id },
-        _sum: { goodQty: true },
-      })
+  // 재작업 복귀 root(ISSUE-014)는 복귀 이후 실적만 차감한다(getGoodQtySoFarForRoot).
+  const goodSoFarQty = rootWipForDisplay
+    ? await getGoodQtySoFarForRoot(prisma, operation.id, rootWipForDisplay)
     : null
 
   const availableWipQty =
     rootWipForDisplay !== null
-      ? Math.max(0, Number(rootWipForDisplay.qty) - Number(goodSoFarAgg?._sum?.goodQty ?? 0))
+      ? Math.max(0, Number(rootWipForDisplay.qty) - Number(goodSoFarQty ?? 0))
       : null
 
   const materialSufficiency = await getWorkOrderMaterialSufficiency(prisma, {
@@ -1082,11 +1081,9 @@ export async function submitProductionResult(
       let wipExhaustedAfterThisResult = false
       if (rootWip && lockedRootWip) {
         const rootQtyScaled = toScaledQty(lockedRootWip.qty, "이동 가능 수량", { allowZero: true })
-        const goodAgg = await tx.productionResult.aggregate({
-          where: { workOrderOperationId },
-          _sum: { goodQty: true },
-        })
-        const goodSoFarScaled = toScaledQty(goodAgg._sum.goodQty ?? 0, "양품수량", { allowZero: true })
+        // 재작업 복귀 root(ISSUE-014)는 복귀 이후 실적만 차감한다(이전 흐름의 실적과 중복 차감 방지).
+        const goodSoFarQty = await getGoodQtySoFarForRoot(tx, workOrderOperationId, rootWip)
+        const goodSoFarScaled = toScaledQty(goodSoFarQty, "양품수량", { allowZero: true })
         const availableInputScaled = rootQtyScaled - goodSoFarScaled
         if (totalScaled > availableInputScaled) {
           const available = formatScaledQty(

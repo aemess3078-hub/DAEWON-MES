@@ -7,6 +7,7 @@ import { requireRole, getTenantId, requireTenantAccess } from "@/lib/auth"
 import { startOperation } from "@/lib/actions/pop.actions"
 import { assertDirectOperationStatusRequestAllowed } from "@/lib/operation-status-integrity"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
+import { completeIntermediateRework } from "@/lib/actions/rework-return.helpers"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,8 @@ export type ReworkRow = {
     seq: number
     workCenter: { name: string } | null
   }
+  /** 합격 수량이 복귀하는 공정(재작업 발생 공정의 다음 공정). 최종공정 재작업이면 null(완료 재공에 복귀). */
+  returnToOperation: { name: string; seq: number } | null
 }
 
 // ─── 공정진행 조회 ──────────────────────────────────────────────────────────────
@@ -189,9 +192,8 @@ export async function getReworkPendingList(
               orderNo: true,
               item: { select: { id: true, code: true, name: true } },
               operations: {
-                select: { id: true, seq: true },
-                orderBy: { seq: "desc" },
-                take: 1,
+                select: { id: true, seq: true, routingOperation: { select: { name: true } } },
+                orderBy: { seq: "asc" },
               },
             },
           },
@@ -207,16 +209,22 @@ export async function getReworkPendingList(
   })
 
   return reworkWipUnits.map((wipUnit) => {
-    const lastOperation = wipUnit.workOrderOperation.workOrder.operations[0] ?? null
+    const allOps = wipUnit.workOrderOperation.workOrder.operations
+    const lastOperation = allOps[allOps.length - 1] ?? null
     const isFinalOperation = lastOperation?.id === wipUnit.workOrderOperationId
     const hasCompletedParent =
       wipUnit.parentWipUnit?.status === WipUnitStatus.COMPLETED &&
       wipUnit.parentWipUnit.workOrderOperationId === wipUnit.workOrderOperationId
-    const blockedReason = !isFinalOperation
-      ? "중간공정 재작업은 후속 routing 반영 전까지 완료할 수 없습니다."
-      : !hasCompletedParent
-        ? "최종공정 완료 root WipUnit을 확인할 수 없습니다."
-        : null
+    const reworkOpSeq = wipUnit.workOrderOperation.seq
+    const nextOp = isFinalOperation ? null : allOps.find((op) => op.seq > reworkOpSeq) ?? null
+    // 최종공정 재작업은 완료 root 에 복귀. 중간공정 재작업은 다음 공정부터 정상 흐름에 복귀(복귀 가능 여부는 종결 시 서버가 검증한다).
+    const blockedReason = isFinalOperation
+      ? hasCompletedParent
+        ? null
+        : "최종공정 완료 root WipUnit을 확인할 수 없습니다."
+      : nextOp
+        ? null
+        : "복귀할 후속 공정을 찾을 수 없습니다."
 
     return {
       id: wipUnit.id,
@@ -244,6 +252,7 @@ export async function getReworkPendingList(
         seq: wipUnit.workOrderOperation.routingOperation.seq,
         workCenter: wipUnit.workOrderOperation.routingOperation.workCenter,
       },
+      returnToOperation: nextOp ? { name: nextOp.routingOperation.name, seq: nextOp.seq } : null,
     }
   })
 }
@@ -395,7 +404,7 @@ export async function completeRework(
 
       const existingCompletion = await tx.wipMovement.findFirst({
         where: {
-          sourceType: "ReworkCompletion",
+          sourceType: { in: ["ReworkCompletion", "ReworkMerge", "ReworkReturn"] },
           sourceId: child.id,
         },
         select: { id: true },
@@ -412,8 +421,13 @@ export async function completeRework(
       }
 
       const lastOperation = child.workOrderOperation.workOrder.operations[0] ?? null
-      if (!lastOperation || lastOperation.id !== child.workOrderOperationId) {
-        throw new Error("중간공정 REWORK WipUnit은 후속 routing 반영 전까지 종결할 수 없습니다.")
+      if (!lastOperation) {
+        throw new Error("작업지시 공정 정보를 확인할 수 없습니다.")
+      }
+      if (lastOperation.id !== child.workOrderOperationId) {
+        // 중간공정 재작업(ISSUE-014): 합격 수량은 재작업 발생 공정 다음 공정부터 정상 흐름에 복귀하고, 폐기 수량은 이력으로 기록한다.
+        await completeIntermediateRework(tx, { child, mergedQty, scrapQty })
+        return
       }
 
       const parent = child.parentWipUnit

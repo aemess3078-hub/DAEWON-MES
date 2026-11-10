@@ -111,7 +111,9 @@ export function ReworkCompleteDialog({
           </div>
 
           <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-[13px] text-blue-800">
-            이 처리는 완료 재공 수량의 복귀 및 폐기 이력만 기록하며, 공정 완료 수량을 다시 증가시키지 않습니다.
+            {reworkItem.returnToOperation
+              ? `양품 복귀 수량은 '${reworkItem.returnToOperation.name}' 공정부터 후속 공정을 정상 진행합니다. 모든 공정을 완료한 수량만 완제품 입고할 수 있으며, 재작업 발생 공정의 완료 수량은 다시 증가시키지 않습니다. 폐기 수량은 재공에서 제외되고 폐기 이력이 기록됩니다.`
+              : "이 처리는 완료 재공 수량의 복귀 및 폐기 이력만 기록하며, 공정 완료 수량을 다시 증가시키지 않습니다."}
           </div>
 
           {/* 결과 입력 */}
