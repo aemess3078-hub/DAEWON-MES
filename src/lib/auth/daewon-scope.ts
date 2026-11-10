@@ -61,6 +61,7 @@ export const DAEWON_ALLOWED_ROUTES: readonly string[] = [
   "/app/mes/production/outsource-receiving",
   "/app/mes/outsourcing",
   "/app/mes/process-progress",
+  "/app/mes/rework", // 재작업/보류관리 (생산관리 메뉴 복원)
   // 품질관리
   "/app/mes/quality/defect-stats",
   "/app/mes/inspection-stages",

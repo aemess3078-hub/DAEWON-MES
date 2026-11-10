@@ -7,7 +7,6 @@ import { requireRole, getTenantId, requireTenantAccess } from "@/lib/auth"
 import { startOperation } from "@/lib/actions/pop.actions"
 import { assertDirectOperationStatusRequestAllowed } from "@/lib/operation-status-integrity"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
-import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -160,7 +159,6 @@ export async function getReworkPendingList(
   tenantId: string
 ): Promise<ReworkRow[]> {
   await requireTenantAccess(tenantId)
-  await assertDaewonFeatureScope()
   const reworkWipUnits = await prisma.wipUnit.findMany({
     where: {
       tenantId,
@@ -343,7 +341,6 @@ export type CompleteReworkInput = {
 export async function completeRework(
   input: CompleteReworkInput
 ): Promise<{ ok: boolean; error?: string }> {
-  await assertDaewonFeatureScope()
   await requireResourcePermission("WORK_RESULT", "UPDATE")
   try {
     await prisma.$transaction(async (tx) => {

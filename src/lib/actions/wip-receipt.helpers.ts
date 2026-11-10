@@ -11,16 +11,20 @@ import { WipUnitStatus, WipMovementType } from "@prisma/client"
 //   - 기존 FinishedGoodsReceipt 누적 receiptQty 차감
 //   - 보류 사유가 있으면 입고 가능 수량은 0
 //
-// 보류 사유 우선순위:
-//   1) 미해결 REWORK child (status=REWORK, REWORK movement 로 연결됨)
-//   2) 판별 불가 레거시 REWORK (reworkQty>0 인데 매칭 child 없음 / REWORK movement 의 relatedWipUnitId 비어있음)
-//   3) 완료수량 비정합 (완료 root qty > 최종공정 completedQty)
+// 재작업(ISSUE-013): 미해결 REWORK child 는 입고 전체를 막지 않는다.
+//   - 재작업 대상 수량은 SPLIT 으로 root 에서 이미 빠져 있어(root.qty 미포함) 입고 대상이 아니다 → 별도 보류(reworkHoldQty).
+//   - 재작업 종결(completeRework) 시 양품 복귀분은 root.qty 에 MERGE 되어 추가 입고 가능 수량으로 늘어나고,
+//     폐기분은 child 가 SCRAP 처리되어 입고 대상에서 제외된다. 이미 입고한 수량은 totalReceiptQty 로 차감해 중복 입고를 막는다.
+//
+// 보류 사유(전체 차단) — 기존 조건 유지:
+//   1) 판별 불가 레거시 REWORK (reworkQty>0 인데 매칭 child 없음 / REWORK movement 의 relatedWipUnitId 비어있음)
+//   2) 완료수량 비정합 (완료 root qty > 최종공정 completedQty + 재작업 양품 복귀분)
 //
 // 이 헬퍼는 "use server" 가 아님 — 호출부 트랜잭션/쿼리 결과를 그대로 받아서 계산만 수행.
 
 export const WIP_RECEIPT_BLOCK_REASONS = {
   // 재공품재고 화면용 — "보류 중" 톤
-  UNRESOLVED_REWORK_DISPLAY: "미해결 재작업 분리 재공품이 있어 입고 보류 중입니다.",
+  UNRESOLVED_REWORK_DISPLAY: "미해결 재작업 분리 재공품이 있어 입고 보류 중입니다.", // (전체 차단 아님 — 재작업 수량만 보류 안내용)
   LEGACY_REWORK_DISPLAY:
     "종결 상태를 판별할 수 없는 기존 재작업 이력이 있어 입고 보류 중입니다.",
   INCONSISTENT_WIP_DISPLAY:
@@ -57,7 +61,8 @@ type WipReceiptWipUnitInput = {
   status: string
   // 호출부에서 movementType=REWORK 로 필터된 movement 리스트를 넘기거나
   // 전체 movement 를 넘겨도 됨 (헬퍼 내부에서 movementType==="REWORK" 재확인).
-  movements: { movementType: string; relatedWipUnitId: string | null }[]
+  // MERGE(재작업 양품 복귀) movement 는 qty/sourceType 를 함께 넘겨야 복귀 수량이 완료수량 비정합 판정에 반영된다.
+  movements: { movementType: string; relatedWipUnitId: string | null; qty?: unknown; sourceType?: string | null }[]
   // movementType=REWORK 로 필터된 relatedMovements (이 unit 을 가리키는 REWORK movement).
   relatedMovements: { id: string }[]
 }
@@ -82,6 +87,10 @@ export type WipReceiptStatus<TWipUnit extends WipReceiptWipUnitInput = WipReceip
   /** 추가 입고 가능 수량 (보류면 0) */
   availableReceiptQty: number
   hasUnresolvedReworkChild: boolean
+  /** 재작업 중(REWORK child)이라 입고 대상에서 보류된 수량 */
+  reworkHoldQty: number
+  /** 재작업 종결로 root 에 복귀(MERGE)한 양품 수량 누계 */
+  reworkReturnedQty: number
   hasLegacyRework: boolean
   hasInconsistentCompletedWipQty: boolean
   /** 보류 여부 */
@@ -162,24 +171,35 @@ export function computeWipReceiptStatus<TWipUnit extends WipReceiptWipUnitInput>
   )
   const hasLegacyRework = hasLegacyReworkResult || hasUnlinkedReworkMovement
 
-  // 4) 완료수량 비정합 (WIP 추적 작업지시에서만 의미 있음)
-  const hasInconsistentCompletedWipQty =
-    isWipTracked && completedRootQty > finalOperationCompletedQty
+  // 재작업 보류 수량(REWORK child) / 재작업 종결로 root 에 복귀한 양품 수량
+  const reworkHoldQty = reworkChildWipUnits
+    .filter((unit) => unit.status === WipUnitStatus.REWORK)
+    .reduce((sum, unit) => sum + Number(unit.qty), 0)
+  const reworkReturnedQty = rootWipUnits.reduce(
+    (sum, unit) =>
+      sum +
+      unit.movements
+        .filter((m) => m.movementType === WipMovementType.MERGE && m.sourceType === "ReworkCompletion")
+        .reduce((s, m) => s + Number(m.qty ?? 0), 0),
+    0,
+  )
 
-  const blockReasonDisplay = hasUnresolvedReworkChild
-    ? WIP_RECEIPT_BLOCK_REASONS.UNRESOLVED_REWORK_DISPLAY
-    : hasLegacyRework
-      ? WIP_RECEIPT_BLOCK_REASONS.LEGACY_REWORK_DISPLAY
-      : hasInconsistentCompletedWipQty
-        ? WIP_RECEIPT_BLOCK_REASONS.INCONSISTENT_WIP_DISPLAY
-        : null
-  const blockReasonError = hasUnresolvedReworkChild
-    ? WIP_RECEIPT_BLOCK_REASONS.UNRESOLVED_REWORK_ERROR
-    : hasLegacyRework
-      ? WIP_RECEIPT_BLOCK_REASONS.LEGACY_REWORK_ERROR
-      : hasInconsistentCompletedWipQty
-        ? WIP_RECEIPT_BLOCK_REASONS.INCONSISTENT_WIP_ERROR
-        : null
+  // 4) 완료수량 비정합 (WIP 추적 작업지시에서만 의미 있음)
+  //    최종공정 completedQty 는 재작업 복귀 양품을 포함하지 않으므로 복귀분만큼 허용한다.
+  const hasInconsistentCompletedWipQty =
+    isWipTracked && completedRootQty > finalOperationCompletedQty + reworkReturnedQty + 0.000001
+
+  // 미해결 REWORK child 는 더 이상 전체 차단 사유가 아니다(재작업 수량만 보류).
+  const blockReasonDisplay = hasLegacyRework
+    ? WIP_RECEIPT_BLOCK_REASONS.LEGACY_REWORK_DISPLAY
+    : hasInconsistentCompletedWipQty
+      ? WIP_RECEIPT_BLOCK_REASONS.INCONSISTENT_WIP_DISPLAY
+      : null
+  const blockReasonError = hasLegacyRework
+    ? WIP_RECEIPT_BLOCK_REASONS.LEGACY_REWORK_ERROR
+    : hasInconsistentCompletedWipQty
+      ? WIP_RECEIPT_BLOCK_REASONS.INCONSISTENT_WIP_ERROR
+      : null
   const blocked = blockReasonDisplay !== null
   const availableReceiptQty = blocked
     ? 0
@@ -193,6 +213,8 @@ export function computeWipReceiptStatus<TWipUnit extends WipReceiptWipUnitInput>
     totalReceiptQty,
     availableReceiptQty,
     hasUnresolvedReworkChild,
+    reworkHoldQty,
+    reworkReturnedQty,
     hasLegacyRework,
     hasInconsistentCompletedWipQty,
     blocked,

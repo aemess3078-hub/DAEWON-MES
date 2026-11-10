@@ -41,6 +41,8 @@ export type WorkOrderForReceipt = {
   pendingQty: number
   isWipTracked: boolean
   receiptBlockedReason: string | null
+  /** 재작업 중이라 입고에서 보류된 수량(재작업 종결 후 양품 복귀분은 추가 입고 가능, 폐기분은 제외) */
+  reworkHoldQty: number
   qualityRelease: QualityReleaseStatus
   // WipUnit 진행 상태 — 입고 가능 여부 판단 보조용. null 이면 WIP 추적 없는 레거시 작업지시.
   wipUnitStatus: string | null
@@ -85,7 +87,7 @@ type ReceiptQuantitySource = {
     sourceProductionResultId: string | null
     qty: unknown
     status: string
-    movements: { movementType: string; relatedWipUnitId: string | null }[]
+    movements: { movementType: string; relatedWipUnitId: string | null; qty?: unknown; sourceType?: string | null }[]
     relatedMovements: { id: string }[]
   }[]
 }
@@ -126,6 +128,7 @@ function calculateReceiptQuantity(source: ReceiptQuantitySource) {
     pendingQty,
     isWipTracked: status.isWipTracked,
     receiptBlockedReason: status.blockReasonError,
+    reworkHoldQty: status.reworkHoldQty,
     rootWipUnits: source.wipUnits.filter(
       (unit) =>
         unit.parentWipUnitId == null && unit.sourceProductionResultId == null,
@@ -178,8 +181,9 @@ export async function getWorkOrdersForReceipt(
           qty: true,
           status: true,
           movements: {
-            where: { movementType: "REWORK" },
-            select: { movementType: true, relatedWipUnitId: true },
+            // REWORK(재작업 분리) + MERGE(재작업 양품 복귀: 입고 가능 수량 비정합 판정에 사용)
+            where: { movementType: { in: ["REWORK", "MERGE"] } },
+            select: { movementType: true, relatedWipUnitId: true, qty: true, sourceType: true },
           },
           relatedMovements: {
             where: { movementType: "REWORK" },
@@ -216,6 +220,7 @@ export async function getWorkOrdersForReceipt(
       pendingQty: receiptQuantity.pendingQty,
       isWipTracked: receiptQuantity.isWipTracked,
       receiptBlockedReason: receiptQuantity.receiptBlockedReason,
+      reworkHoldQty: receiptQuantity.reworkHoldQty,
       qualityRelease,
       wipUnitStatus: latestRootWipUnit?.status ?? null,
       receipts: wo.finishedGoodsReceipts.map((r) => ({
@@ -324,8 +329,8 @@ export async function createFinishedGoodsReceiptAction(
               status: true,
               lotId: true,
               movements: {
-                where: { movementType: "REWORK" },
-                select: { movementType: true, relatedWipUnitId: true },
+                where: { movementType: { in: ["REWORK", "MERGE"] } },
+                select: { movementType: true, relatedWipUnitId: true, qty: true, sourceType: true },
               },
               relatedMovements: {
                 where: { movementType: "REWORK" },

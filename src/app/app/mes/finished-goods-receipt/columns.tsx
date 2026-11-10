@@ -62,6 +62,11 @@ export function getColumns({ onReceipt }: GetColumnsProps): ColumnDef<WorkOrderF
             <div className="text-[13px] text-muted-foreground">
               {isWipTracked ? "완료 재공품 기준" : "최종공정 기준"}
             </div>
+            {row.original.reworkHoldQty > 0 ? (
+              <div className="text-[13px] font-medium text-amber-700">
+                재작업 보류 {formatQuantity(row.original.reworkHoldQty)} {item.uom} (입고 제외)
+              </div>
+            ) : null}
           </div>
         )
       },

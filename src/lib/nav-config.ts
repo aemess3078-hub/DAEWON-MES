@@ -98,6 +98,8 @@ export const MES_NAV: NavItem[] = [
           { id: 'nav-production-results', parentId: 'nav-production', label: '작업일지/실적', icon: 'FileText', href: '/app/mes/production-results', displayOrder: 3, children: [] },
           { id: 'nav-finished-goods-receipt', parentId: 'nav-production', label: '완제품입고', icon: 'PackagePlus', href: '/app/mes/finished-goods-receipt', displayOrder: 4, children: [] },
           { id: 'nav-outsourcing', parentId: 'nav-production', label: '외주관리', icon: 'Truck', href: '/app/mes/production/outsourcing', displayOrder: 5, children: [] },
+          // 재작업/보류관리: 기존 /app/mes/rework 화면(재작업 종결·보류 등록/해제)과 WORK_RESULT 권한을 그대로 사용한다.
+          { id: 'nav-rework', parentId: 'nav-production', label: '재작업/보류관리', icon: 'RefreshCw', href: '/app/mes/rework', displayOrder: 6, children: [] },
         ],
       },
       // 6. 품질관리
@@ -191,7 +193,6 @@ export const DAEWON_HIDDEN_NAV: ReadonlyArray<{ id: string; label: string; href:
   // 자재/생산 부가
   { id: 'nav-material-return', label: '반품관리', href: '/app/mes/material-return', reason: '목표 메뉴 외' },
   { id: 'nav-prod-equip-output', label: '설비별생산현황', href: '/app/mes/production/equipment-output', reason: '목표 메뉴 외' },
-  { id: 'nav-rework', label: '재작업/보류관리', href: '/app/mes/rework', reason: '목표 메뉴 외' },
   { id: 'nav-manufacturing-traceability', label: '제조번호 추적성', href: '/app/mes/manufacturing-traceability', reason: 'CNS 제조번호 체계 의존 — LOT 규칙 확정 후 재검토' },
   // 품질 부가
   { id: 'nav-quality-dashboard', label: '품질현황', href: '/app/mes/quality/dashboard', reason: '목표 메뉴 외' },
