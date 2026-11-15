@@ -1091,6 +1091,7 @@ model Warehouse {
   finishedGoodsReceipts FinishedGoodsReceipt[]
   shipments             ShipmentOrder[]        @relation("WarehouseShipments")
   inventoryBalances     InventoryBalance[]
+  stockCounts           StockCount[]
   inventoryTxnsFrom     InventoryTransaction[] @relation("TxFromWarehouse")
   inventoryTxnsTo       InventoryTransaction[] @relation("TxToWarehouse")
   currentWipUnits       WipUnit[]              @relation("WipUnitCurrentWarehouse")
@@ -3920,4 +3921,65 @@ model InstrumentStatusHistory {
   instrument MeasuringInstrument @relation(fields: [instrumentId], references: [id])
 
   @@index([tenantId, instrumentId, changedAt])
+}
+
+// ─── 재고실사 ────────────────────────────────────────────────────────────────
+// 창고 단위 실사. 시작 시점 전산수량(systemQty)을 줄에 스냅샷으로 남기고, 실사 종료 후 차이를 기존 재고조정(ADJUST)으로 반영한다.
+// 품목·LOT 표시값(코드/이름/LOT번호/단위)도 줄에 복사해 두어 이후 마스터가 바뀌어도 이력이 유지된다.
+enum StockCountStatus {
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model StockCount {
+  id            String           @id @default(cuid())
+  tenantId      String
+  warehouseId   String
+  countNo       String
+  status        StockCountStatus @default(IN_PROGRESS)
+  startedAt     DateTime         @default(now())
+  endedAt       DateTime?
+  startedById   String?
+  startedByName String?
+  endedById     String?
+  endedByName   String?
+  note          String?
+  cancelReason  String?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  warehouse Warehouse        @relation(fields: [warehouseId], references: [id])
+  lines     StockCountLine[]
+
+  @@unique([tenantId, countNo])
+  @@index([tenantId, startedAt])
+  @@index([tenantId, warehouseId, status])
+}
+
+model StockCountLine {
+  id             String    @id @default(cuid())
+  stockCountId   String
+  balanceId      String?
+  itemId         String
+  itemCode       String
+  itemName       String
+  uom            String
+  lotId          String?
+  lotNo          String?
+  systemQty      Decimal   @db.Decimal(18, 6)
+  countedQty     Decimal?  @db.Decimal(18, 6)
+  countedAt      DateTime?
+  countedByName  String?
+  adjustedAt     DateTime?
+  adjustedByName String?
+  adjustTxNo     String?
+  adjustedToQty  Decimal?  @db.Decimal(18, 6)
+  adjustReason   String?
+  createdAt      DateTime  @default(now())
+
+  stockCount StockCount @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+
+  @@index([stockCountId])
+  @@index([balanceId])
 }
