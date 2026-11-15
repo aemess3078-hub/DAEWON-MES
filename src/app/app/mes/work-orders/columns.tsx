@@ -298,7 +298,8 @@ export function getColumns({ onEdit, onDelete, onRelease, canMutate }: GetColumn
         const date = new Date(dueDate)
         const today = new Date()
         today.setHours(0, 0, 0, 0)
-        const isPast = date < today
+        // 완료·취소된 건은 납기 경과 강조(빨간색)를 하지 않는다.
+        const isPast = date < today && row.original.status !== "COMPLETED" && row.original.status !== "CANCELLED"
         const formatted = date.toISOString().split("T")[0]
         return (
           <span className={`whitespace-nowrap text-[14px] ${isPast ? "font-medium text-red-600" : ""}`}>
@@ -364,6 +365,8 @@ export function getColumns({ onEdit, onDelete, onRelease, canMutate }: GetColumn
         const status = workOrder.status
         const canDelete = status === "DRAFT" || status === "RELEASED"
         const isDraft = status === "DRAFT"
+        // 완료·취소된 작업지시는 더 이상 자재 투입/POP 작업/검사/입고를 할 수 없으므로 해당 버튼을 숨긴다(추적 조회는 유지).
+        const isClosed = status === "COMPLETED" || status === "CANCELLED"
         const currentOperation = getCurrentOperation(workOrder)
         const popHref = currentOperation
           ? `/pop/production/${encodeURIComponent(currentOperation.id)}${currentOperation.assignments[0]?.id ? `?assignmentId=${encodeURIComponent(currentOperation.assignments[0].id)}` : ""}`
@@ -380,28 +383,32 @@ export function getColumns({ onEdit, onDelete, onRelease, canMutate }: GetColumn
             ) : (
               <span className="px-1 text-[13px] text-muted-foreground">-</span>
             )}
-            <Button asChild variant="outline" size="sm" className="h-8 whitespace-nowrap px-2 text-[13px]">
-              <Link href={`/app/mes/material-issue?workOrderId=${encodeURIComponent(workOrder.id)}`}>
-                자재
-              </Link>
-            </Button>
-            {popHref && (
+            {!isClosed && (
+              <Button asChild variant="outline" size="sm" className="h-8 whitespace-nowrap px-2 text-[13px]">
+                <Link href={`/app/mes/material-issue?workOrderId=${encodeURIComponent(workOrder.id)}`}>
+                  자재
+                </Link>
+              </Button>
+            )}
+            {!isClosed && popHref && (
               <Button asChild variant="outline" size="sm" className="h-8 whitespace-nowrap px-2 text-[13px]">
                 <Link href={popHref}>POP</Link>
               </Button>
             )}
-            {currentOperation && isLinkVisible("/app/mes/inspection") && (
+            {!isClosed && currentOperation && isLinkVisible("/app/mes/inspection") && (
               <Button asChild variant="outline" size="sm" className="h-8 whitespace-nowrap px-2 text-[13px]">
                 <Link href={`/app/mes/inspection?operationId=${encodeURIComponent(currentOperation.id)}&workOrderId=${encodeURIComponent(workOrder.id)}`}>
                   검사
                 </Link>
               </Button>
             )}
-            <Button asChild variant="outline" size="sm" className="h-8 whitespace-nowrap px-2 text-[13px]">
-              <Link href={`/app/mes/finished-goods-receipt?workOrderId=${encodeURIComponent(workOrder.id)}`}>
-                입고
-              </Link>
-            </Button>
+            {!isClosed && (
+              <Button asChild variant="outline" size="sm" className="h-8 whitespace-nowrap px-2 text-[13px]">
+                <Link href={`/app/mes/finished-goods-receipt?workOrderId=${encodeURIComponent(workOrder.id)}`}>
+                  입고
+                </Link>
+              </Button>
+            )}
             {canMutate && isDraft && (
               <Button
                 type="button"
