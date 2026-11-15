@@ -378,6 +378,15 @@ export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput):
           }
         }
       }
+      // 수주 납기를 바꾸면, 이전 수주 납기와 같던 품목 납기도 함께 바꾼다(납기준수율은 품목 납기를 우선 사용하므로 어긋나면 지연으로 잘못 집계됨).
+      // 품목별로 따로 정한 납기(이전 수주 납기와 다른 값)와 이번 요청에서 품목 납기를 직접 지정한 경우는 건드리지 않는다.
+      const itemDatesGiven = applyItems && !!data.items?.some((i) => i.deliveryDate !== undefined)
+      if (data.deliveryDate !== undefined && data.deliveryDate.getTime() !== current.deliveryDate.getTime() && !itemDatesGiven) {
+        await tx.salesOrderItem.updateMany({
+          where: { salesOrderId: id, deliveryDate: current.deliveryDate },
+          data: { deliveryDate: data.deliveryDate },
+        })
+      }
       const updated = await tx.salesOrder.update({
         where: { id },
         data: {
