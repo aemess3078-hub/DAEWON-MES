@@ -16,6 +16,7 @@ import {
   validHours,
   type DeliveryLineInput,
   type ProductionFact,
+  UPH_BASIS_OPERATION_SEQ,
 } from "../src/lib/kpi/daewon-kpi"
 import { DAEWON_ALLOWED_ROUTES, isRouteAllowed } from "../src/lib/auth/daewon-scope"
 
@@ -98,6 +99,19 @@ function mk(o: Partial<ProductionFact>): ProductionFact {
   near(m.uph.trend[0].value, 45, "월별 값은 월 합계 재계산")
   // 상세 합계와 요약 일치
   near(s.uph.byProcess.reduce((x, r) => x + r.goodQty, 0), s.uph.goodQty, "공정별 합 = 요약")
+  // 기준공정(uphBasis) 지정 시 UPH 는 기준공정 실적만 사용 — PPM 은 전체 공정 유지
+  {
+    const b = summarizeProduction([
+      mk({ id: "h1", goodQty: 90, defectQty: 10, hours: 2, uphBasis: true }),
+      mk({ id: "h2", goodQty: 90, defectQty: 0, hours: 2, uphBasis: true }),
+      mk({ id: "p1", goodQty: 500, defectQty: 5, hours: 2, uphBasis: false }),
+      mk({ id: "h3", goodQty: 30, defectQty: 0, hours: null, uphBasis: true }),
+    ], "day")
+    near(b.uph.value, 45, "기준공정만 UPH 계산 (180/4h)")
+    ok(b.uph.validCount === 2 && b.uph.excludedCount === 1, "기준공정 중 시간 미기록만 제외")
+    near(b.ppm.totalQty, 90 + 10 + 90 + 505 + 30, "PPM 은 전 공정 기준")
+    ok(UPH_BASIS_OPERATION_SEQ === 10, "기준공정 순서 10")
+  }
   near(s.ppm.byItem.reduce((x, r) => x + r.defectQty, 0), s.ppm.defectQty, "품목별 불량 합 = 요약")
   const empty = summarizeProduction([], "day")
   ok(empty.uph.value === null && empty.ppm.value === null, "실적 없음 → 데이터 없음(0 아님)")

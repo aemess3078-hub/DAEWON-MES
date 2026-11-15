@@ -22,6 +22,7 @@ import {
   type DeliveryLineInput,
   type KpiEvaluation,
   type ProductionFact,
+  UPH_BASIS_OPERATION_SEQ,
   type ProductionKpiSummary,
   type TrendGranularity,
 } from "@/lib/kpi/daewon-kpi"
@@ -172,7 +173,7 @@ async function fetchProductionFacts(tenantId: string, f: DaewonKpiFilter): Promi
         select: {
           equipment: { select: { id: true, code: true, name: true } },
           routingOperation: {
-            select: { workCenter: { select: { id: true, name: true } } },
+            select: { seq: true, workCenter: { select: { id: true, name: true } } },
           },
           workOrder: {
             select: {
@@ -191,6 +192,7 @@ async function fetchProductionFacts(tenantId: string, f: DaewonKpiFilter): Promi
     if (!base) continue
     const wo = r.workOrderOperation.workOrder
     const wc = r.workOrderOperation.routingOperation.workCenter
+    const opSeq = r.workOrderOperation.routingOperation.seq
     const eq = resolveActualProductionEquipment(r)
     facts.push({
       id: r.id,
@@ -207,6 +209,7 @@ async function fetchProductionFacts(tenantId: string, f: DaewonKpiFilter): Promi
       defectQty: Number(r.defectQty),
       reworkQty: Number(r.reworkQty),
       hours: validHours(r.startedAt, r.endedAt),
+      uphBasis: opSeq === UPH_BASIS_OPERATION_SEQ,
     })
   }
   return facts
