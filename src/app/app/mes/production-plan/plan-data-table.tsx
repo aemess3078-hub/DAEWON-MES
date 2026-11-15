@@ -7,6 +7,7 @@ import { Loader2, Plus } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { DataTable } from "@/components/common/data-table"
+import { CompletionTabs, initialCompletionTab, type CompletionTab } from "@/components/common/completion-tabs"
 import { getColumns } from "./columns"
 import { PlanFormSheet } from "./plan-form-sheet"
 import { PlanDetailSheet } from "./plan-detail-sheet"
@@ -46,6 +47,10 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
       plan.items.some((item) => item.salesOrderItem?.salesOrder.id === initialSalesOrderId)
     )
   }, [data, initialSalesOrderId])
+  const activeData = useMemo(() => visibleData.filter((plan) => plan.status !== "COMPLETED"), [visibleData])
+  const completedData = useMemo(() => visibleData.filter((plan) => plan.status === "COMPLETED"), [visibleData])
+  const [tab, setTab] = useState<CompletionTab>(() => initialCompletionTab(activeData.length, completedData.length))
+  const tabData = tab === "completed" ? completedData : activeData
   const contextSalesOrderNo = useMemo(() => {
     if (!initialSalesOrderId) return null
     for (const plan of visibleData) {
@@ -126,7 +131,7 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
     quantities: quantityMap,
   })
 
-  const filterableColumns = [
+  const baseFilters = [
     {
       id: "productionKind" as keyof PlanWithDetails,
       title: "생산 유형",
@@ -163,10 +168,14 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
     },
   ]
 
+  // 완료 이력 탭에서는 상태가 모두 '완료'라 상태 필터를 숨긴다.
+  const filterableColumns = tab === "completed" ? baseFilters.filter((f) => f.id !== "status") : baseFilters
+
   return (
     <div className="space-y-4">
-      {permissions.canCreate && (
-        <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-3">
+        <CompletionTabs value={tab} onChange={setTab} activeCount={activeData.length} completedCount={completedData.length} />
+        {permissions.canCreate && tab === "active" && (
           <Button
             onClick={() => {
               setEditingPlan(null)
@@ -177,8 +186,8 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
             <Plus className="mr-2 h-4 w-4" />
             생산계획 등록
           </Button>
-        </div>
-      )}
+        )}
+      </div>
 
       {initialSalesOrderId && (
         <div className="flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-[14px] text-blue-800">
@@ -194,8 +203,9 @@ export function PlanDataTable({ data, sites, items, tenantId, permissions, initi
       )}
 
       <DataTable
+        key={tab}
         columns={columns}
-        data={visibleData}
+        data={tabData}
         searchableColumns={[
           { id: "planNo" as keyof PlanWithDetails, title: "계획번호" },
         ]}

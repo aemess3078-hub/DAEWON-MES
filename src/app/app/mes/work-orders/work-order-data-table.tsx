@@ -8,6 +8,7 @@ import { Plus } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { DataTable } from "@/components/common/data-table"
+import { CompletionTabs, initialCompletionTab, type CompletionTab } from "@/components/common/completion-tabs"
 import { Send } from "lucide-react"
 import { getColumns, formatKstDateTime } from "./columns"
 import { formatQty } from "./format-qty"
@@ -220,6 +221,10 @@ export function WorkOrderDataTable({
     if (!initialProductionPlanId) return data
     return data.filter((workOrder) => workOrder.productionPlanItem?.planId === initialProductionPlanId)
   }, [data, initialProductionPlanId])
+  const activeData = useMemo(() => visibleData.filter((workOrder) => workOrder.status !== "COMPLETED"), [visibleData])
+  const completedData = useMemo(() => visibleData.filter((workOrder) => workOrder.status === "COMPLETED"), [visibleData])
+  const [tab, setTab] = useState<CompletionTab>(() => initialCompletionTab(activeData.length, completedData.length))
+  const tabData = tab === "completed" ? completedData : activeData
   const contextPlanNo = useMemo(() => {
     if (!initialProductionPlanId) return null
     return productionPlanItems.find((item) => item.plan.id === initialProductionPlanId)?.plan.planNo ?? null
@@ -284,7 +289,7 @@ export function WorkOrderDataTable({
     canMutate,
   })
 
-  const filterableColumns = [
+  const baseFilters = [
     {
       id: "status" as keyof WorkOrderWithDetails,
       title: "상태",
@@ -298,10 +303,14 @@ export function WorkOrderDataTable({
     },
   ]
 
+  // 완료 이력 탭에서는 상태가 모두 '완료'라 상태 필터를 숨긴다.
+  const filterableColumns = tab === "completed" ? [] : baseFilters
+
   return (
     <div className="space-y-4">
-      {canMutate && (
-        <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-3">
+        <CompletionTabs value={tab} onChange={setTab} activeCount={activeData.length} completedCount={completedData.length} />
+        {canMutate && tab === "active" && (
           <Button
             onClick={() => {
               setEditingWorkOrder(null)
@@ -312,8 +321,8 @@ export function WorkOrderDataTable({
             <Plus className="mr-2 h-4 w-4" />
             작업지시 등록
           </Button>
-        </div>
-      )}
+        )}
+      </div>
 
       {initialProductionPlanId && (
         <div className="flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-[14px] text-blue-800">
@@ -329,8 +338,9 @@ export function WorkOrderDataTable({
       )}
 
       <DataTable
+        key={tab}
         columns={columns}
-        data={visibleData}
+        data={tabData}
         searchableColumns={[
           { id: "workOrderInfo" as keyof WorkOrderWithDetails, title: "작업지시/제조번호" },
           { id: "itemName" as keyof WorkOrderWithDetails, title: "품목명" },
