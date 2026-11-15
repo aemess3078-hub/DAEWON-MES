@@ -3,6 +3,8 @@
  *  정책: 생산계획 기준·수주 기준 MRP 에서 구매발주를 만드는 두 서버 액션은 신규 생성을 막는다.
  *        MRP 계산·조회와 일반 구매발주 등록(발주관리)은 그대로 동작한다.
  *  검증 방식: 서버 액션 HTTP 직접 호출(화면 우회) 전후로 PurchaseOrder/MrpRun/MrpRunPurchase 행 수와 감사 로그를 대조한다.
+ *  주의(2026-11-12): 발주 생성 정책은 이제 환경 판정(MRP_PURCHASE_CREATION_ENABLED=1 명시, 또는 로컬 한정 MRP_PURCHASE_CREATION_LOCAL=1 + 루프백 DB)이다. 이 "차단" 스위트는
+ *  그 값들을 설정하지 않은 서버(= 운영과 같은 비활성 상태)를 대상으로 실행한다. 활성 상태의 생성 동작은 scripts/db-it/18-mrp-plan-purchase.ts 가 검증한다.
  */
 import { test, expect } from "@playwright/test"
 import { assertSafeE2eEnvironment, adminCredentials, developerCredentials } from "./guard"
@@ -20,6 +22,9 @@ const errOf = (r: { value: any; error: string | null }) => String(r.value?.error
 const RUN = Date.now().toString(36).toUpperCase()
 const MRP_PAGE = { pagePath: "/app/mes/mrp" }
 const BLOCK_MSG = /구매발주.*발주관리/
+// 생산계획 기준 MRP 의 구 진입점(createPurchaseOrdersFromMRP)은 2026-11-12 이후 "폐기된 진입점" 안내를 돌려준다(쓰기 없음, mrp.actions.ts).
+// 수주 기준 경로(createDraftPurchaseOrdersFromMrpSuggestions)의 차단 문구(BLOCK_MSG)와는 문구가 다르다.
+const PLAN_BLOCK_MSG = /이 방식의 발주 생성은 사용할 수 없습니다.*MRP 화면.*구매발주 생성/
 
 test.beforeAll(async () => {
   const a = adminCredentials(), d = developerCredentials()
@@ -117,7 +122,7 @@ test("[MB-03] 생산계획 기준 MRP 구매발주 생성 차단 — 한글 안�
   const r = await callPlanPo(admin)
   note("MB-03", { value: r.value })
   expect(r.value?.success, "차단 결과").toBe(false)
-  expect(String(r.value?.error)).toMatch(BLOCK_MSG)
+  expect(String(r.value?.error)).toMatch(PLAN_BLOCK_MSG)
   expect(r.value?.orderNo, "발주번호 없음").toBeUndefined()
   expect(sameAs(before, await poCounts()), "행 수 변화 없음").toEqual([])
   expect(diffCounts(fp, await counts()), "업무 테이블 변화 없음").toEqual([])
@@ -185,6 +190,7 @@ test("[MB-09] 권한 영향 — 조회 전용(VIEWER) 계정은 두 경로 모�
   for (const r of [a, b]) {
     expect(r.ok, "권한 없는 사용자는 성공 불가").toBe(false)
     expect(JSON.stringify(r.value ?? {}) + String(r.error), "차단 안내 문구가 아니라 권한 거부").not.toMatch(BLOCK_MSG)
+    expect(JSON.stringify(r.value ?? {}) + String(r.error), "폐기된 진입점 안내 문구가 아니라 권한 거부").not.toMatch(PLAN_BLOCK_MSG)
   }
   expect(sameAs(before, await poCounts())).toEqual([])
 })

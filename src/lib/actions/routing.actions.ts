@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache"
 import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { getRoutingOperationReferences, type RoutingOperationReferenceSummary } from "@/lib/routing-references.server"
 import { validateRoutingForItemContext } from "@/lib/routing-validation.server"
+import { businessFailure } from "@/lib/business-error.server"
 
 export type RoutingWithDetails = {
   id: string
@@ -196,6 +197,7 @@ export async function createRouting(data: CreateRoutingInput, _tenantId?: string
   await requireResourcePermission("ROUTING", "CREATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
+  try {
   const { operations, itemIds, isDefault, scope, ...routingFields } = data
   assertValidOperationSeq(operations)
 
@@ -267,12 +269,16 @@ export async function createRouting(data: CreateRoutingInput, _tenantId?: string
     },
   }).catch(() => {})
   revalidatePath("/app/mes/routing")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 export async function updateRouting(id: string, data: CreateRoutingInput) {
   await requireResourcePermission("ROUTING", "UPDATE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
+  try {
   const owned = await prisma.routing.findFirst({
     where: { id, tenantId },
     include: {
@@ -419,6 +425,9 @@ export async function updateRouting(id: string, data: CreateRoutingInput) {
     },
   }).catch(() => {})
   revalidatePath("/app/mes/routing")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 // 기존 RoutingOperation과 새로 제출된 operations가 실질적으로 동일한지 판정한다.
@@ -475,6 +484,7 @@ export async function deleteRouting(id: string) {
   await requireResourcePermission("ROUTING", "DELETE")
   const actor = await requireRole("OPERATOR")
   const tenantId = await getTenantId()
+  try {
   const owned = await prisma.routing.findFirst({ where: { id, tenantId } })
   if (!owned) throw new Error("NOT_FOUND")
 
@@ -516,4 +526,7 @@ export async function deleteRouting(id: string) {
     },
   }).catch(() => {})
   revalidatePath("/app/mes/routing")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }

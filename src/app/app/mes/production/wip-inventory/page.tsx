@@ -2,6 +2,7 @@ import { getTenantId } from "@/lib/auth"
 
 import { getWipInventoryRows } from "@/lib/actions/work-order.actions"
 import { WipInventoryDataTable } from "./wip-inventory-data-table"
+import { summarizeWipInventory } from "@/lib/actions/wip-receipt.helpers"
 import { formatQuantity } from "@/lib/utils"
 
 export const dynamic = "force-dynamic"
@@ -10,23 +11,17 @@ export default async function WipInventoryPage() {
   const tenantId = await getTenantId()
   const rows = await getWipInventoryRows(tenantId)
 
-  const totalOrders = new Set(rows.map((row) => row.workOrder.id)).size
-  const rootQty = rows
-    .filter((row) => row.unitType === "ROOT")
-    .reduce((sum, row) => sum + row.qty, 0)
-  const scrappedQty = rows
-    .filter((row) => row.wipStatus === "SCRAPPED")
-    .reduce((sum, row) => sum + row.qty, 0)
-  const unresolvedReworkQty = rows
-    .filter((row) => row.unitType === "REWORK_CHILD" && row.wipStatus === "REWORK")
-    .reduce((sum, row) => sum + row.qty, 0)
-  const availableReceiptQty = Array.from(
-    new Map(
-      rows
-        .filter((row) => row.unitType === "ROOT" && row.receiptStatus === "AVAILABLE")
-        .map((row) => [row.workOrder.id, row.availableReceiptQty])
-    ).values()
-  ).reduce((sum, qty) => sum + qty, 0)
+  // 현재 재공(미입고 잔량) 기준 KPI — 입고완료·폐기완료 재공은 제외, 재작업 보류는 별도 집계
+  const summary = summarizeWipInventory(
+    rows.map((row) => ({
+      workOrderId: row.workOrder.id,
+      category: row.wipCategory,
+      wipQty: row.wipQty,
+      availableReceiptQty: row.availableReceiptQty,
+      blocked: row.receiptStatus === "ON_HOLD",
+      isCurrent: row.isCurrentWip,
+    }))
+  )
 
   return (
     <div className="p-6 space-y-6">
@@ -35,21 +30,26 @@ export default async function WipInventoryPage() {
           재공품재고
         </h1>
         <p className="mt-1 text-[15px] text-muted-foreground">
-          MES &gt; 재고관리 · 입고 대상 재공품과 불량/재작업 분리 재공품을 구분하고 입고 가능 상태를 확인합니다.
+          MES &gt; 재고관리 · 현재 미입고 재공수량 기준으로 표시합니다. 입고 완료·폐기 완료 수량은 제외되며, 재작업 보류 수량은 별도로 구분합니다.
         </p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-5">
-        <SummaryCard label="총 작업지시" value={formatQuantity(totalOrders)} suffix="건" />
-        <SummaryCard label="입고 대상 수량" value={formatQuantity(rootQty)} suffix="EA" />
-        <SummaryCard label="폐기 수량" value={formatQuantity(scrappedQty)} suffix="EA" accent="red" />
+        <SummaryCard label="재공 작업지시" value={formatQuantity(summary.currentOrderCount)} suffix="건" />
+        <SummaryCard label="현재 재공수량" value={formatQuantity(summary.currentWipQty)} suffix="EA" />
+        <SummaryCard label="공정 진행 수량" value={formatQuantity(summary.inProcessQty)} suffix="EA" />
         <SummaryCard
-          label="미해결 재작업"
-          value={formatQuantity(unresolvedReworkQty)}
+          label="입고 대기 수량"
+          value={formatQuantity(summary.awaitingReceiptQty)}
+          suffix="EA"
+          accent="green"
+        />
+        <SummaryCard
+          label="재작업 보류 수량"
+          value={formatQuantity(summary.reworkHoldQty)}
           suffix="EA"
           accent="amber"
         />
-        <SummaryCard label="입고 가능 수량" value={formatQuantity(availableReceiptQty)} suffix="EA" accent="green" />
       </div>
 
       <WipInventoryDataTable data={rows} />

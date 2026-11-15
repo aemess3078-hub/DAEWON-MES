@@ -40,6 +40,28 @@ const orderQ = (cookie: string | null, soId: string) => as(cookie, () => actions
 const planQ = (cookie: string | null, ids?: string[]) => as(cookie, () => actions().getProductionPlanQuantities(ids))
 const item0 = async (soId: string) => (await orderQ(admin, soId))!.items[0]
 
+// 격리 완제품: 다른 스펙이 공용 완제품(D.items.fg)에 남긴 재고·출하예정·계획이 '부족 수량 100' 같은 시나리오 기대값을 바꾸지 않도록,
+// 이 파일은 공용 완제품과 같은 속성·BOM 구성·라우팅 연결을 가진 전용 완제품을 새로 만들어 쓴다(재고 0 에서 시작).
+const QM = { fgId: "", bomId: "", spec1: "", spec2: "" }
+test.beforeAll(async () => {
+  const base = await db().item.findUniqueOrThrow({ where: { id: D.items.fg.id } })
+  const { id: _id, createdAt: _ca, updatedAt: _ua, ...itemData } = base as Record<string, any>
+  const iso = await db().item.create({ data: { ...itemData, code: `E2E-QM-FG-${RUN}`, name: `E2E-QM 격리 완제품 ${RUN}` } as any })
+  const baseBom = await db().bOM.findUniqueOrThrow({ where: { id: D.bom.id }, include: { bomItems: true } })
+  const bom = await db().bOM.create({ data: { tenantId: T, itemId: iso.id, version: `QM-${RUN}`, status: "ACTIVE", isDefault: true, bomItems: { create: baseBom.bomItems.map((b) => ({ componentItemId: b.componentItemId, seq: b.seq, qtyPer: b.qtyPer, scrapRate: b.scrapRate })) } } })
+  await db().itemRouting.create({ data: { tenantId: T, itemId: iso.id, routingId: D.routing.id, isDefault: true } })
+  // 공정별 검사표준도 전용 완제품 기준으로 복제(단계 검사 액션은 작업지시 품목과 검사표준 품목이 같아야 한다)
+  const cloneSpec = async (specId: string) => {
+    const s = await db().inspectionSpec.findUniqueOrThrow({ where: { id: specId }, include: { inspectionItems: true } })
+    const c = await db().inspectionSpec.create({ data: { tenantId: s.tenantId, itemId: iso.id, routingOperationId: s.routingOperationId, version: `QM-${RUN}`, status: s.status,
+      inspectionItems: { create: s.inspectionItems.map((i) => ({ seq: i.seq, name: i.name, inputType: i.inputType, lowerLimit: i.lowerLimit, upperLimit: i.upperLimit, unit: i.unit })) } } })
+    return c.id
+  }
+  QM.spec1 = await cloneSpec(D.specs.op1)
+  QM.spec2 = await cloneSpec(D.specs.op2)
+  QM.fgId = iso.id
+  QM.bomId = bom.id
+})
 test.beforeAll(async () => {
   const a = adminCredentials(), d = developerCredentials()
   admin = (await apiLogin(a.loginId, a.password)).cookie ?? ""
@@ -50,19 +72,19 @@ test.afterAll(async () => { await closeDb() })
 
 // ───────────────────────── 데이터 만들기 (실제 서버 액션) ─────────────────────────
 async function mkSo(qty: number) {
-  const r = await call(admin, A("createSalesOrder", /sales-order\.actions/), [T, D.site.id, { customerId: D.customer.id, orderDate: iso(new Date()), deliveryDate: iso(addDays(10)), status: "CONFIRMED", items: [{ itemId: D.items.fg.id, qty, unitPrice: 1, deliveryDate: iso(addDays(10)) }] }])
+  const r = await call(admin, A("createSalesOrder", /sales-order\.actions/), [T, D.site.id, { customerId: D.customer.id, orderDate: iso(new Date()), deliveryDate: iso(addDays(10)), status: "CONFIRMED", items: [{ itemId: QM.fgId, qty, unitPrice: 1, deliveryDate: iso(addDays(10)) }] }])
   expect(r.ok, r.error ?? "").toBe(true)
   const so = await db().salesOrder.findFirstOrThrow({ where: { tenantId: T }, orderBy: { createdAt: "desc" }, include: { items: true } })
   return { id: so.id, no: so.orderNo, itemId: so.items[0].id }
 }
 type So = Awaited<ReturnType<typeof mkSo>>
 const request = (so: So, qty: number, over: { extraQty?: number; extraReason?: string } = {}) =>
-  call(admin, A("requestProductionFromSalesOrder", /sales-order\.actions/), [so.id, [{ salesOrderItemId: so.itemId, itemId: D.items.fg.id, qty, ...over }], T, D.site.id, rid("qm")])
+  call(admin, A("requestProductionFromSalesOrder", /sales-order\.actions/), [so.id, [{ salesOrderItemId: so.itemId, itemId: QM.fgId, qty, ...over }], T, D.site.id, rid("qm")])
 const reqOk = async (so: So, qty: number, over: { extraQty?: number; extraReason?: string } = {}) => { const r = await request(so, qty, over); expect(ok(r), errOf(r)).toBe(true); return r }
 const rowsOf = (soItemId: string) => db().productionPlanItem.findMany({ where: { salesOrderItemId: soItemId }, include: { plan: true }, orderBy: { plan: { createdAt: "asc" } } })
 async function updatePlan(rowId: string, over: { plannedQty: number; allocatedQty?: number; extraReason?: string; status?: "DRAFT" | "CONFIRMED" }) {
   const row = await db().productionPlanItem.findUniqueOrThrow({ where: { id: rowId }, include: { plan: true } })
-  const item: Record<string, unknown> = { productionPlanItemId: row.id, itemId: row.itemId, bomId: row.bomId ?? D.bom.id, routingId: row.routingId ?? D.routing.id, plannedQty: over.plannedQty }
+  const item: Record<string, unknown> = { productionPlanItemId: row.id, itemId: row.itemId, bomId: row.bomId ?? QM.bomId, routingId: row.routingId ?? D.routing.id, plannedQty: over.plannedQty }
   if (row.salesOrderItemId) item.salesOrderItemId = row.salesOrderItemId
   if (over.allocatedQty !== undefined) item.allocatedQty = over.allocatedQty
   if (over.extraReason !== undefined) item.extraReason = over.extraReason
@@ -71,7 +93,7 @@ async function updatePlan(rowId: string, over: { plannedQty: number; allocatedQt
 let stockSeq = 0
 async function createStockPlan(qty: number) {
   const tag = `E2E-QM stock ${RUN}-${++stockSeq}`
-  const r = await call(admin, A("createPlan", /production-plan\.actions/), [{ siteId: D.site.id, planNo: "", planType: "DAILY", startDate: "2026-11-02", endDate: "2026-11-30", status: "DRAFT", note: tag, items: [{ itemId: D.items.fg.id, bomId: D.bom.id, routingId: D.routing.id, plannedQty: qty }] }, T])
+  const r = await call(admin, A("createPlan", /production-plan\.actions/), [{ siteId: D.site.id, planNo: "", planType: "DAILY", startDate: "2026-11-02", endDate: "2026-11-30", status: "DRAFT", note: tag, items: [{ itemId: QM.fgId, bomId: QM.bomId, routingId: D.routing.id, plannedQty: qty }] }, T])
   expect(ok(r), errOf(r)).toBe(true)
   return db().productionPlanItem.findFirstOrThrow({ where: { plan: { tenantId: T, note: tag } }, include: { plan: true } })
 }
@@ -90,11 +112,11 @@ async function seedRawStock(tag: string, qty1: number, qty2: number) {
 async function seedFgBalance(tag: string, status: "ACTIVE" | "QUARANTINE" | "ON_HOLD" | "EXPIRED" | "CONSUMED" | null, qty: number) {
   let lotId: string | null = null
   if (status) {
-    const lot = await db().lot.create({ data: { tenantId: T, itemId: D.items.fg.id, lotNo: `E2E-QM-${RUN}-${tag}`, status } })
+    const lot = await db().lot.create({ data: { tenantId: T, itemId: QM.fgId, lotNo: `E2E-QM-${RUN}-${tag}`, status } })
     lotId = lot.id
   }
-  await db().inventoryBalance.create({ data: { tenantId: T, siteId: D.site.id, itemId: D.items.fg.id, lotId, warehouseId: D.warehouses.fg.id, qtyOnHand: qty, qtyAvailable: qty, qtyHold: 0 } })
-  await db().inventoryTransaction.create({ data: { tenantId: T, itemId: D.items.fg.id, lotId, toLocationId: D.warehouses.fg.id, txNo: `E2E-QM-${RUN}-${tag}-RCV`, txType: "RECEIPT", qty, refType: "E2E_FIXTURE", refId: tag } })
+  await db().inventoryBalance.create({ data: { tenantId: T, siteId: D.site.id, itemId: QM.fgId, lotId, warehouseId: D.warehouses.fg.id, qtyOnHand: qty, qtyAvailable: qty, qtyHold: 0 } })
+  await db().inventoryTransaction.create({ data: { tenantId: T, itemId: QM.fgId, lotId, toLocationId: D.warehouses.fg.id, txNo: `E2E-QM-${RUN}-${tag}-RCV`, txType: "RECEIPT", qty, refType: "E2E_FIXTURE", refId: tag } })
   return lotId
 }
 
@@ -105,7 +127,7 @@ async function produce(rowId: string, qty: number, tag: string, receipts: number
   expect(ok(conf), `계획 확정: ${errOf(conf)}`).toBe(true)
   const MFG = `E2E-QM-${RUN}-${tag}`
   const woRes = await call(admin, A("createWorkOrder", /work-order\.actions/), [{
-    siteId: D.site.id, itemId: D.items.fg.id, bomId: D.bom.id, routingId: D.routing.id, orderNo: "", manufacturingNo: MFG, plannedQty: qty, status: "DRAFT", dueDate: iso(addDays(14)), productionPlanItemId: rowId,
+    siteId: D.site.id, itemId: QM.fgId, bomId: QM.bomId, routingId: D.routing.id, orderNo: "", manufacturingNo: MFG, plannedQty: qty, status: "DRAFT", dueDate: iso(addDays(14)), productionPlanItemId: rowId,
     operations: [
       { routingOperationId: D.routing.ops[0], seq: 1, plannedQty: qty, equipmentId: D.equipments.eq1.id, assignments: [{ equipmentId: D.equipments.eq1.id, assignedQty: qty }] },
       { routingOperationId: D.routing.ops[1], seq: 2, plannedQty: qty },
@@ -132,11 +154,11 @@ async function produce(rowId: string, qty: number, tag: string, receipts: number
   expect((await call(pc, A("submitProductionResult", /pop\.actions/), [{ workOrderOperationId: op2.id, goodQty: qty, defectQty: 0, reworkQty: 0 }], pp2)).value?.success).toBe(true)
   await new Promise((r) => setTimeout(r, 1100))
   const ins = A("createStagedInspection", /inspection-stages\.actions/)
-  for (const stage of ["FIRST", "MID"] as const) expect((await call(admin, ins, [{ workOrderOperationId: op1.id, inspectionSpecId: D.specs.op1, stage, result: "PASS", inspectedQty: 5 }])).ok).toBe(true)
-  expect((await call(admin, ins, [{ workOrderOperationId: op2.id, inspectionSpecId: D.specs.op2, stage: "FINAL", result: "PASS", inspectedQty: qty }])).ok).toBe(true)
+  for (const stage of ["FIRST", "MID"] as const) expect((await call(admin, ins, [{ workOrderOperationId: op1.id, inspectionSpecId: QM.spec1, stage, result: "PASS", inspectedQty: 5 }])).ok).toBe(true)
+  expect((await call(admin, ins, [{ workOrderOperationId: op2.id, inspectionSpecId: QM.spec2, stage: "FINAL", result: "PASS", inspectedQty: qty }])).ok).toBe(true)
   const lotNos: string[] = []
   for (const q of receipts) {
-    const rcv = await call(admin, A("createFinishedGoodsReceiptAction", /finished-goods\.actions/), [{ workOrderId: wo.id, itemId: D.items.fg.id, siteId: D.site.id, warehouseId: D.warehouses.fg.id, receiptQty: q }])
+    const rcv = await call(admin, A("createFinishedGoodsReceiptAction", /finished-goods\.actions/), [{ workOrderId: wo.id, itemId: QM.fgId, siteId: D.site.id, warehouseId: D.warehouses.fg.id, receiptQty: q }])
     expect(rcv.value?.ok, `완제품 입고 ${q}: ${rcv.value?.error}`).toBe(true)
     lotNos.push(rcv.value.lotNo)
   }
@@ -144,7 +166,7 @@ async function produce(rowId: string, qty: number, tag: string, receipts: number
   return { woId: wo.id, op2Id: op2.id, lotNos, lotIds: lotNos.map((n) => lots.find((l) => l.lotNo === n)!.id) }
 }
 async function ship(so: So, lotId: string, qty: number, confirm: boolean) {
-  const r = await call(admin, A("createShipment", /shipment\.actions/), [T, { salesOrderId: so.id, plannedDate: iso(addDays(1)), warehouseId: D.warehouses.fg.id, items: [{ salesOrderItemId: so.itemId, itemId: D.items.fg.id, qty, lotId }] }])
+  const r = await call(admin, A("createShipment", /shipment\.actions/), [T, { salesOrderId: so.id, plannedDate: iso(addDays(1)), warehouseId: D.warehouses.fg.id, items: [{ salesOrderItemId: so.itemId, itemId: QM.fgId, qty, lotId }] }])
   expect(r.ok, r.error ?? "").toBe(true)
   const sh = await db().shipmentOrder.findFirstOrThrow({ where: { tenantId: T, salesOrderId: so.id, status: "PLANNED", items: { some: { lotId } } }, orderBy: { createdAt: "desc" } })
   if (confirm) { const c = await call(admin, A("confirmShipment", /shipment\.actions/), [sh.id]); expect(c.ok, c.error ?? "").toBe(true) }
@@ -229,7 +251,7 @@ async function failedLotIds(): Promise<string[]> {
   const r = await db().$queryRawUnsafe<{ lotId: string }[]>(`select distinct f."lotId" from "FinishedGoodsReceipt" f join "WorkOrderOperation" o on o."workOrderId"=f."workOrderId" join "QualityInspection" q on q."workOrderOperationId"=o.id where f."tenantId"='${T}' and q.stage='FINAL' and q.result='FAIL' and f."lotId" is not null`)
   return r.map((x) => x.lotId)
 }
-const lotByTag = async (tag: string) => db().lot.findFirstOrThrow({ where: { tenantId: T, itemId: D.items.fg.id, lotNo: { contains: `-${tag}` } } })
+const lotByTag = async (tag: string) => db().lot.findFirstOrThrow({ where: { tenantId: T, itemId: QM.fgId, lotNo: { contains: `-${tag}` } } })
 async function cross(soId: string, opts: { blockedLotIds?: string[] } = {}) {
   const res = (await orderQ(admin, soId))!
   const legacyRows = await as(admin, () => soActions().checkInventoryForSalesOrder(soId, T))
@@ -343,7 +365,7 @@ test("[QM-06][시나리오6] 재고 생산 계획 — 충당 0·유형 STOCK·�
   const v = (await cross(so.id)).items[0]
   expect([v.allocatedQty, v.lines.length], "재고 생산은 수주 충당에 포함되지 않음").toEqual([0, 0])
   expect(v.stock.independentStockPendingQty - before, "독립 재고 생산 미입고 +200").toBe(200)
-  const sumPending = await db().$queryRawUnsafe<{ q: string }[]>(`select coalesce(sum(greatest(0,p."plannedQty" - coalesce((select sum(f."receiptQty") from "WorkOrder" w join "FinishedGoodsReceipt" f on f."workOrderId"=w.id where w."productionPlanItemId"=p.id),0))),0)::text q from "ProductionPlanItem" p join "ProductionPlan" pl on pl.id=p."planId" and pl.status in ('DRAFT','CONFIRMED','IN_PROGRESS') where p."salesOrderItemId" is null and p."itemId"='${D.items.fg.id}'`)
+  const sumPending = await db().$queryRawUnsafe<{ q: string }[]>(`select coalesce(sum(greatest(0,p."plannedQty" - coalesce((select sum(f."receiptQty") from "WorkOrder" w join "FinishedGoodsReceipt" f on f."workOrderId"=w.id where w."productionPlanItemId"=p.id),0))),0)::text q from "ProductionPlanItem" p join "ProductionPlan" pl on pl.id=p."planId" and pl.status in ('DRAFT','CONFIRMED','IN_PROGRESS') where p."salesOrderItemId" is null and p."itemId"='${QM.fgId}'`)
   expect(v.stock.independentStockPendingQty).toBe(Number(sumPending[0].q))
 })
 
@@ -376,7 +398,7 @@ test("[QM-08][시나리오8] 완제품 재고가 있는 수주 — 재고 70 이
   const so = await mkSo(50)
   const res = await cross(so.id)
   const v = res.items[0]
-  const s = await oracleStock(D.items.fg.id)
+  const s = await oracleStock(QM.fgId)
   expect(v.stock.shippableQty).toBe(s.shippable)
   expect(v.stock.shippableQty).toBeGreaterThanOrEqual(70)
   expect([v.shortage.legacy.shortageQty, v.shortage.proposed.shortageMinQty], "재고가 충분하면 둘 다 0").toEqual([0, 0])
@@ -387,7 +409,7 @@ test("[QM-08][시나리오8] 완제품 재고가 있는 수주 — 재고 70 이
 
 test("[QM-09][시나리오9] 격리·보류·만료·소진 LOT 와 LOT 미지정 재고는 출하 가능 재고에서 제외하고 사유별로 표시, 최종검사 불합격 LOT 는 품질 게이트로 제외", async () => {
   const so = await mkSo(40)
-  const base = await oracleStock(D.items.fg.id)
+  const base = await oracleStock(QM.fgId)
   await seedFgBalance(`Q9-ACT-${++stockSeq}`, "ACTIVE", 10)
   await seedFgBalance(`Q9-QUA-${stockSeq}`, "QUARANTINE", 25)
   await seedFgBalance(`Q9-HLD-${stockSeq}`, "ON_HOLD", 15)
@@ -401,12 +423,12 @@ test("[QM-09][시나리오9] 격리·보류·만료·소진 LOT 와 LOT 미지�
   expect(v.stock.breakdown.unassignedForLotTrackedQty - base.unassigned).toBe(7)
   expect(v.shortage.differenceCodes).toEqual(expect.arrayContaining(["STOCK_EXCLUDED_BY_LOT_STATUS", "STOCK_WITHOUT_LOT_EXCLUDED"]))
   // 최종검사 불합격 LOT
-  const lot7Qty = (await oracleStock(D.items.fg.id)).shippable
+  const lot7Qty = (await oracleStock(QM.fgId)).shippable
   await new Promise((r) => setTimeout(r, 1100))
   const lot7 = await lotByTag("S7")
   const fgLot7 = lot7.id, fgLot7No = lot7.lotNo
   const op2 = await db().workOrderOperation.findFirstOrThrow({ where: { workOrder: { finishedGoodsReceipts: { some: { lotId: fgLot7 } } }, seq: 2 } })
-  const fail = await call(admin, A("createStagedInspection", /inspection-stages\.actions/), [{ workOrderOperationId: op2.id, inspectionSpecId: D.specs.op2, stage: "FINAL", result: "FAIL", inspectedQty: 1 }])
+  const fail = await call(admin, A("createStagedInspection", /inspection-stages\.actions/), [{ workOrderOperationId: op2.id, inspectionSpecId: QM.spec2, stage: "FINAL", result: "FAIL", inspectedQty: 1 }])
   expect(fail.ok, fail.error ?? "").toBe(true)
   v = (await cross(so.id)).items[0]
   const lot7Avail = Number((await db().inventoryBalance.findFirstOrThrow({ where: { lotId: fgLot7 } })).qtyAvailable)
@@ -421,7 +443,7 @@ test("[QM-10][시나리오10] 여러 수주에서 같은 품목 재고 조회 �
   const ra = (await cross(a.id)).items[0], rb = (await cross(b.id)).items[0]
   expect(ra.stock.shippableQty).toBe(rb.stock.shippableQty)
   expect([ra.stock.reservation.supported, rb.stock.reservation.supported]).toEqual([false, false])
-  const ca = await oracleCompeting(D.items.fg.id, a.itemId), cb = await oracleCompeting(D.items.fg.id, b.itemId)
+  const ca = await oracleCompeting(QM.fgId, a.itemId), cb = await oracleCompeting(QM.fgId, b.itemId)
   expect([ra.stock.competingOutstandingQty, rb.stock.competingOutstandingQty]).toEqual([ca.qty, cb.qty])
   expect(ra.stock.competingOutstandingQty - rb.stock.competingOutstandingQty, "서로의 미납(40−30)만큼 차이").toBe(40 - 30)
   expect(ra.shortage.differenceCodes).toContain("STOCK_SHARED_WITH_OTHER_ORDERS")
@@ -439,7 +461,7 @@ test("[QM-11][시나리오11] 생산계획 일부 입고 — ORDER: 미입고 �
   expect(v.pendingAllocatedReceipt, "입고 60: 충당부터 채워졌다면 40, 여유부터면 50").toEqual({ minQty: 40, maxQty: 50, exact: false })
   expect(v.shortage.differenceCodes).toContain("PENDING_ALLOCATION_RANGE")
   expect(v.shortage.proposed.exact).toBe(v.shortage.proposed.shortageMinQty === v.shortage.proposed.shortageMaxQty)
-  const more = await call(admin, A("createFinishedGoodsReceiptAction", /finished-goods\.actions/), [{ workOrderId: p.woId, itemId: D.items.fg.id, siteId: D.site.id, warehouseId: D.warehouses.fg.id, receiptQty: 45 }])
+  const more = await call(admin, A("createFinishedGoodsReceiptAction", /finished-goods\.actions/), [{ workOrderId: p.woId, itemId: QM.fgId, siteId: D.site.id, warehouseId: D.warehouses.fg.id, receiptQty: 45 }])
   expect(more.value?.ok, more.value?.error).toBe(true)
   v = (await cross(so.id)).items[0]
   expect([v.receivedQty, v.pendingPlannedReceiptQty, v.pendingAllocatedReceipt]).toEqual([105, 5, { minQty: 0, maxQty: 5, exact: false }])
@@ -457,7 +479,7 @@ test("[QM-12][시나리오12] 생산계획 전량 입고 — 미입고 0(정확)
   const v = (await cross(so.id)).items[0]
   expect([v.receivedQty, v.plannedQty, v.pendingPlannedReceiptQty, v.pendingAllocatedReceipt, v.lines[0].receivedOverPlannedQty]).toEqual([110, 110, 0, { minQty: 0, maxQty: 0, exact: true }, 0])
   expect(v.lines[0].workOrderCount).toBe(1)
-  const more = await call(admin, A("createFinishedGoodsReceiptAction", /finished-goods\.actions/), [{ workOrderId: p.woId, itemId: D.items.fg.id, siteId: D.site.id, warehouseId: D.warehouses.fg.id, receiptQty: 1 }])
+  const more = await call(admin, A("createFinishedGoodsReceiptAction", /finished-goods\.actions/), [{ workOrderId: p.woId, itemId: QM.fgId, siteId: D.site.id, warehouseId: D.warehouses.fg.id, receiptQty: 1 }])
   expect(more.value?.ok, "전량 입고 후 추가 입고는 서버가 거부").toBe(false)
   note("QM-12", { planStatus: v.lines[0].planStatus, shortfall: v.lines[0].shortfallQty })
 })
@@ -471,7 +493,7 @@ test("[QM-13][시나리오13] 충당량 중복 계산 방지 — 입고분은 �
   expect([vx.allocatedQty, vy.allocatedQty], "수주별 충당만 합산").toEqual([100, 70])
   expect(vx.lines.every((l: any) => l.salesOrderItemId === x.itemId), "다른 수주·재고 생산 줄이 섞이지 않음").toBe(true)
   expect(vx.receivedQty + vx.pendingAllocatedReceipt.maxQty, "입고 60 + 미입고 40 = 충당 100 (겹치지 않음)").toBe(100)
-  const s = await oracleStock(D.items.fg.id)
+  const s = await oracleStock(QM.fgId)
   expect(vx.shortage.proposed.shortageMaxQty).toBeCloseTo(Math.max(0, 100 - s.shippable - 40), 6)
   // 단순히 재고와 전체 충당을 함께 빼는 계산(이중 차감)과의 차이를 기록
   note("QM-13", { naiveDoubleCount: Math.max(0, 100 - s.shippable - 100), proposed: vx.shortage.proposed, legacy: vx.shortage.legacy })

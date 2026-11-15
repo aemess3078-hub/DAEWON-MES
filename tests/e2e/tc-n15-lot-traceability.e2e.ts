@@ -297,6 +297,8 @@ test("[N15-10] 대량 이력 성능 — 공유 원자재 LOT 1개가 작업지�
     })
   })
   await db().inventoryTransaction.createMany({ data: txRows })
+  // 출고 원장과 잔고가 맞도록 공유 LOT 잔고도 출고 수량만큼 줄인다 (원장 합 = 잔고 불변식 유지)
+  await db().inventoryBalance.updateMany({ where: { tenantId: T, lotId: sh.id }, data: { qtyOnHand: { decrement: n }, qtyAvailable: { decrement: n } } })
   await db().workOrderMaterialLot.createMany({ data: wmlRows })
   await db().finishedGoodsReceipt.createMany({ data: wos.map((wo, k) => ({ tenantId: T, siteId: D.site.id, workOrderId: wo.id, itemId: D.items.fg.id, lotId: byNo.get(`N15-${TAG}-PERF-FG-${k}`)!, warehouseId: D.warehouses.fg.id, locationId: fgLoc.id, receiptQty: 1 })) })
   const t0 = Date.now()
@@ -331,7 +333,8 @@ test("[N15-12] 테넌트·권한 — 같은 LOT 번호를 다른 테넌트가 �
   const t2c = "nmes-session=" + signToken({ profileId: cred.profileId, tenantId: T2, loginId: cred.loginId, name: prof.name, role: "OWNER", email: prof.email })
   const t2item = await db().item.findFirstOrThrow({ where: { tenantId: T2, code: "E2E-T2-ITEM" } })
   const sameNo = w.S1.fgLots[0].lotNo
-  await db().lot.create({ data: { tenantId: T2, itemId: t2item.id, lotNo: sameNo, status: "ACTIVE" } })
+  // 재실행에서도 같은 번호의 T2 LOT 이 이미 있을 수 있으므로 upsert (테넌트별 LOT 번호 유일성은 DB 제약으로 그대로 검증됨)
+  await db().lot.upsert({ where: { tenantId_lotNo: { tenantId: T2, lotNo: sameNo } }, update: {}, create: { tenantId: T2, itemId: t2item.id, lotNo: sameNo, status: "ACTIVE" } })
   const own = await lineage(t2c, sameNo, T2)
   expect(own.value?.lot?.item?.code, "T2 소유자는 T2 의 같은 번호 LOT").toBe("E2E-T2-ITEM")
   expect(JSON.stringify(own.value), "T2 결과에 T1 데이터 없음").not.toContain(w.A.lotNo)

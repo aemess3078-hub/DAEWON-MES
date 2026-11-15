@@ -1,7 +1,6 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useRouter } from "next/navigation"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
@@ -101,7 +100,6 @@ function ModeSelectCards({ onSelect }: { onSelect: (mode: LoginMode) => void }) 
 // ─── 시스템 로그인 폼 (아이디/비밀번호) ──────────────────────────────────────
 
 function SystemLoginForm({ onBack }: { onBack: () => void }) {
-  const router = useRouter()
   const [loginId, setLoginId] = useState("")
   const [password, setPassword] = useState("")
   const [showPassword, setShowPassword] = useState(false)
@@ -133,7 +131,8 @@ function SystemLoginForm({ onBack }: { onBack: () => void }) {
 
       if (res.ok && data.success) {
         document.cookie = "nmes-mode=system; path=/"
-        router.push("/app")
+        // 인증 쿠키가 반영된 새 문서 요청으로 진입한다(클라이언트 라우터 캐시/미들웨어 리다이렉트 경합 방지)
+        window.location.replace("/app")
         return
       }
 

@@ -2,6 +2,7 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { getTenantId } from "@/lib/auth"
+import { aggregateDefectStats } from "@/lib/quality/defect-stats-aggregate"
 import { isMissingDbObjectError } from "@/lib/db/prisma-error"
 import {
   kstDateRangeToUtcBounds,
@@ -202,114 +203,11 @@ export async function getDefectStats(
   const truncated = inspections.length > ROW_LIMIT
   const sliced = truncated ? inspections.slice(0, ROW_LIMIT) : inspections
 
-  // ─── Summary ─────────────────────────────────────────────────────────────
-  let inspectedQtySum = 0
-  let passQtySum = 0
-  let failQtySum = 0
-  let defectQtySum = 0
-
-  // ─── 일자별 / 불량유형 / 품목 / 공정 집계 ─────────────────────────────
-  const dailyMap = new Map<
-    string,
-    { inspectedQty: number; defectQty: number }
-  >()
-  const byTypeMap = new Map<
-    string,
-    {
-      defectCodeId: string
-      code: string
-      name: string
-      category: DefectCategory
-      qty: number
-    }
-  >()
-  const byItemMap = new Map<
-    string,
-    {
-      itemId: string
-      code: string
-      name: string
-      inspectedQty: number
-      defectQty: number
-    }
-  >()
-  const byOperationMap = new Map<
-    string,
-    {
-      routingOperationId: string
-      routingOperationName: string
-      seq: number
-      inspectedQty: number
-      defectQty: number
-    }
-  >()
-
-  const rows: DefectStatsRow[] = []
-
-  for (const insp of sliced) {
-    const inspectedQty = Number(insp.inspectedQty)
-    const defectQty = insp.defectRecords.reduce(
-      (sum, dr) => sum + Number(dr.qty),
-      0
-    )
-
-    inspectedQtySum += inspectedQty
-    if (insp.result === "PASS") passQtySum += inspectedQty
-    if (insp.result === "FAIL") failQtySum += inspectedQty
-    defectQtySum += defectQty
-
-    // daily
-    const dateKey = toDateOnly(insp.inspectedAt)
-    const dailyEntry = dailyMap.get(dateKey) ?? {
-      inspectedQty: 0,
-      defectQty: 0,
-    }
-    dailyEntry.inspectedQty += inspectedQty
-    dailyEntry.defectQty += defectQty
-    dailyMap.set(dateKey, dailyEntry)
-
-    // by item
+  // ─── 상세 목록(최신 ROW_LIMIT 건) ──────────────────────────────────────────
+  const rows: DefectStatsRow[] = sliced.map((insp) => {
     const item = insp.workOrderOperation.workOrder.item
-    const itemEntry = byItemMap.get(item.id) ?? {
-      itemId: item.id,
-      code: item.code,
-      name: item.name,
-      inspectedQty: 0,
-      defectQty: 0,
-    }
-    itemEntry.inspectedQty += inspectedQty
-    itemEntry.defectQty += defectQty
-    byItemMap.set(item.id, itemEntry)
-
-    // by operation
     const op = insp.workOrderOperation.routingOperation
-    const opEntry = byOperationMap.get(op.id) ?? {
-      routingOperationId: op.id,
-      routingOperationName: op.name,
-      seq: op.seq,
-      inspectedQty: 0,
-      defectQty: 0,
-    }
-    opEntry.inspectedQty += inspectedQty
-    opEntry.defectQty += defectQty
-    byOperationMap.set(op.id, opEntry)
-
-    // by defect type
-    for (const dr of insp.defectRecords) {
-      const dc = dr.defectCode
-      const typeEntry = byTypeMap.get(dc.id) ?? {
-        defectCodeId: dc.id,
-        code: dc.code,
-        name: dc.name,
-        category: dc.defectCategory,
-        qty: 0,
-      }
-      typeEntry.qty += Number(dr.qty)
-      byTypeMap.set(dc.id, typeEntry)
-    }
-
-    // detail row
-    rows.push({
+    return {
       id: insp.id,
       inspectedAt: insp.inspectedAt.toISOString(),
       manufacturingNo: insp.workOrderOperation.workOrder.manufacturingNo,
@@ -320,77 +218,74 @@ export async function getDefectStats(
       routingOperationSeq: op.seq,
       stage: insp.stage,
       result: insp.result,
-      inspectedQty,
-      defectQty,
-      defectLabels: insp.defectRecords.map(
-        (dr) => `[${dr.defectCode.code}] ${dr.defectCode.name}`
-      ),
+      inspectedQty: Number(insp.inspectedQty),
+      defectQty: insp.defectRecords.reduce((sum, dr) => sum + Number(dr.qty), 0),
+      defectLabels: insp.defectRecords.map((dr) => `[${dr.defectCode.code}] ${dr.defectCode.name}`),
       inspectorName: insp.inspector.name,
-    })
-  }
+    }
+  })
 
-  const defectRate = inspectedQtySum > 0 ? defectQtySum / inspectedQtySum : 0
+  // ─── 요약·차트 집계: 목록 제한과 무관하게 필터 조건 전체를 DB 에서 집계 ─────────
+  const agg = await aggregateDefectStats(prisma, {
+    tenantId,
+    from,
+    toExclusive,
+    stage: filter.stage,
+    routingOperationId: filter.routingOperationId,
+    itemId: filter.itemId,
+    manufacturingNo: filter.manufacturingNo,
+  })
+  const rate = (defect: number, inspected: number) => (inspected > 0 ? defect / inspected : 0)
 
-  // ─── daily: 정렬 + 비율 계산 ──────────────────────────────────────────
-  const daily: DefectStatsDailyPoint[] = Array.from(dailyMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, v]) => ({
-      date,
-      inspectedQty: v.inspectedQty,
-      defectQty: v.defectQty,
-      defectRate: v.inspectedQty > 0 ? v.defectQty / v.inspectedQty : 0,
-    }))
+  const daily: DefectStatsDailyPoint[] = agg.daily.map((v) => ({
+    date: v.date,
+    inspectedQty: v.inspectedQty,
+    defectQty: v.defectQty,
+    defectRate: rate(v.defectQty, v.inspectedQty),
+  }))
 
-  // ─── byType: 비중 ─────────────────────────────────────────────────────
-  const totalDefectForType = Array.from(byTypeMap.values()).reduce(
-    (s, t) => s + t.qty,
-    0
-  )
-  const byType: DefectStatsByType[] = Array.from(byTypeMap.values())
+  const totalDefectForType = agg.byType.reduce((s, t) => s + t.qty, 0)
+  const byType: DefectStatsByType[] = agg.byType
     .map((t) => ({
       defectCodeId: t.defectCodeId,
       code: t.code,
       name: t.name,
-      category: t.category,
+      category: t.category as DefectCategory,
       qty: t.qty,
       percentage: totalDefectForType > 0 ? t.qty / totalDefectForType : 0,
     }))
     .sort((a, b) => b.qty - a.qty)
 
-  // ─── byItem: 비율 ────────────────────────────────────────────────────
-  const byItem: DefectStatsByItem[] = Array.from(byItemMap.values())
+  const byItem: DefectStatsByItem[] = agg.byItem
     .map((it) => ({
       itemId: it.itemId,
       code: it.code,
       name: it.name,
       inspectedQty: it.inspectedQty,
       defectQty: it.defectQty,
-      defectRate: it.inspectedQty > 0 ? it.defectQty / it.inspectedQty : 0,
+      defectRate: rate(it.defectQty, it.inspectedQty),
     }))
     .sort((a, b) => b.defectRate - a.defectRate)
 
-  // ─── byOperation: 비율 ────────────────────────────────────────────────
-  const byOperation: DefectStatsByOperation[] = Array.from(
-    byOperationMap.values()
-  )
+  const byOperation: DefectStatsByOperation[] = agg.byOperation
     .map((op) => ({
       routingOperationId: op.routingOperationId,
-      routingOperationName: op.routingOperationName,
+      routingOperationName: op.name,
       seq: op.seq,
       inspectedQty: op.inspectedQty,
       defectQty: op.defectQty,
-      defectRate: op.inspectedQty > 0 ? op.defectQty / op.inspectedQty : 0,
+      defectRate: rate(op.defectQty, op.inspectedQty),
     }))
     .sort((a, b) => a.seq - b.seq)
 
   return {
     summary: {
-      inspectionCount: sliced.length,
-      inspectedQty: inspectedQtySum,
-      passQty: passQtySum,
-      failQty: failQtySum,
-      defectQty: defectQtySum,
-      defectRate,
+      inspectionCount: agg.summary.inspectionCount,
+      inspectedQty: agg.summary.inspectedQty,
+      passQty: agg.summary.passQty,
+      failQty: agg.summary.failQty,
+      defectQty: agg.summary.defectQty,
+      defectRate: rate(agg.summary.defectQty, agg.summary.inspectedQty),
     },
     daily,
     byType,

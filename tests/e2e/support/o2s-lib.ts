@@ -8,7 +8,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { PrismaClient } from "@prisma/client"
 import { E2E_BASE } from "../guard"
-import { buildActionMap, type ActionInfo } from "./perm-lib"
+import { buildActionMap, resolveDigestMessage, type ActionInfo } from "./perm-lib"
 import { DAEWON_ALLOWED_ROUTES } from "../../../src/lib/auth/daewon-scope"
 
 export const DATA_FILE = path.join(process.cwd(), "test-results/e2e/o2s-data.json")
@@ -62,7 +62,13 @@ export async function call(cookie: string | null, a: ActionInfo, args: unknown[]
   const pages = a.pages.map(toPath)
   // 대원정밀 구축 범위 밖 경로로 비개발자 POST 를 보내면 개발 서버가 멈추므로(S-05) 범위 안(또는 /pop·/login) 경로를 우선 사용한다
   const inScope = (p: string) => p === "/login" || p.startsWith("/pop") || DAEWON_ALLOWED_ROUTES.some((r) => p === r || p.startsWith(r + "/"))
-  const pagePath = opts.pagePath ?? pages.find((p) => !p.includes("[") && inScope(p)) ?? pages.find((p) => !p.includes("[")) ?? pages[0]
+  // 세션 쿠키가 없는 호출은 /app 보호 경로로 가면 로그인으로 307 되돌아가므로(공개 액션인 popLogin 등 실패의 원인), 공개 경로(/pop·/login)를 먼저 고른다
+  const publicPage = (p: string) => p === "/login" || p.startsWith("/pop")
+  const pagePath = opts.pagePath
+    ?? (cookie ? undefined : pages.find((p) => !p.includes("[") && publicPage(p)))
+    ?? pages.find((p) => !p.includes("[") && inScope(p))
+    ?? pages.find((p) => !p.includes("["))
+    ?? pages[0]
   const headers: Record<string, string> = { "next-action": a.id, "content-type": "text/plain;charset=UTF-8", accept: "text/x-component" }
   if (cookie) headers.cookie = cookie
   const r = await fetch(`${E2E_BASE}${pagePath}`, { method: "POST", headers, body: JSON.stringify(args), redirect: "manual", signal: AbortSignal.timeout(110_000) })
@@ -72,6 +78,9 @@ export async function call(cookie: string | null, a: ActionInfo, args: unknown[]
   if (err) {
     let msg = err[1].slice(0, 300)
     try { msg = (JSON.parse(err[1]) as { message?: string }).message ?? msg } catch { /* raw */ }
+    // 프로덕션 빌드는 서버 예외 메시지를 가리고 digest 만 보낸다 → 서버 에러 로그에서 같은 digest 의 실제 메시지를 찾는다
+    const digest = /"digest":"(\d+)"/.exec(err[1])?.[1]
+    if (digest) msg = resolveDigestMessage(digest) ?? msg
     return { status: r.status, ok: false, value: null, error: msg, raw, setCookie }
   }
   if (r.status >= 300) return { status: r.status, ok: false, value: null, error: `HTTP ${r.status}${r.headers.get("location") ? ` → ${r.headers.get("location")}` : ""}`, raw: raw.slice(0, 300), setCookie }

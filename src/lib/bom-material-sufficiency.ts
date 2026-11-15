@@ -1,7 +1,11 @@
 import type { Prisma, TransactionType } from "@prisma/client"
+import { requiredScaledByItem } from "./material-issue/issue-quantity"
+import { QUANTITY_SCALE, fromScaledQuantity, toScaledQuantity } from "./quantity-scale"
 
 const QTY_PRECISION = 6
 const QTY_FACTOR = 10 ** QTY_PRECISION
+const ZERO_SCALED = BigInt(0)
+const SCALE_BIGINT = BigInt(QUANTITY_SCALE)
 
 type MaterialSufficiencyClient = Pick<
   Prisma.TransactionClient,
@@ -74,9 +78,16 @@ function roundQty(value: number): number {
   return Math.round(value * QTY_FACTOR) / QTY_FACTOR
 }
 
-function floorQty(value: number): number {
-  if (!Number.isFinite(value)) return 0
-  return Math.floor((value + Number.EPSILON) * QTY_FACTOR) / QTY_FACTOR
+function toScaled(value: number): bigint {
+  return toScaledQuantity(roundQty(value)) ?? ZERO_SCALED
+}
+
+// 출고량 ÷ 단위소요를 소수점 6자리 정수(bigint)로 나눠 내림한다.
+// number 나눗셈은 77.25 ÷ 2.575 = 29.999999999999996 처럼 정확히 나누어떨어지는 값도 아래로 틀어진다.
+function producibleFromIssued(issuedQty: number, perUnitRequirement: number): number {
+  const perUnitScaled = toScaled(perUnitRequirement)
+  if (perUnitScaled <= ZERO_SCALED) return 0
+  return fromScaledQuantity((toScaled(issuedQty) * SCALE_BIGINT) / perUnitScaled)
 }
 
 function positiveQty(value: number): number {
@@ -133,14 +144,30 @@ export function calculateBomMaterialSufficiency(
   const producedQty = positiveQty(input.producedQty)
   const remainingPlanQty = positiveQty(plannedQty - producedQty)
 
+  // 필요량은 자재출고 한도(issue-quantity)와 같은 식으로 계산한다. 출고 화면이 허용한 필요량을 다 출고했으면
+  // 단위소요 반올림 차이와 관계없이 계획수량 전체를 생산할 수 있어야 출고 한도와 실적 한도가 충돌하지 않는다.
+  const requiredScaledMap = requiredScaledByItem(
+    input.requirements
+      .filter((requirement) => roundQty(requirement.qtyPer * (1 + requirement.scrapRate)) > 0)
+      .map((requirement) => ({
+        componentItemId: requirement.componentItemId,
+        qtyPer: requirement.qtyPer,
+        scrapRate: requirement.scrapRate,
+      })),
+    plannedQty
+  )
+
   const requirements = Array.from(requirementMap.values()).map((requirement) => {
     const issuedQty = positiveQty(issuedMap.get(requirement.itemId) ?? 0)
-    const requiredQty = roundQty(plannedQty * requirement.perUnitRequirement)
+    const requiredScaled = requiredScaledMap.get(requirement.itemId) ?? ZERO_SCALED
+    const requiredQty = fromScaledQuantity(requiredScaled)
+    const fullyIssued = toScaled(issuedQty) >= requiredScaled
+    const producibleQty = producibleFromIssued(issuedQty, requirement.perUnitRequirement)
     return {
       ...requirement,
       requiredQty,
       issuedQty,
-      producibleQty: floorQty(issuedQty / requirement.perUnitRequirement),
+      producibleQty: fullyIssued ? Math.max(producibleQty, plannedQty) : producibleQty,
     }
   })
 

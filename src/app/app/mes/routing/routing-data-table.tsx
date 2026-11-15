@@ -13,6 +13,7 @@ import { RoutingExcelUploadDialog } from "./routing-excel-upload-dialog"
 import { downloadRoutingTemplate, downloadRoutingData } from "./routing-excel-download"
 import { getRoutingExportData } from "@/lib/actions/routing-excel.actions"
 import { deleteRouting, RoutingWithDetails } from "@/lib/actions/routing.actions"
+import { isActionFailure } from "@/lib/action-result"
 import { useUserRole } from "@/lib/contexts/user-role-context"
 
 interface WorkCenter {
@@ -69,10 +70,15 @@ export function RoutingDataTable({
   const handleDelete = async (routing: RoutingWithDetails) => {
     if (!confirm(`'${routing.name} (v${routing.version})' 라우팅을 삭제하시겠습니까?`)) return
     try {
-      await deleteRouting(routing.id)
+      const result = await deleteRouting(routing.id)
+      if (isActionFailure(result)) {
+        alert(result.error)
+        return
+      }
       router.refresh()
     } catch (error) {
       console.error("삭제 실패:", error)
+      alert("삭제 중 오류가 발생했습니다.")
     }
   }
 

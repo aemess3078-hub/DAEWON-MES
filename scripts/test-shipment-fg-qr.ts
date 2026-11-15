@@ -353,19 +353,19 @@ async function main() {
 
   // C1 기존 수동 선택/등록/확정/삭제 코드는 QR 작업 이전과 동일(지문)
   const block = (src: string, from: string, to: string | null) => src.slice(src.indexOf(from), to === null ? src.length : src.indexOf(to))
-  // [갱신] createShipment/confirmShipment 지문: 수주 상태 전이 규칙(efde4e0, N-18)으로 '잠금 후 수주 출하 가능 상태 재확인'이 추가됐다.
-  //        QR 작업과 무관한 의도된 변경이며, 나머지 지문(available/delete/UI)은 그대로다.
+  // [갱신 2026-11-12] 출하예정 예약 한도 정합화: 화면·서버가 PLANNED 예약을 함께 빼는 공용 헬퍼(shipment-plan-quantities)를 쓰고,
+  //   LOT 목록에 재고/기존 예약 필드가 추가됐다. 의도된 변경이며 confirm·delete·schema·handleLotChange·salesOrderAndWarehouse 지문은 그대로다.
   const FP = {
-    available: "67037726927f87b5",
-    create: "67fa77870b7200f1",
+    available: "f1aa0bf187617496",
+    create: "633b9f92d7975960",
     confirm: "6ab25382cd5000b3",
     delete: "6b607dff06f95f6e",
     schema: "ffc372fca1b87ff7",
     handleLotChange: "94f14ed1784010c9",
-    onSubmit: "622bbefe737a8d32",
-    lotLoadAndReset: "7fe9b6546006dc54",
+    onSubmit: "1b683cea39f1fe05",
+    lotLoadAndReset: "06b3c2c715168128",
     salesOrderAndWarehouse: "c796b348656a01bf",
-    manualSelect: "d3ae4cbabab0d738",
+    manualSelect: "911ea7e76d64fd86",
   }
   eq(fingerprint(block(actions, "export async function getAvailableFinishedGoodsLots(", "export async function generateShipmentNo(")), FP.available, "C1a 수동 LOT 목록 조회(getAvailableFinishedGoodsLots)는 QR 작업 이전과 동일")
   eq(fingerprint(block(actions, "export async function createShipment(", "export async function confirmShipment(")), FP.create, "C1b 출하예정 등록(createShipment: LOT·재고·예약·품질 검증)은 QR 작업 이전과 동일")
@@ -407,7 +407,7 @@ async function main() {
   //  - Server Action 은 읽기 전용 조회라도 POST 로 전달되므로 "POST 없음"이 아니라 "어떤 액션을 부를 수 있는가"를 소스로 확인한다.
   const actionImports = (src: string) => Array.from(src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"@\/lib\/actions\/([\w.-]+)"/g)).flatMap((m) => m[1].split(",").map((n) => n.trim()).filter((n) => n && !n.startsWith("type ")).map((n) => `${m[2]}:${n}`))
   eq(actionImports(section), ["shipment-lot-lookup.actions:lookupLotForShipment"], "C3j 스캔 컴포넌트가 호출할 수 있는 Server Action 은 읽기 전용 조회(lookupLotForShipment) 하나뿐 — 출하 등록·확정·삭제·재고 액션을 import 하지 않는다")
-  eq(actionImports(sheet), ["shipment.actions:createShipment", "shipment.actions:getAvailableFinishedGoodsLots"], "C3k 출하 시트가 import 하는 Server Action 은 QR 작업 이전과 같다(등록·수동 LOT 목록) — QR 용으로 추가된 액션 import 없음")
+  eq(actionImports(sheet), ["shipment.actions:submitShipmentPlan", "shipment.actions:getAvailableFinishedGoodsLots"], "C3k 출하 시트가 import 하는 Server Action 은 QR 작업 이전과 같다(출하예정 등록 래퍼 submitShipmentPlan·수동 LOT 목록) — QR 용으로 추가된 액션 import 없음")
   ok(!/createShipment|confirmShipment|deleteShipment|lookupLotForShipment/.test(stripComments(handler)), "C3l handleScannedLot 은 어떤 Server Action 도 직접 호출하지 않는다")
 
   // C3m 실제 react-hook-form 의 동작 가정 확인: handleScannedLot 이 쓰는 호출 순서(getValues → setValue(배열 행 추가) → getValues → setValue(행 수량))가

@@ -146,6 +146,94 @@ function calc(overrides: Partial<Parameters<typeof calculateBomMaterialSufficien
   equal(s.maxAdditionalProductionQty, 60, "BOM without required components keeps planned remaining as cap")
 }
 
+// ─── ISSUE-01: 부동소수점 나눗셈 / 출고 한도와 실적 한도의 반올림 기준 차이 ───
+{
+  const req = [{ componentItemId: "mat-a", componentCode: "MAT-A", componentName: "자재 A", qtyPer: 2.5, scrapRate: 0.03 }]
+  const s = calc({ plannedQty: 30, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: 77.25 }] })
+  equal(s.requirements[0].perUnitRequirement, 2.575, "I01-1 단위소요 2.5 × 1.03 = 2.575")
+  equal(s.materialProducibleQty, 30, "I01-2 77.25 ÷ 2.575 = 정확히 30 (29.999999 아님)")
+  assertProductionQuantityWithinMaterialLimit(s, 30)
+  ok(true, "I01-3 필요량만큼 출고하면 계획 30 EA 전량 실적 등록 허용")
+  assert.throws(() => assertProductionQuantityWithinMaterialLimit(s, 30.000001), /최대 30 EA/)
+  ok(true, "I01-4 계획을 넘는 초과 실적(30.000001)은 거부")
+  equal(s.shortages.length, 0, "I01-5 필요량 전량 출고 시 부족 목록 없음")
+}
+
+{
+  const req = [{ componentItemId: "mat-a", componentCode: "MAT-A", componentName: "자재 A", qtyPer: 2.575, scrapRate: 0 }]
+  const s = calc({ plannedQty: 30, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: 77.249999 }] })
+  equal(s.materialProducibleQty, 29.999999, "I01-6 출고가 0.000001 모자라면 생산가능량은 29.999999로 제한(정확한 내림)")
+  assert.throws(() => assertProductionQuantityWithinMaterialLimit(s, 30), /최대 29\.999999 EA/)
+  ok(true, "I01-7 실제 자재 부족 시 기존 제한 유지")
+  equal(s.shortages.length, 1, "I01-8 실제 부족은 부족 목록에 남음")
+}
+
+{
+  const req = [{ componentItemId: "mat-a", componentCode: "MAT-A", componentName: "자재 A", qtyPer: 2.575, scrapRate: 0 }]
+  const s = calc({ plannedQty: 30, producedQty: 29, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: 77.25 }] })
+  equal(s.maxAdditionalProductionQty, 1, "I01-9 29 EA 등록 후 마지막 1 EA 등록 가능")
+  assert.throws(() => assertProductionQuantityWithinMaterialLimit(s, 2), /최대 1 EA/)
+  ok(true, "I01-10 누적 실적이 계획을 넘지 않음")
+}
+
+{
+  const req = [{ componentItemId: "mat-a", componentCode: "MAT-A", componentName: "자재 A", qtyPer: 2.575, scrapRate: 0 }]
+  const s = calc({ plannedQty: 30, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: 51.5 }] })
+  equal(s.materialProducibleQty, 20, "I01-11 부분 출고 51.5 ÷ 2.575 = 정확히 20")
+}
+
+{
+  // 출고 필요량은 소수 셋째 자리 반올림(자재출고 화면 기준): 3 × 0.33335 = 1.00005 → 1.000
+  const req = [{ componentItemId: "mat-a", componentCode: "MAT-A", componentName: "자재 A", qtyPer: 0.33335, scrapRate: 0 }]
+  const full = calc({ plannedQty: 3, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: 1 }] })
+  equal(full.requirements[0].requiredQty, 1, "I01-12 필요량은 자재출고 한도와 같은 값(1.000)")
+  equal(full.maxAdditionalProductionQty, 3, "I01-13 출고 화면 필요량을 다 출고하면 반올림 차이와 관계없이 계획 전량 생산 가능")
+  const short = calc({ plannedQty: 3, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: 0.9 }] })
+  assert.throws(() => assertProductionQuantityWithinMaterialLimit(short, 3), /최대 2\.699865 EA/)
+  ok(true, "I01-14 필요량 미달 출고는 단위소요 기준으로 제한")
+}
+
+{
+  const req = [
+    { componentItemId: "mat-a", componentCode: "MAT-A", componentName: "자재 A", qtyPer: 2.575, scrapRate: 0 },
+    { componentItemId: "mat-b", componentCode: "MAT-B", componentName: "자재 B", qtyPer: 0.7, scrapRate: 0.1 },
+  ]
+  const s = calc({
+    plannedQty: 30,
+    requirements: req,
+    issuedTransactions: [
+      { itemId: "mat-a", txType: "ISSUE", qty: 77.25 },
+      { itemId: "mat-b", txType: "ISSUE", qty: 15.4 },
+    ],
+  })
+  equal(s.materialProducibleQty, 20, "I01-15 A 전량 출고 + B 부분 출고(15.4 ÷ 0.77 = 20)는 B 기준으로 제한")
+}
+
+{
+  // 경계값 전수: 자재출고 화면이 허용하는 필요량을 정확히 출고하면 항상 계획 전량, 0.001 모자라면 항상 계획 미만
+  const qtyPers = [0.1, 0.2, 0.3, 0.7, 1.1, 2.5, 2.575, 0.125, 3.3, 0.015, 0.33335, 1.234567]
+  const scrapRates = [0, 0.01, 0.03, 0.05, 0.1, 0.0375]
+  let fullOk = 0
+  let shortOk = 0
+  for (const qtyPer of qtyPers) {
+    for (const scrapRate of scrapRates) {
+      for (let planned = 1; planned <= 200; planned += 1) {
+        const required = Math.round(qtyPer * planned * (1 + scrapRate) * 1000) / 1000
+        if (required <= 0.001) continue
+        const req = [{ componentItemId: "mat-a", componentCode: "MAT-A", componentName: "자재 A", qtyPer, scrapRate }]
+        const full = calc({ plannedQty: planned, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: required }] })
+        assert.equal(full.maxAdditionalProductionQty, planned, `full issue qtyPer=${qtyPer} scrap=${scrapRate} planned=${planned}`)
+        fullOk += 1
+        const shortIssued = Math.round((required - 0.001) * 1000) / 1000
+        const short = calc({ plannedQty: planned, requirements: req, issuedTransactions: [{ itemId: "mat-a", txType: "ISSUE", qty: shortIssued }] })
+        assert.ok(short.maxAdditionalProductionQty < planned, `short issue qtyPer=${qtyPer} scrap=${scrapRate} planned=${planned}`)
+        shortOk += 1
+      }
+    }
+  }
+  ok(fullOk > 10000 && shortOk === fullOk, `I01-16 경계값 ${fullOk}조합: 필요량 출고=계획 전량, 0.001 부족=계획 미만`)
+}
+
 const helper = read("src/lib/bom-material-sufficiency.ts")
 const pop = read("src/lib/actions/pop.actions.ts")
 const materialIssue = read("src/lib/actions/material-issue.actions.ts")

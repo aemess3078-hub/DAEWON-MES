@@ -129,7 +129,7 @@ export type MrpRunSnapshot = {
   version: typeof MRP_SNAPSHOT_VERSION
   generatedAt: string
   meta: {
-    runType: "ORDER_MRP"
+    runType: "ORDER_MRP" | "PLAN_MRP"
     mode: "NORMAL"
     baseDate: string
     from: string | null
@@ -503,6 +503,124 @@ export function buildMrpRunSnapshot(args: BuildSnapshotArgs): BuiltMrpRun {
         orderByDate: r.orderByDate,
         payload: {
           autoSuggest: AUTO_SUGGEST_KINDS.includes(r.kind),
+          coverageStatus: r.coverageStatus,
+          remainingRawNeed: r.remainingRawNeed,
+          moq: r.moq,
+          orderMultiple: r.orderMultiple,
+          leadTimeDays: r.leadTimeDays,
+          orderTiming: r.orderTiming,
+          supplierReason: r.supplierReason,
+        },
+      }
+    }),
+    sourceHash,
+    resultHash,
+    byteSize,
+  }
+}
+
+/**
+ * 생산계획 MRP 실행 Snapshot (발주 생성 근거용, 경량).
+ * 수주기준 Snapshot 과 같은 형태(MrpRunSnapshot)를 쓰되 자재 시간축/입고예정 상세는 없다(생산계획 MRP 는 시간축 계산이 없음).
+ * 제안 행(rawNeed·DRAFT Coverage·공급업체)은 동일하게 저장되어 중복 발주 방지와 이력 조회에 같은 규칙이 적용된다.
+ */
+export function buildPlanMrpRunSnapshot(args: {
+  rows: readonly PurchaseSuggestionLine[]
+  planId: string
+  planNo: string
+  baseDate: string
+  planStartDate: string
+  planEndDate: string
+  materialCount: number
+  generatedAt: Date
+}): BuiltMrpRun {
+  const { rows } = args
+  const snapshot: MrpRunSnapshot = {
+    version: MRP_SNAPSHOT_VERSION,
+    generatedAt: args.generatedAt.toISOString(),
+    meta: {
+      runType: "PLAN_MRP",
+      mode: "NORMAL",
+      baseDate: args.baseDate,
+      from: args.planStartDate,
+      to: args.planEndDate,
+      includeDraft: false,
+      includeScheduledReceipts: true,
+      semiFinishedNetting: true,
+    },
+    summary: {
+      demandLineCount: 0,
+      requiredMaterialCount: args.materialCount,
+      shortageMaterialCount: rows.length,
+      temporaryShortageMaterialCount: 0,
+      scheduledReceiptMaterialCount: rows.filter((r) => r.scheduledReceiptQty > 0).length,
+      overdueReceiptCount: 0,
+      purchaseNeededCount: rows.length,
+      safetyStockCount: 0,
+      coveredCount: rows.filter((r) => r.coverageStatus === "COVERED").length,
+      partialCoverageCount: rows.filter((r) => r.coverageStatus === "PARTIAL").length,
+      bomIssueLineCount: 0,
+      warningCount: 0,
+      semiNettedMaterialCount: 0,
+    },
+    scheduledReceipts: { appliedReceiptCount: 0, appliedMaterialCount: 0, excludedOutsourcingCount: 0, overdue: [] },
+    warnings: [{ code: "PLAN_MRP", severity: "INFO", message: `생산계획 ${args.planNo} 기준 MRP` }],
+    excludedLines: [],
+    stepColumns: SNAPSHOT_STEP_COLUMNS,
+    receiptColumns: SNAPSHOT_RECEIPT_COLUMNS,
+    materials: [],
+    suggestions: rows.map(buildSuggestion),
+    compacted: false,
+  }
+  const byteSize = Buffer.byteLength(JSON.stringify(snapshot), "utf8")
+  if (byteSize > MAX_SNAPSHOT_BYTES) throw new SnapshotTooLargeError(byteSize, MAX_SNAPSHOT_BYTES)
+  const { generatedAt: _ignored, ...resultBasis } = snapshot
+  void _ignored
+  const sourceHash = sha256Hex(
+    canonicalJson({
+      meta: snapshot.meta,
+      planId: args.planId,
+      policy: snapshot.suggestions.map((g) => ({
+        itemId: g.itemId,
+        totalRequirement: g.totalRequirement,
+        openingStock: g.openingStock,
+        scheduledReceiptQty: g.scheduledReceiptQty,
+        suppliers: g.suppliers,
+        draftCoverageQty: g.draftCoverageQty,
+      })),
+    })
+  )
+  const resultHash = sha256Hex(canonicalJson(resultBasis))
+  return {
+    snapshot,
+    columns: {
+      baseDate: args.baseDate,
+      fromDate: args.planStartDate,
+      toDate: args.planEndDate,
+      includeDraft: false,
+      demandLineCount: 0,
+      materialCount: args.materialCount,
+      shortageMaterialCount: rows.length,
+      purchaseNeededCount: rows.length,
+      warningCount: 0,
+    },
+    suggestionRows: rows.map((r) => {
+      const supplier = r.recommendedSupplierId ? r.suppliers.find((s) => s.supplierId === r.recommendedSupplierId) : undefined
+      return {
+        itemId: r.componentItemId,
+        itemCode: r.code,
+        itemName: r.name,
+        kind: r.kind,
+        rawNeed: r6(r.rawSuggestedQty),
+        suggestedQty: r6(r.suggestedQty),
+        draftCoverageQty: r6(r.draftCoverageQty),
+        additionalQty: r6(r.additionalQty),
+        supplierId: r.recommendedSupplierId,
+        supplierName: supplier?.supplierName ?? null,
+        targetReceiptDate: r.requiredDate,
+        orderByDate: r.orderByDate,
+        payload: {
+          autoSuggest: true,
           coverageStatus: r.coverageStatus,
           remainingRawNeed: r.remainingRawNeed,
           moq: r.moq,

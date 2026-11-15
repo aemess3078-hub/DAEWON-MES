@@ -55,3 +55,6 @@ tools/ncwatch-agent/node_modules/
 tools/ncwatch-agent/logs/
 tools/ncwatch-agent/state/
 tools/ncwatch-agent/dist/
+
+# 로컬 DB 백업(계정정보 포함 가능) — 커밋 금지
+/backup/

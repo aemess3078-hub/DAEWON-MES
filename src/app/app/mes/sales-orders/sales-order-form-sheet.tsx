@@ -27,10 +27,12 @@ import {
   createSalesOrder,
   updateSalesOrder,
   generateSalesOrderNo,
+  findSalesOrderPoDuplicates,
 } from "@/lib/actions/sales-order.actions"
 import { SalesOrderStatus } from "@prisma/client"
 import type { SalesOrderRow } from "./columns"
 import { NEW_SALES_ORDER_STATUS, selectableSalesOrderStatuses, type SalesOrderStatusValue } from "@/lib/sales-order-status"
+import { deriveAutoUnitPrice, getAmountMismatch } from "@/lib/sales-order-unit-price"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -64,6 +66,14 @@ function todayString(): string {
   return new Date().toISOString().split("T")[0]
 }
 
+function formatWon(value: number): string {
+  return Math.round(value).toLocaleString("ko-KR")
+}
+
+function formatQty(value: number): string {
+  return value.toLocaleString("ko-KR", { maximumFractionDigits: 6 })
+}
+
 const DEFAULT_VALUES: SalesOrderFormValues = {
   customerId: "",
   orderDate: todayString(),
@@ -73,6 +83,7 @@ const DEFAULT_VALUES: SalesOrderFormValues = {
   totalAmount: undefined,
   currency: "KRW",
   note: "",
+  customerPoNo: "",
   items: [],
 }
 
@@ -90,6 +101,8 @@ export function SalesOrderFormSheet({
 }: SalesOrderFormSheetProps) {
   const [isLoading, setIsLoading] = useState(false)
   const router = useRouter()
+  // 품목 행별 단가 수동 여부 (인덱스 기준). true 행은 총금액 자동 계산으로 덮어쓰지 않는다.
+  const [manualPrice, setManualPrice] = useState<boolean[]>([])
 
   const form = useForm<SalesOrderFormValues>({
     resolver: zodResolver(salesOrderFormSchema),
@@ -106,6 +119,7 @@ export function SalesOrderFormSheet({
   useEffect(() => {
     if (mode === "create" && open) {
       form.reset({ ...DEFAULT_VALUES, orderDate: todayString() })
+      setManualPrice([])
       generateSalesOrderNo(tenantId).catch(console.error)
     }
   }, [mode, open, tenantId]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -114,6 +128,8 @@ export function SalesOrderFormSheet({
 
   useEffect(() => {
     if (mode === "edit" && salesOrder && open) {
+      // 저장된 단가는 수동 값으로 간주한다 — 수정 화면을 열었다고 기존 단가를 재계산하지 않는다
+      setManualPrice(salesOrder.items.map(() => true))
       form.reset({
         customerId: salesOrder.customer.id,
         orderDate: new Date(salesOrder.orderDate).toISOString().split("T")[0],
@@ -122,6 +138,7 @@ export function SalesOrderFormSheet({
         totalAmount: salesOrder.totalAmount ? Number(salesOrder.totalAmount) : undefined,
         currency: salesOrder.currency,
         note: salesOrder.note ?? "",
+        customerPoNo: salesOrder.customerPoNo ?? "",
         items: salesOrder.items.map((i) => ({
           itemId: (i as { itemId?: string; item?: { id: string } }).itemId
             ?? (i as { item?: { id: string } }).item?.id
@@ -162,9 +179,109 @@ export function SalesOrderFormSheet({
   const itemEditBlockedReason = mode === "edit" && salesOrder ? salesOrder.itemEditBlockedReason ?? null : null
   const isItemEditDisabled = itemEditBlockedReason !== null
 
+  // ─── 총금액 ↔ 단가 자동 계산 ────────────────────────────────────────────────
+  // 규칙은 src/lib/sales-order-unit-price.ts 참고. 수동 단가는 덮어쓰지 않는다.
+
+  const totalAmountValue = form.watch("totalAmount")
+  const currencyValue = form.watch("currency")
+  const itemsValue = form.watch("items")
+  const itemsForCalc = (itemsValue ?? []).map((row, index) => ({
+    qty: row.qty,
+    unitPrice: row.unitPrice,
+    manual: !!manualPrice[index],
+  }))
+  const autoPrice = deriveAutoUnitPrice(totalAmountValue, itemsForCalc)
+  const amountMismatch = getAmountMismatch(totalAmountValue, itemsForCalc, currencyValue)
+
+  // 단가 계산에 영향을 주는 값(총금액·수량·단가·수동 여부)이 바뀔 때만 자동 단가를 갱신한다
+  const calcKey = `${totalAmountValue ?? ""}#${itemsForCalc
+    .map((r) => `${r.qty ?? ""}|${r.unitPrice ?? ""}|${r.manual ? 1 : 0}`)
+    .join(",")}`
+
+  useEffect(() => {
+    const current = form.getValues("items") ?? []
+    const rows = current.map((row, index) => ({
+      qty: row.qty,
+      unitPrice: row.unitPrice,
+      manual: !!manualPrice[index],
+    }))
+    const result = deriveAutoUnitPrice(form.getValues("totalAmount"), rows)
+    if (!result) return
+    if (current[result.rowIndex]?.unitPrice === result.unitPrice) return
+    form.setValue(`items.${result.rowIndex}.unitPrice`, result.unitPrice, { shouldDirty: true })
+  }, [calcKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function markPriceManual(index: number) {
+    setManualPrice((prev) => {
+      const next = [...prev]
+      for (let i = 0; i < index; i++) next[i] = next[i] ?? false
+      next[index] = true
+      return next
+    })
+  }
+
+  function removeItemRow(index: number) {
+    remove(index)
+    setManualPrice((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  // 수동 단가를 자동 계산으로 되돌린다 (미리보기가 가능한 행에서만 버튼 노출)
+  function revertPriceToAuto(index: number) {
+    setManualPrice((prev) => {
+      const next = [...prev]
+      next[index] = false
+      return next
+    })
+  }
+
+  /** 행 index 를 자동 대상으로 가정했을 때의 계산 결과 (되돌리기 가능 여부 판단용) */
+  function previewAutoPriceFor(index: number) {
+    const rows = itemsForCalc.map((r, i) => (i === index ? { ...r, manual: false } : r))
+    const result = deriveAutoUnitPrice(totalAmountValue, rows)
+    return result && result.rowIndex === index ? result : null
+  }
+
   // ─── 저장 핸들러 ────────────────────────────────────────────────────────────
 
   async function onSubmit(values: SalesOrderFormValues) {
+    // 총금액과 품목 금액 합계가 다르면 조용히 저장하지 않고 한 번 확인받는다 (총금액은 임의로 바꾸지 않는다).
+    // 단, KRW 자동 계산 반올림으로 생긴 1원 이하 차이는 화면 안내만 하고 확인창은 생략한다.
+    const mismatch = getAmountMismatch(
+      values.totalAmount,
+      values.items.map((row, index) => ({ ...row, manual: !!manualPrice[index] })),
+      values.currency
+    )
+    if (
+      mismatch &&
+      !mismatch.roundingOnly &&
+      !window.confirm(
+        `총금액(${formatWon(values.totalAmount ?? 0)}원)과 품목 금액 합계(${formatWon(mismatch.lineSum)}원)가 일치하지 않습니다.\n이 상태로 저장하시겠습니까?`
+      )
+    ) {
+      return
+    }
+
+    // 같은 거래처의 같은 발주번호로 등록된 수주가 있으면 한 번 확인받는다(분할 납품 등 정상 중복은 확인 후 저장할 수 있다).
+    const poNo = (values.customerPoNo ?? "").trim()
+    if (poNo) {
+      try {
+        const dups = await findSalesOrderPoDuplicates(values.customerId, poNo, mode === "edit" ? salesOrder?.id : undefined)
+        if (
+          dups.length > 0 &&
+          !window.confirm(
+            `같은 거래처의 발주번호 '${poNo}'로 이미 등록된 수주가 있습니다.\n\n${dups
+              .map((d) => `· ${d.orderNo} (수주일 ${d.orderDate}, 납기 ${d.deliveryDate}) ${d.itemSummary}`)
+              .join("\n")}\n\n그래도 저장하시겠습니까?`
+          )
+        ) {
+          return
+        }
+      } catch (error) {
+        // 중복 안내 조회가 실패해도 저장 자체는 막지 않는다(서버 저장 검증은 그대로 적용된다)
+        console.error("발주번호 중복 조회 실패:", error)
+      }
+    }
+
     setIsLoading(true)
     try {
       const payload = {
@@ -174,6 +291,7 @@ export function SalesOrderFormSheet({
         totalAmount: values.totalAmount,
         currency: values.currency,
         note: values.note,
+        customerPoNo: poNo || null,
         items: values.items.map((item) => ({
           itemId: item.itemId,
           qty: item.qty,
@@ -373,6 +491,38 @@ export function SalesOrderFormSheet({
                     value={field.value}
                     onChange={field.onChange}
                   />
+                  {amountMismatch && !amountMismatch.roundingOnly && (
+                    <p className="text-[13px] text-amber-600" data-testid="so-amount-mismatch">
+                      품목 금액 합계 {formatWon(amountMismatch.lineSum)}원과 총금액이 일치하지 않습니다.
+                      {amountMismatch.difference > 0
+                        ? ` 차이 ${formatWon(amountMismatch.difference)}원 (합계가 부족)`
+                        : ` 차이 ${formatWon(-amountMismatch.difference)}원 (합계가 초과)`}
+                    </p>
+                  )}
+                  {amountMismatch && amountMismatch.roundingOnly && (
+                    <p className="text-[13px] text-muted-foreground" data-testid="so-amount-rounding">
+                      자동 계산 단가의 원 단위 반올림으로 {formatWon(Math.abs(amountMismatch.difference))}원 차이가 있습니다. 저장 시 확인을 생략합니다.
+                    </p>
+                  )}
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* 거래처 발주번호 */}
+            <FormField
+              control={form.control}
+              name="customerPoNo"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>거래처 발주번호</FormLabel>
+                  <Input
+                    placeholder="고객사 발주번호 (선택)"
+                    maxLength={100}
+                    data-testid="so-customer-po-no"
+                    {...field}
+                    value={field.value ?? ""}
+                  />
                   <FormMessage />
                 </FormItem>
               )}
@@ -409,7 +559,8 @@ export function SalesOrderFormSheet({
                   onClick={() =>
                     append({
                       itemId: "",
-                      qty: 1,
+                      // 수량은 기본값 없이 비워 둔다 (입력 전에는 단가 자동 계산·저장 모두 막힘)
+                      qty: undefined as unknown as number,
                       unitPrice: undefined,
                       deliveryDate: "",
                       note: "",
@@ -500,8 +651,32 @@ export function SalesOrderFormSheet({
                           className="h-8 text-right text-[14px] tabular-nums"
                           disabled={isItemEditDisabled}
                           value={f.value}
-                          onChange={f.onChange}
+                          onChange={(v) => {
+                            f.onChange(v)
+                            markPriceManual(index)
+                          }}
                         />
+                        {!isItemEditDisabled && totalAmountValue && !itemsValue?.[index]?.qty && (
+                          <p className="mt-1 text-[12px] leading-snug text-muted-foreground">수량을 입력하면 단가가 계산됩니다</p>
+                        )}
+                        {autoPrice?.rowIndex === index && (
+                          <p className="mt-1 text-[12px] leading-snug text-muted-foreground" data-testid="so-price-auto">
+                            자동 계산: {formatWon(autoPrice.basisAmount)}원
+                            {autoPrice.basis === "remainder" ? " (잔여)" : ""} ÷ {formatQty(autoPrice.qty)}개 = {formatWon(autoPrice.unitPrice)}원
+                          </p>
+                        )}
+                        {manualPrice[index] && !isItemEditDisabled && previewAutoPriceFor(index) && (
+                          <div className="mt-1 flex items-center gap-1 text-[12px] text-muted-foreground" data-testid="so-price-manual">
+                            <span>수동 입력</span>
+                            <button
+                              type="button"
+                              className="underline underline-offset-2 hover:text-foreground"
+                              onClick={() => revertPriceToAuto(index)}
+                            >
+                              자동 계산으로 되돌리기
+                            </button>
+                          </div>
+                        )}
                         <FormMessage className="text-[12px]" />
                       </FormItem>
                     )}
@@ -514,7 +689,7 @@ export function SalesOrderFormSheet({
                     size="icon"
                     className="h-8 w-8 text-muted-foreground hover:text-destructive"
                     disabled={isItemEditDisabled}
-                    onClick={() => remove(index)}
+                    onClick={() => removeItemRow(index)}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>

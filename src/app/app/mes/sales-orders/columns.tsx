@@ -20,6 +20,8 @@ export type SalesOrderRow = {
   id: string
   orderNo: string
   customer: { id: string; name: string }
+  /** 거래처 발주번호(없으면 null) */
+  customerPoNo?: string | null
   orderDate: Date | string
   deliveryDate: Date | string
   status: SalesOrderStatus
@@ -69,6 +71,14 @@ export function getColumns(
         >
           {row.original.orderNo}
         </button>
+      ),
+    },
+    {
+      id: "customerPoNo",
+      header: "거래처 발주번호",
+      accessorFn: (row) => row.customerPoNo ?? "",
+      cell: ({ row }) => (
+        <span className="font-mono text-[13px]">{row.original.customerPoNo || "—"}</span>
       ),
     },
     {

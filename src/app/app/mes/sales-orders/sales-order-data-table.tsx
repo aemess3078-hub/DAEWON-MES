@@ -2,13 +2,15 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import { Plus } from "lucide-react"
+import { Download, Plus, Upload } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { DataTable } from "@/components/common/data-table"
 import { getColumns, SalesOrderRow } from "./columns"
 import { SalesOrderFormSheet } from "./sales-order-form-sheet"
+import { SalesOrderExcelUploadDialog } from "./sales-order-excel-upload-dialog"
+import downloadSalesOrderTemplate from "./sales-order-excel-download"
 import { SalesOrderProcessDialog } from "./sales-order-process-dialog"
 import { SalesOrderDetailSheet } from "./sales-order-detail-sheet"
 import { SalesOrderFulfillmentPanel } from "./sales-order-fulfillment-panel"
@@ -41,6 +43,7 @@ export function SalesOrderDataTable({
   const canMutate = useUserRole() !== "VIEWER"
 
   const [formOpen, setFormOpen] = useState(false)
+  const [excelOpen, setExcelOpen] = useState(false)
   const [formMode, setFormMode] = useState<"create" | "edit">("create")
   const [editingOrder, setEditingOrder] = useState<SalesOrderRow | null>(null)
 
@@ -115,7 +118,7 @@ export function SalesOrderDataTable({
 
         <TabsContent value="orders" className="mt-4 space-y-4">
           {canMutate && (
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end gap-2">
               <Button
                 onClick={() => {
                   setEditingOrder(null)
@@ -125,6 +128,14 @@ export function SalesOrderDataTable({
               >
                 <Plus className="mr-2 h-4 w-4" />
                 수주 등록
+              </Button>
+              <Button variant="outline" onClick={() => setExcelOpen(true)}>
+                <Upload className="mr-2 h-4 w-4" />
+                엑셀 업로드
+              </Button>
+              <Button variant="outline" onClick={() => downloadSalesOrderTemplate()}>
+                <Download className="mr-2 h-4 w-4" />
+                엑셀 양식 다운로드
               </Button>
             </div>
           )}
@@ -153,6 +164,12 @@ export function SalesOrderDataTable({
         siteId={siteId}
         customers={customers}
         items={items}
+      />
+
+      <SalesOrderExcelUploadDialog
+        open={excelOpen}
+        onOpenChange={setExcelOpen}
+        siteId={siteId}
       />
 
       <SalesOrderProcessDialog

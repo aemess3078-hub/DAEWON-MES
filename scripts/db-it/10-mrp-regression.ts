@@ -70,13 +70,12 @@ async function main() {
   const runs = await act.run().listOrderMrpRuns({ page: 1, pageSize: 5 })
   check("M10", !!runs && ("rows" in (runs as object) || "runs" in (runs as object) || "items" in (runs as object) || "success" in (runs as object)), "MRP 실행이력 조회 정상")
 
-  // ── 발주서 생성(일반) ────────────────────────────────────────────────────────
+  // ── 구 발주 생성 진입점은 폐기됨(공급업체·중복 방지·멱등 없는 방식). 새 경로는 18-mrp-plan-purchase.ts 가 검증한다 ──
   const before = await prisma.purchaseOrderItem.count({ where: { itemId: fx.rmA.id } })
   const po = await act.mrp().createPurchaseOrdersFromMRP([{ itemId: fx.rmA.id, qty: 7 }], undefined, fx.site.id)
   const after = await prisma.purchaseOrderItem.count({ where: { itemId: fx.rmA.id } })
-  check("M11", po.success && after === before + 1 && !!po.orderNo, `발주서 생성 정상(${po.orderNo ?? po.error}, 품목 ZT5-RM-A 7)`, po)
-  const created = po.orderNo ? await prisma.purchaseOrder.findFirst({ where: { tenantId: TENANT_ID, orderNo: po.orderNo }, include: { items: true } }) : null
-  check("M12", created?.items.length === 1 && Number(created.items[0].qty) === 7 && created.items[0].itemId === fx.rmA.id, "생성된 발주서 내용 일치(품목·수량)")
+  check("M11", po.success === false && after === before, "구 발주 생성 진입점(createPurchaseOrdersFromMRP)은 발주를 만들지 않음(쓰기 0)", po)
+  check("M12", typeof po.error === "string" && /구매발주 생성/.test(po.error), "구 진입점은 새 화면('구매발주 생성')으로 안내")
 
   check("M13", aiCalls.length === 0, `MRP 전 과정에서 외부 AI(OpenAI 등) 호출 0건`, aiCalls)
   globalThis.fetch = realFetch

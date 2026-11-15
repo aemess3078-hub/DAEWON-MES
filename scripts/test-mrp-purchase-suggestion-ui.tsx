@@ -66,13 +66,20 @@ const edit = (over: Partial<SuggestionRowEdit> = {}): SuggestionRowEdit => ({
 })
 const render = (rows: PurchaseSuggestionRow[], edits: Record<string, SuggestionRowEdit>, priceVisible = true) =>
   renderToStaticMarkup(
-    <PurchaseSuggestionTable rows={rows} edits={edits} priceVisible={priceVisible} onChange={() => {}} onToggleAll={() => {}} />
+    <PurchaseSuggestionTable
+      rows={rows}
+      edits={edits}
+      priceVisible={priceVisible}
+      onChange={() => {}}
+      onToggleAll={() => {}}
+      defaultExpandedIds={rows.map((r) => r.componentItemId)}
+    />
   )
 
 // U1: 최종 부족 + 기본 공급업체 + 단가
 {
   const html = render([row({})], { r1: edit({ selected: true }) })
-  ok(html.includes("최종 부족"), "U1 상태: 최종 부족")
+  ok(html.includes('title="부족"'), "U1 상태: 부족")
   ok(html.includes("기본 공급업체"), "U1 추천 사유: 기본 공급업체")
   ok(html.includes("100 KRW"), "U1 선택 공급업체의 단가 표시")
   ok(html.includes('value="60"'), "U1 제안수량 입력 기본값")
@@ -97,7 +104,7 @@ const render = (rows: PurchaseSuggestionRow[], edits: Record<string, SuggestionR
   ok(html.includes("일시 결품"), "U2 상태: 일시 결품")
   ok(html.includes("납기 당김 / 긴급조달 검토"), "U2 검토 안내(납기 당김/긴급조달)")
   ok(html.includes("2026-10-15 입고로 해소"), "U2 회복일")
-  ok(html.includes("기본 0"), "U2 제안수량 기본 0 안내")
+  ok(html.includes("기본 발주수량 0"), "U2 발주수량 기본 0 안내")
   ok(html.includes('value=""'), "U2 수량 입력 비어 있음(자동 제안 없음)")
 }
 
@@ -114,11 +121,11 @@ const render = (rows: PurchaseSuggestionRow[], edits: Record<string, SuggestionR
     suggestedQty: 10,
   })
   const html = render([none, amb], { r4: edit({ supplierId: null }), r3: edit({ supplierId: null, qty: "10" }) })
-  ok(html.includes("공급업체 미지정"), "U3 공급업체 미지정 Badge")
+  ok(html.includes("공급업체 없음") && html.includes("공급업체 미지정"), "U3 공급업체 없음 상태 + 미지정 안내")
   ok(html.includes("품목관리 &gt; 공급업체 관리에서 등록하세요"), "U3 등록 안내")
   ok(html.includes("등록된 공급업체 없음"), "U3 선택 목록 비활성")
   ok(html.includes("최우선 공급업체가 불명확합니다"), "U3 동률 안내(자동 선택 안 함)")
-  ok(html.includes("최대결품 기준(최종부족 5)"), "U3 peak > final 설명")
+  ok(html.includes("최대결품 기준 발주(최종부족 5)"), "U3 peak > final 설명")
 }
 
 // U4: 단가 권한 없음 / 단가 미등록 / DRAFT 참고

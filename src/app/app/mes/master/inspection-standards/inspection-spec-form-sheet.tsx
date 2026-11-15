@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { isActionFailure } from "@/lib/action-result"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
@@ -200,14 +201,15 @@ export function InspectionSpecFormSheet({
     setIsLoading(true)
     try {
       // 표준과 검사항목을 한 번의 서버 호출(트랜잭션)로 저장한다 — 항목 저장이 실패해도 빈 표준이 남지 않는다.
+      let result: unknown
       if (isEdit) {
-        await updateInspectionSpecWithItems(
+        result = await updateInspectionSpecWithItems(
           editingSpec!.id,
           { version: values.version, status: values.status },
           mappedItems
         )
       } else {
-        await createInspectionSpecWithItems(
+        result = await createInspectionSpecWithItems(
           {
             itemId: values.itemId,
             routingOperationId: values.routingOperationId,
@@ -217,6 +219,11 @@ export function InspectionSpecFormSheet({
           mappedItems,
           tenantId
         )
+      }
+      // 예상 가능한 업무 검증 오류(측정 이력, 중복 버전, 품목-공정 연결 등)는 구조화된 결과로 오므로 한글 안내를 그대로 보여 준다.
+      if (isActionFailure(result)) {
+        alert(result.error)
+        return
       }
       onOpenChange(false)
       router.refresh()
@@ -324,7 +331,7 @@ export function InspectionSpecFormSheet({
                         <TableHead className="w-28 text-[13px]">입력유형</TableHead>
                         <TableHead className="w-24 text-[13px]">하한값</TableHead>
                         <TableHead className="w-24 text-[13px]">상한값</TableHead>
-                        <TableHead className="w-16 text-[13px]">단위</TableHead>
+                        <TableHead className="w-28 text-[13px]">단위</TableHead>
                         <TableHead className="w-10" />
                       </TableRow>
                     </TableHeader>
@@ -412,7 +419,7 @@ export function InspectionSpecFormSheet({
                           </TableCell>
                           <TableCell>
                             <Input
-                              className="h-7 text-[13px]"
+                              className="h-7 w-full min-w-[5rem] text-[13px]"
                               placeholder="mm"
                               value={row.unit}
                               onChange={(e) => updateItemRow(index, "unit", e.target.value)}

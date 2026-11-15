@@ -8,6 +8,7 @@ import {
 } from "@/lib/actions/pop.actions"
 import { PopQuantityInput } from "../../components/pop-quantity-input"
 import { formatQuantity } from "@/lib/utils"
+import { computePopRemaining } from "@/lib/pop/remaining-qty"
 
 type ProductionResult = {
   id: string
@@ -152,18 +153,14 @@ export function ProductionClient({ operation }: Props) {
     materialSufficiency && materialSufficiency.materialProducibleQty !== null
       ? materialSufficiency.maxAdditionalProductionQty
       : null
-  const hasWipShortfall =
-    availableWipQty !== null && availableWipQty < plannedQty && status !== "COMPLETED"
-  // 잔여수량은 WIP 제약이 있으면 실제 투입 가능 기준, 없으면 계획 기준
-  const wipLimitedRemaining = hasWipShortfall
-    ? Math.max(availableWipQty - completedQty, 0)
-    : Math.max(plannedQty - completedQty, 0)
-  const effectiveRemaining =
-    materialMaxAdditional !== null
-      ? Math.min(wipLimitedRemaining, materialMaxAdditional)
-      : wipLimitedRemaining
-  const hasMaterialShortfall =
-    materialMaxAdditional !== null && materialMaxAdditional < wipLimitedRemaining
+  // 잔여수량은 WIP 제약이 있으면 실제 투입 가능 기준, 없으면 계획 기준(서버 실적 검증과 같은 기준)
+  const { hasWipShortfall, effectiveRemaining, hasMaterialShortfall } = computePopRemaining({
+    plannedQty,
+    completedQty,
+    availableWipQty,
+    status,
+    materialMaxAdditional,
+  })
   const progress =
     plannedQty > 0
       ? Math.min(100, Math.round((completedQty / plannedQty) * 100))

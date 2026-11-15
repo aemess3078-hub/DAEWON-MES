@@ -22,6 +22,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { InspectionSpecWithItems, upsertInspectionItems } from "@/lib/actions/quality.actions"
+import { isActionFailure } from "@/lib/action-result"
 import { INSPECTION_INPUT_TYPE_OPTIONS } from "./measurement-form-schema"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -93,7 +94,7 @@ export function SpecItemEditor({ spec }: SpecItemEditorProps) {
 
     setSaving(true)
     try {
-      await upsertInspectionItems(
+      const result = await upsertInspectionItems(
         spec.id,
         rows.map((row) => ({
           seq: Number(row.seq),
@@ -104,6 +105,10 @@ export function SpecItemEditor({ spec }: SpecItemEditorProps) {
           unit: row.unit.trim() !== "" ? row.unit.trim() : null,
         }))
       )
+      if (isActionFailure(result)) {
+        alert(result.error)
+        return
+      }
       router.refresh()
       alert("검사항목이 저장되었습니다.")
     } catch (error) {
