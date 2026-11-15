@@ -65,7 +65,8 @@ export type ProductionResultFilters = {
 // ─── 1. 실적 전체 조회 ─────────────────────────────────────────────────────────
 
 export async function getProductionResults(
-  filters?: ProductionResultFilters
+  filters?: ProductionResultFilters,
+  options?: { limit?: number }
 ): Promise<ProductionResultWithDetails[]> {
   const tenantId = await getTenantId()
 
@@ -139,6 +140,8 @@ export async function getProductionResults(
       },
     },
     orderBy: { startedAt: "desc" },
+    // 선택적 상한: 호출부가 limit 을 주면 최신순으로 그 건수까지만 읽는다(미지정 시 기존처럼 전체).
+    ...(options?.limit ? { take: options.limit } : {}),
   })
 
   return results.map((r) => {

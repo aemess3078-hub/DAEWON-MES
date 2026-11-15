@@ -285,6 +285,10 @@ export async function getGroupedMaterialInventoryBalances(): Promise<GroupedMate
     .map(({ group, lotIdSet, warehouseIdSet }) => {
       group.lotCount = lotIdSet.size
       group.warehouseCount = warehouseIdSet.size
+      // 행별 Decimal 수량을 더한 합계의 부동소수 오차 정리(6자리)
+      group.totalQtyOnHand = Math.round(group.totalQtyOnHand * 1e6) / 1e6
+      group.totalQtyAvailable = Math.round(group.totalQtyAvailable * 1e6) / 1e6
+      group.totalQtyHold = Math.round(group.totalQtyHold * 1e6) / 1e6
       return group
     })
     .sort((a, b) => a.itemCode.localeCompare(b.itemCode))
@@ -406,6 +410,11 @@ export async function getGroupedInventoryBalances(): Promise<GroupedInventorySto
     .map(({ group, lotIdSet, warehouseIdSet }) => {
       group.lotCount = lotIdSet.size
       group.warehouseCount = warehouseIdSet.size
+      // 행별 수량(Decimal 6자리)을 Number 로 더하면 34.599999999999994 처럼 오차가 생겨 화면에 34.599999 로 잘려 보인다.
+      // 합계는 DB 수량 자릿수(6자리)로 정리해 반환한다.
+      group.totalQtyOnHand = Math.round(group.totalQtyOnHand * 1e6) / 1e6
+      group.totalQtyAvailable = Math.round(group.totalQtyAvailable * 1e6) / 1e6
+      group.totalQtyHold = Math.round(group.totalQtyHold * 1e6) / 1e6
       return group
     })
     .sort((a, b) => a.itemCode.localeCompare(b.itemCode))

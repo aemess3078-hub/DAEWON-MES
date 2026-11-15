@@ -122,14 +122,17 @@ export function getColumns(): ColumnDef<WipInventoryRow>[] {
     },
     {
       id: "qty",
-      accessorFn: (row) => row.qty,
-      header: ({ column }) => <DataTableColumnHeader column={column} title="재공 수량" />,
+      accessorFn: (row) => row.wipQty,
+      header: ({ column }) => <DataTableColumnHeader column={column} title="현재 재공수량" />,
       cell: ({ row }) => (
         <div className="text-right">
           <p className="text-[15px] font-semibold tabular-nums text-foreground">
-            {formatQuantity(row.original.qty)}
+            {formatQuantity(row.original.wipQty)}
           </p>
-          <p className="text-[13px] text-muted-foreground">{row.original.workOrder.item.uom}</p>
+          <p className="text-[13px] text-muted-foreground">
+            {row.original.workOrder.item.uom}
+            {row.original.wipQty !== row.original.qty ? ` · 원 ${formatQuantity(row.original.qty)}` : ""}
+          </p>
         </div>
       ),
     },

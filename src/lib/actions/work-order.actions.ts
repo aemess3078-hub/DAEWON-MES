@@ -12,7 +12,7 @@ import type { ContextKey } from "@/lib/types/numbering-rule"
 import { computeNextTenantManufacturingNo, MFG_STOCK_CLIENT_CODE } from "@/lib/lot-numbering/tenant-manufacturing-rule"
 import { WorkOrderStatus, OperationStatus, Prisma } from "@prisma/client"
 import { revalidatePath } from "next/cache"
-import { computeWipReceiptStatus } from "./wip-receipt.helpers"
+import { computeWipCurrentQtyByUnit, computeWipReceiptStatus } from "./wip-receipt.helpers"
 import {
   syncProductionPlanStatusForWorkOrder,
   syncProductionPlanStatusFromWorkOrders,
@@ -386,7 +386,24 @@ export async function getWipInventoryRows(tenantId: string) {
       return left.createdAt.getTime() - right.createdAt.getTime()
     })
 
+    const currentQtyByUnit = computeWipCurrentQtyByUnit(
+      sortedWipUnits.map((unit) => ({
+        id: unit.id,
+        qty: Number(unit.qty),
+        status: unit.status,
+        isRoot: unit.parentWipUnitId == null && unit.sourceProductionResultId == null,
+        isFinalCompletedRoot:
+          unit.parentWipUnitId == null &&
+          unit.sourceProductionResultId == null &&
+          unit.status === "COMPLETED" &&
+          unit.workOrderOperationId === finalOperation?.id,
+        createdAt: unit.createdAt,
+      })),
+      totalReceiptQty,
+    )
+
     return sortedWipUnits.map((unit) => {
+      const currentQty = currentQtyByUnit.get(unit.id)!
       const isRoot =
         unit.parentWipUnitId == null && unit.sourceProductionResultId == null
       const isReworkChild =
@@ -408,16 +425,23 @@ export async function getWipInventoryRows(tenantId: string) {
         ? "NOT_APPLICABLE"
         : !isFinalCompletedRoot
           ? "NOT_READY"
-          : receiptBlockedReason
-            ? "ON_HOLD"
-            : availableReceiptQty > 0
-              ? "AVAILABLE"
-              : "RECEIVED"
+          : currentQty.category === "RECEIVED"
+            ? "RECEIVED"
+            : receiptBlockedReason
+              ? "ON_HOLD"
+              : availableReceiptQty > 0
+                ? "AVAILABLE"
+                : "RECEIVED"
 
       return {
         id: unit.id,
         unitType,
         qty: Number(unit.qty),
+        // 현재 재공수량(미입고 잔량) — 입고완료/폐기완료는 0. qty 는 WipUnit 원 수량(이력)
+        wipQty: currentQty.wipQty,
+        receivedQty: currentQty.receivedQty,
+        wipCategory: currentQty.category,
+        isCurrentWip: currentQty.isCurrent,
         wipStatus: unit.status,
         parentWipUnit: unit.parentWipUnit
           ? {

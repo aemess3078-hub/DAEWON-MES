@@ -68,7 +68,7 @@ export function FinalInspectionDataTable({ data }: FinalInspectionDataTableProps
       header: "양품 수량",
       cell: ({ row }) => (
         <span className="text-[14px]">
-          {row.original.totalGoodQty.toLocaleString()}{" "}
+          {row.original.receiptBasisQty.toLocaleString()}{" "}
           <span className="text-muted-foreground text-[13px]">{row.original.item.uom}</span>
         </span>
       ),

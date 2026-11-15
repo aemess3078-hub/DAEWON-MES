@@ -223,3 +223,140 @@ export function computeWipReceiptStatus<TWipUnit extends WipReceiptWipUnitInput>
     completedRootWipUnits,
   }
 }
+
+// ─── 재공품재고 "현재 재공수량" 산정 (재공품재고 화면 전용) ─────────────────────
+//
+// root WipUnit.qty 는 완제품 입고 후에도 줄지 않는다(입고는 FinishedGoodsReceipt 로만 기록).
+// 따라서 화면의 재공수량은 WipUnit.qty 를 그대로 쓰지 않고 아래 기준으로 계산한다.
+//   - 최종공정 COMPLETED root : qty − (해당 작업지시 FinishedGoodsReceipt 누적 중 이 root 에 배분된 수량)
+//                              = 입고 대기(미입고 잔량). 부분 입고면 잔량만, 전량 입고면 0.
+//   - 그 외 root(대기/진행/외주 등) : qty 전체 = 공정 진행 재공
+//   - REWORK child : qty = 재작업 보류 (재공이지만 입고 대상 아님 — 별도 구분)
+//   - SCRAPPED child : 폐기 완료 → 재공 0
+//   - 그 외 child : qty 전체 = 공정 진행 재공
+// 한 작업지시의 입고 누적은 완료 root 에 생성순으로 한 번만 배분하므로 행 간 중복 집계가 없다.
+
+export type WipCurrentQtyCategory =
+  | "IN_PROCESS" // 공정 진행 재공
+  | "AWAITING_RECEIPT" // 최종공정 완료 후 미입고 잔량
+  | "REWORK_HOLD" // 재작업 보류
+  | "RECEIVED" // 입고 완료(이력)
+  | "SCRAPPED" // 폐기 완료(이력)
+
+export type WipCurrentQtyUnit = {
+  id: string
+  qty: number
+  status: string
+  isRoot: boolean
+  isFinalCompletedRoot: boolean
+  createdAt: Date
+}
+
+export type WipCurrentQtyResult = {
+  category: WipCurrentQtyCategory
+  /** 현재 재공수량 (입고완료·폐기완료는 0, 재작업 보류는 보류 수량 포함) */
+  wipQty: number
+  /** 이 재공품에 배분된 완제품 입고 수량 */
+  receivedQty: number
+  /** 현재 재공 목록에 표시할지 (wipQty > 0) */
+  isCurrent: boolean
+}
+
+const WIP_QTY_EPSILON = 0.000001
+
+export function computeWipCurrentQtyByUnit(
+  units: WipCurrentQtyUnit[],
+  totalReceiptQty: number,
+): Map<string, WipCurrentQtyResult> {
+  const result = new Map<string, WipCurrentQtyResult>()
+  let remainingReceipt = Math.max(0, totalReceiptQty)
+
+  const finalRoots = units
+    .filter((unit) => unit.isFinalCompletedRoot)
+    .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+  for (const unit of finalRoots) {
+    const received = Math.min(unit.qty, remainingReceipt)
+    remainingReceipt -= received
+    const pending = Math.max(0, unit.qty - received)
+    const done = pending <= WIP_QTY_EPSILON
+    result.set(unit.id, {
+      category: done ? "RECEIVED" : "AWAITING_RECEIPT",
+      wipQty: done ? 0 : pending,
+      receivedQty: received,
+      isCurrent: !done,
+    })
+  }
+
+  for (const unit of units) {
+    if (result.has(unit.id)) continue
+    if (unit.status === "SCRAPPED") {
+      result.set(unit.id, { category: "SCRAPPED", wipQty: 0, receivedQty: 0, isCurrent: false })
+    } else if (unit.status === "REWORK") {
+      result.set(unit.id, {
+        category: "REWORK_HOLD",
+        wipQty: unit.qty,
+        receivedQty: 0,
+        isCurrent: unit.qty > WIP_QTY_EPSILON,
+      })
+    } else if (unit.status === "COMPLETED" && !unit.isRoot) {
+      // 분리 재공품이 완료된 경우(재작업 양품 복귀 등)는 root 에 MERGE 되어 있어 중복 집계하지 않는다.
+      result.set(unit.id, { category: "RECEIVED", wipQty: 0, receivedQty: 0, isCurrent: false })
+    } else {
+      result.set(unit.id, {
+        category: "IN_PROCESS",
+        wipQty: unit.qty,
+        receivedQty: 0,
+        isCurrent: unit.qty > WIP_QTY_EPSILON,
+      })
+    }
+  }
+  return result
+}
+
+export type WipInventorySummaryRow = {
+  workOrderId: string
+  category: WipCurrentQtyCategory
+  wipQty: number
+  availableReceiptQty: number
+  blocked: boolean
+  isCurrent: boolean
+}
+
+export type WipInventorySummary = {
+  /** 현재 재공이 있는 작업지시 수 */
+  currentOrderCount: number
+  /** 현재 재공수량 = 공정 진행 + 입고 대기 (재작업 보류 제외) */
+  currentWipQty: number
+  inProcessQty: number
+  awaitingReceiptQty: number
+  /** 입고 대기 중 보류 사유가 없어 지금 입고 가능한 수량 */
+  receivableQty: number
+  reworkHoldQty: number
+}
+
+export function summarizeWipInventory(rows: WipInventorySummaryRow[]): WipInventorySummary {
+  const orders = new Set<string>()
+  let inProcessQty = 0
+  let awaitingReceiptQty = 0
+  let reworkHoldQty = 0
+  const receivable = new Map<string, number>()
+  for (const row of rows) {
+    if (!row.isCurrent) continue
+    orders.add(row.workOrderId)
+    if (row.category === "IN_PROCESS") inProcessQty += row.wipQty
+    else if (row.category === "AWAITING_RECEIPT") {
+      awaitingReceiptQty += row.wipQty
+      // availableReceiptQty 는 작업지시 단위 값이라 작업지시당 한 번만 합산한다.
+      receivable.set(row.workOrderId, row.availableReceiptQty)
+    } else if (row.category === "REWORK_HOLD") reworkHoldQty += row.wipQty
+  }
+  const round = (value: number) => Math.round(value * 1e6) / 1e6
+  return {
+    currentOrderCount: orders.size,
+    currentWipQty: round(inProcessQty + awaitingReceiptQty),
+    inProcessQty: round(inProcessQty),
+    awaitingReceiptQty: round(awaitingReceiptQty),
+    receivableQty: round(Array.from(receivable.values()).reduce((sum, qty) => sum + qty, 0)),
+    reworkHoldQty: round(reworkHoldQty),
+  }
+}

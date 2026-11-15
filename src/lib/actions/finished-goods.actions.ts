@@ -35,7 +35,7 @@ export type WorkOrderForReceipt = {
   plannedQty: number
   item: { id: string; code: string; name: string; uom: string; itemType: string | null }
   site: { id: string; name: string }
-  totalGoodQty: number
+  /** 최종 양품(입고 기준) 수량: 최종공정 완료 root 수량(WIP 추적) 또는 최종공정 양품 합(레거시). 공정별 실적을 합산하지 않는다. */
   receiptBasisQty: number
   totalReceiptQty: number
   pendingQty: number
@@ -96,15 +96,6 @@ type ReceiptQuantitySource = {
 // 레거시(WipUnit 없는) 작업지시는 최종공정 양품 합계를 기준 수량으로 fallback.
 function calculateReceiptQuantity(source: ReceiptQuantitySource) {
   const status = computeWipReceiptStatus(source)
-  const totalGoodQty = source.operations.reduce(
-    (sum, operation) =>
-      sum +
-      operation.productionResults.reduce(
-        (subtotal, result) => subtotal + Number(result.goodQty),
-        0,
-      ),
-    0,
-  )
   const lastOperation = source.operations.reduce<typeof source.operations[number] | null>(
     (latest, operation) => (!latest || operation.seq > latest.seq ? operation : latest),
     null,
@@ -122,7 +113,6 @@ function calculateReceiptQuantity(source: ReceiptQuantitySource) {
     : Math.max(0, receiptBasisQty - status.totalReceiptQty)
 
   return {
-    totalGoodQty,
     receiptBasisQty,
     totalReceiptQty: status.totalReceiptQty,
     pendingQty,
@@ -219,7 +209,6 @@ export async function getWorkOrdersForReceipt(
       plannedQty: Number(wo.plannedQty),
       item: wo.item,
       site: wo.site,
-      totalGoodQty: receiptQuantity.totalGoodQty,
       receiptBasisQty: receiptQuantity.receiptBasisQty,
       totalReceiptQty: receiptQuantity.totalReceiptQty,
       pendingQty: receiptQuantity.pendingQty,

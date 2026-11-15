@@ -53,6 +53,7 @@ export function WipInventoryDataTable({ data }: WipInventoryDataTableProps) {
   const [startDateFrom, setStartDateFrom] = useState("")
   const [startDateTo, setStartDateTo] = useState("")
   const [statusFilter, setStatusFilter] = useState("")
+  const [includeHistory, setIncludeHistory] = useState(false)
   const [sorting, setSorting] = useState<SortingState>([])
   const [expanded, setExpanded] = useState<ExpandedState>({})
 
@@ -61,7 +62,11 @@ export function WipInventoryDataTable({ data }: WipInventoryDataTableProps) {
     const fromTime = startDateFrom ? new Date(`${startDateFrom}T00:00:00`).getTime() : null
     const toTime = startDateTo ? new Date(`${startDateTo}T23:59:59`).getTime() : null
 
+    // 완료/폐기 상태를 직접 고른 경우에는 과거 이력을 보겠다는 뜻이므로 현재 재공 필터를 적용하지 않는다.
+    const showHistory = includeHistory || statusFilter === "COMPLETED" || statusFilter === "SCRAPPED"
+
     return data.filter((row) => {
+      if (!showHistory && !row.isCurrentWip) return false
       if (statusFilter && row.wipStatus !== statusFilter) return false
       const createdTime = new Date(row.workOrder.createdAt).getTime()
       if (fromTime !== null && createdTime < fromTime) return false
@@ -87,7 +92,7 @@ export function WipInventoryDataTable({ data }: WipInventoryDataTableProps) {
 
       return true
     })
-  }, [data, keyword, startDateFrom, startDateTo, statusFilter])
+  }, [data, keyword, startDateFrom, startDateTo, statusFilter, includeHistory])
 
   const baseColumns = useMemo(() => getColumns(), [])
   const allColumns = useMemo<ColumnDef<WipInventoryRow>[]>(
@@ -145,6 +150,16 @@ export function WipInventoryDataTable({ data }: WipInventoryDataTableProps) {
         </div>
         <DateFilter label="지시일 시작" value={startDateFrom} onChange={setStartDateFrom} />
         <DateFilter label="지시일 종료" value={startDateTo} onChange={setStartDateTo} />
+        <label className="flex h-10 cursor-pointer items-center gap-2 text-[14px] text-foreground">
+          <input
+            type="checkbox"
+            checked={includeHistory}
+            onChange={(event) => setIncludeHistory(event.target.checked)}
+            className="h-4 w-4 accent-primary"
+          />
+          입고완료 포함
+          <span className="text-[13px] text-muted-foreground">(입고·폐기 완료 이력)</span>
+        </label>
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -213,6 +228,7 @@ export function WipInventoryDataTable({ data }: WipInventoryDataTableProps) {
       <div className="flex items-center justify-between">
         <p className="text-[13px] text-muted-foreground">
           총 {formatQuantity(filteredData.length)}개 재공품
+          {includeHistory ? " (입고완료·폐기 이력 포함)" : " (현재 재공만)"}
         </p>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()}>
@@ -262,7 +278,9 @@ function ExpandedDetail({ row }: { row: WipInventoryRow }) {
       <DetailCard title="재공 계보">
         <DetailRow label="구분" value={unitConfig.label} />
         <DetailRow label="관리번호" value={row.id.slice(-12)} mono />
-        <DetailRow label="수량" value={`${formatQuantity(row.qty)} ${row.workOrder.item.uom}`} accent="sky" />
+        <DetailRow label="현재 재공수량" value={`${formatQuantity(row.wipQty)} ${row.workOrder.item.uom}`} accent="sky" />
+        <DetailRow label="재공품 원 수량" value={`${formatQuantity(row.qty)} ${row.workOrder.item.uom}`} />
+        {row.receivedQty > 0 ? <DetailRow label="입고 완료" value={formatQuantity(row.receivedQty)} /> : null}
         {row.parentWipUnit ? (
           <DetailRow label="원 재공품" value={`${formatQuantity(row.parentWipUnit.qty)} ${row.workOrder.item.uom}`} />
         ) : null}
