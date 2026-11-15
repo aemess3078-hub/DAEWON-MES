@@ -24,13 +24,18 @@ import {
   type ShipmentFormValues,
 } from "./shipment-form-schema"
 import {
-  createShipment,
+  submitShipmentPlan,
   getAvailableFinishedGoodsLots,
   type AvailableFinishedGoodsLot,
   type EmptyLotReason,
 } from "@/lib/actions/shipment.actions"
 import { FgLotQrScan } from "./fg-lot-qr-scan"
 import { planScannedFgLot } from "@/lib/shipment/fg-lot-scan"
+import {
+  calculateShippableQty,
+  lotReservableExceededMessage,
+  orderShippableExceededMessage,
+} from "@/lib/shipment/shipment-plan-quantities"
 import { BarcodeScanInput, type ParsedBarcode } from "@/components/common/barcode/barcode-scan-input"
 import { BarcodePrintDialog } from "@/components/common/barcode/barcode-print-dialog"
 import { formatQuantity } from "@/lib/utils"
@@ -44,6 +49,8 @@ type SalesOrderOption = {
     itemId: string
     qty: number | string
     shippedQty: number | string
+    /** 기존 출하예정(PLANNED)이 잡아 둔 수량 — 서버 getShippableSalesOrders 가 채운다 */
+    reservedQty?: number | string
     item: {
       id: string
       code: string
@@ -96,6 +103,8 @@ export function ShipmentFormSheet({
   const [emptyReasonByItem, setEmptyReasonByItem] = useState<
     Record<string, EmptyLotReason>
   >({})
+  // 등록 실패 시 LOT 목록을 다시 불러와 최신 예약 현황을 반영한다
+  const [lotRefreshKey, setLotRefreshKey] = useState(0)
   const rowRefs = useRef<(HTMLDivElement | null)[]>([])
   const router = useRouter()
 
@@ -198,26 +207,44 @@ export function ShipmentFormSheet({
     return () => {
       cancelled = true
     }
-  }, [form, open, selectedWarehouseId, tenantId, trackedItemIdsKey])
+  }, [form, open, selectedWarehouseId, tenantId, trackedItemIdsKey, lotRefreshKey])
+
+  /** 수주 품목 한 줄의 수량 현황: 수주 / 출하완료 / 기존 출하예정 / 추가 출하 가능(서버 createShipment 와 같은 식) */
+  function getOrderLineQty(salesOrderItemId: string) {
+    const item = selectedOrder?.items.find((row) => row.id === salesOrderItemId)
+    const orderQty = Number(item?.qty ?? 0)
+    const shippedQty = Number(item?.shippedQty ?? 0)
+    const plannedQty = Number(item?.reservedQty ?? 0)
+    return {
+      orderQty,
+      shippedQty,
+      plannedQty,
+      shippableQty: calculateShippableQty(orderQty, shippedQty, plannedQty),
+    }
+  }
 
   function toShipmentItems(order: SalesOrderOption): ShipmentFormValues["items"] {
     return order.items
       .filter((item) => Number(item.qty) - Number(item.shippedQty) > 0)
       .map((item) => {
-        const remainingQty = Number(item.qty) - Number(item.shippedQty)
+        const shippableQty = calculateShippableQty(
+          Number(item.qty),
+          Number(item.shippedQty),
+          Number(item.reservedQty ?? 0),
+        )
         return {
           salesOrderItemId: item.id,
           itemId: item.itemId,
           isLotTracked: item.item.isLotTracked,
-          qty: item.item.isLotTracked ? 0 : remainingQty,
+          qty: item.item.isLotTracked ? 0 : shippableQty,
           lotAllocations: item.item.isLotTracked ? [{ lotId: "", qty: 0 }] : [],
         }
       })
   }
 
+  /** 이번에 더 출하예정으로 잡을 수 있는 수량(= 추가 출하 가능) */
   function getRemainingQty(salesOrderItemId: string): number {
-    const item = selectedOrder?.items.find((row) => row.id === salesOrderItemId)
-    return item ? Number(item.qty) - Number(item.shippedQty) : 0
+    return getOrderLineQty(salesOrderItemId).shippableQty
   }
 
   function setLotAllocations(
@@ -338,14 +365,31 @@ export function ShipmentFormSheet({
     setIsLoading(true)
     try {
       const shipmentItems = values.items.flatMap((item) => {
-        const remainingQty = getRemainingQty(item.salesOrderItemId)
+        const line = getOrderLineQty(item.salesOrderItemId)
+        const itemCode = selectedOrder?.items.find((row) => row.id === item.salesOrderItemId)?.item.code ?? ""
+        const requestedQty = item.isLotTracked
+          ? item.lotAllocations.reduce((sum, allocation) => sum + (Number(allocation.qty) || 0), 0)
+          : Number(item.qty) || 0
+        const shippableBlock = (qty: number) => orderShippableExceededMessage({
+          itemCode,
+          orderQty: line.orderQty,
+          shippedQty: line.shippedQty,
+          plannedQty: line.plannedQty,
+          requestedQty: qty,
+          shippableQty: line.shippableQty,
+        })
+
+        // 추가 출하 가능 수량이 0이면 등록을 막고 사유를 보여 준다(LOT 선택 여부와 무관)
+        if (line.shippableQty <= 0) {
+          throw new Error(shippableBlock(requestedQty))
+        }
 
         if (!item.isLotTracked) {
           if (!item.qty || item.qty <= 0) {
-            throw new Error("비LOT 품목의 출하수량은 0보다 커야 합니다.")
+            throw new Error(`[${itemCode}] 출하수량은 0보다 커야 합니다.`)
           }
-          if (item.qty > remainingQty) {
-            throw new Error("출하수량이 미출하수량을 초과합니다.")
+          if (item.qty > line.shippableQty) {
+            throw new Error(shippableBlock(item.qty))
           }
           return [{
             salesOrderItemId: item.salesOrderItemId,
@@ -355,7 +399,7 @@ export function ShipmentFormSheet({
         }
 
         if (item.lotAllocations.length === 0) {
-          throw new Error("LOT 관리 품목은 최소 1개의 LOT를 선택해야 합니다.")
+          throw new Error(`[${itemCode}] LOT 관리 품목은 최소 1개의 LOT를 선택해야 합니다.`)
         }
         const selectedLotIds = new Set<string>()
         let totalQty = 0
@@ -369,13 +413,17 @@ export function ShipmentFormSheet({
             (row) => row.lotId === allocation.lotId,
           )
           if (!lot) {
-            throw new Error("선택한 LOT의 가용재고를 다시 조회하세요.")
+            throw new Error("선택한 LOT의 예약 가능 수량을 다시 조회하세요.")
           }
           if (allocation.qty <= 0) {
             throw new Error(`LOT(${lot.lotNo}) 출하수량은 0보다 커야 합니다.`)
           }
           if (allocation.qty > lot.qtyAvailable) {
-            throw new Error(`LOT(${lot.lotNo}) 가용재고를 초과했습니다.`)
+            throw new Error(lotReservableExceededMessage({
+              lotNo: lot.lotNo,
+              requestedQty: allocation.qty,
+              reservableQty: lot.qtyAvailable,
+            }))
           }
           totalQty += allocation.qty
           return {
@@ -386,24 +434,29 @@ export function ShipmentFormSheet({
           }
         })
 
-        if (totalQty > remainingQty) {
-          throw new Error("LOT 분할수량 합계가 미출하수량을 초과합니다.")
+        if (totalQty > line.shippableQty) {
+          throw new Error(shippableBlock(totalQty))
         }
         return allocations
       })
 
-      await createShipment(tenantId, {
+      const result = await submitShipmentPlan(tenantId, {
         salesOrderId: values.salesOrderId,
         plannedDate: new Date(values.plannedDate),
         warehouseId: values.warehouseId,
         note: values.note,
         items: shipmentItems,
       })
+      if (!result.ok) {
+        // 서버가 다시 계산한 최신 예약 현황으로 LOT 목록을 갱신한다
+        setLotRefreshKey((key) => key + 1)
+        alert(result.message)
+        return
+      }
       onOpenChange(false)
       router.refresh()
     } catch (error) {
-      console.error("출하 등록 실패:", error)
-      alert(error instanceof Error ? error.message : "출하 등록 중 오류가 발생했습니다.")
+      alert(error instanceof Error ? error.message : "출하예정 등록 중 오류가 발생했습니다.")
     } finally {
       setIsLoading(false)
     }
@@ -604,14 +657,22 @@ export function ShipmentFormSheet({
                           [{salesOrderItem?.item.code ?? ""}] {salesOrderItem?.item.name ?? ""}
                         </p>
                         <p className="text-[13px] text-muted-foreground">
-                          미출하: {formatQuantity(remainingQty)}
+                          수주 {formatQuantity(getOrderLineQty(field.salesOrderItemId).orderQty)}
+                          {" · "}출하완료 {formatQuantity(getOrderLineQty(field.salesOrderItemId).shippedQty)}
+                          {" · "}기존 출하예정 {formatQuantity(getOrderLineQty(field.salesOrderItemId).plannedQty)}
+                          {" · "}<span className="font-medium text-foreground">추가 출하 가능 {formatQuantity(remainingQty)}</span>
                         </p>
+                        {remainingQty <= 0 && (
+                          <p className="mt-1 text-[13px] text-destructive">
+                            추가 출하 가능 수량이 없어 이 품목은 출하예정으로 등록할 수 없습니다. 기존 출하예정을 확인하세요.
+                          </p>
+                        )}
                       </div>
                       <div className="flex items-start gap-3">
                         <div className="text-right text-[13px]">
                           <p>선택 합계: <span className="font-medium">{formatQuantity(selectedTotal)}</span></p>
                           <p className={afterShipmentQty < 0 ? "text-destructive" : "text-muted-foreground"}>
-                            출하 후 잔량: {formatQuantity(afterShipmentQty)}
+                            등록 후 잔량: {formatQuantity(afterShipmentQty)}
                           </p>
                         </div>
                         <Button
@@ -644,7 +705,7 @@ export function ShipmentFormSheet({
                             duplicate
                               ? "동일한 LOT를 중복 선택할 수 없습니다."
                               : selectedLot && Number(allocation.qty) > selectedLot.qtyAvailable
-                                ? "LOT 가용재고를 초과했습니다."
+                                ? "예약 가능 수량을 초과했습니다."
                                 : Number(allocation.qty) <= 0
                                   ? "출하수량은 0보다 커야 합니다."
                                   : null
@@ -668,7 +729,7 @@ export function ShipmentFormSheet({
                                         onValueChange={(lotId) =>
                                           handleLotChange(itemIndex, allocationIndex, lotId)
                                         }
-                                        disabled={!selectedWarehouseId || isLotLoading || lots.length === 0}
+                                        disabled={!selectedWarehouseId || isLotLoading || lots.length === 0 || remainingQty <= 0}
                                       >
                                         <SelectTrigger className="h-9 text-[13px]">
                                           <SelectValue
@@ -690,14 +751,14 @@ export function ShipmentFormSheet({
                                               value={lot.lotId}
                                               disabled={usedLotIds.has(lot.lotId)}
                                             >
-                                              {lot.lotNo} · 가용 {formatQuantity(lot.qtyAvailable)}
+                                              {lot.lotNo} · 예약 가능 {formatQuantity(lot.qtyAvailable)}
                                             </SelectItem>
                                           ))}
                                         </SelectContent>
                                       </Select>
                                       {selectedLot && (
                                         <p className="text-[12px] text-muted-foreground">
-                                          가용 {formatQuantity(selectedLot.qtyAvailable)} · {selectedLot.locationName ?? selectedLot.warehouseName}
+                                          LOT 재고 {formatQuantity(selectedLot.qtyStock)} · 기존 예약 {formatQuantity(selectedLot.qtyReserved)} · 예약 가능 {formatQuantity(selectedLot.qtyAvailable)} · {selectedLot.locationName ?? selectedLot.warehouseName}
                                         </p>
                                       )}
                                       <FormMessage className="text-[12px]" />
@@ -781,7 +842,7 @@ export function ShipmentFormSheet({
 
                         {selectedTotal > remainingQty && (
                           <p className="text-[12px] text-destructive">
-                            LOT 분할수량 합계가 미출하수량을 초과합니다.
+                            {`LOT 분할수량 합계(${formatQuantity(selectedTotal)})가 추가 출하 가능 수량(${formatQuantity(remainingQty)})을 초과합니다.`}
                           </p>
                         )}
                       </div>
@@ -809,7 +870,7 @@ export function ShipmentFormSheet({
                             <FormMessage className="text-[12px]" />
                             {selectedTotal > remainingQty && (
                               <p className="text-[12px] text-destructive">
-                                출하수량이 미출하수량을 초과합니다.
+                                {`출하수량(${formatQuantity(selectedTotal)})이 추가 출하 가능 수량(${formatQuantity(remainingQty)})을 초과합니다.`}
                               </p>
                             )}
                           </FormItem>

@@ -14,6 +14,16 @@ import {
 import { recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
 import { SHIPPABLE_STATUSES, salesOrderNotShippableMessage, type SalesOrderStatusValue } from "@/lib/sales-order-status"
+import {
+  SHIPMENT_PLAN_SYSTEM_ERROR_MESSAGE,
+  ShipmentPlanError,
+  calculateReservableLotQty as calculateReservableQty,
+  calculateShippableQty,
+  lotReservableExceededMessage,
+  orderShippableExceededMessage,
+  stockReservableExceededMessage,
+} from "@/lib/shipment/shipment-plan-quantities"
+import { CONCURRENT_QUANTITY_CHANGE_MESSAGE } from "@/lib/quantity-concurrency"
 
 export async function getShipments(tenantId: string) {
   await requireTenantAccess(tenantId)
@@ -173,12 +183,29 @@ export async function getShippableSalesOrders(tenantId: string) {
     },
     orderBy: { deliveryDate: "asc" },
   })
+
+  // 기존 출하예정(PLANNED) 예약 수량 — createShipment 의 수주 품목 한도 계산과 같은 기준(tenant 전체 PLANNED)
+  const plannedRows = rows.length > 0
+    ? await prisma.shipmentItem.groupBy({
+        by: ["salesOrderItemId"],
+        where: {
+          salesOrderItemId: { in: rows.flatMap((o) => o.items.map((i) => i.id)) },
+          shipmentOrder: { tenantId, status: "PLANNED" },
+        },
+        _sum: { qty: true },
+      })
+    : []
+  const plannedBySalesOrderItem = new Map(
+    plannedRows.map((row) => [row.salesOrderItemId, Number(row._sum.qty ?? 0)]),
+  )
+
   return rows.map((o) => ({
     ...o,
     items: o.items.map((i) => ({
       ...i,
       qty: Number(i.qty),
       shippedQty: Number(i.shippedQty),
+      reservedQty: plannedBySalesOrderItem.get(i.id) ?? 0,
     })),
   }))
 }
@@ -203,6 +230,11 @@ export type AvailableFinishedGoodsLot = {
   warehouseName: string
   locationId: string | null
   locationName: string | null
+  /** LOT 재고(가용, 기존 출하예정 예약 차감 전) */
+  qtyStock: number
+  /** 기존 출하예정(PLANNED)이 이 LOT 에 잡아 둔 수량 */
+  qtyReserved: number
+  /** 예약 가능 수량 = qtyStock − qtyReserved (새 출하예정 등록의 상한) */
   qtyAvailable: number
 }
 
@@ -214,14 +246,6 @@ export type EmptyLotReason =
 export type AvailableFinishedGoodsLotResult = {
   lotsByItem: Record<string, AvailableFinishedGoodsLot[]>
   emptyReasonByItem: Record<string, EmptyLotReason>
-}
-
-/** Quantity that can be newly reserved without changing physical inventory. */
-function calculateReservableQty(
-  physicalQty: number,
-  reservedQty: number,
-): number {
-  return Math.max(0, physicalQty - reservedQty)
 }
 
 export async function getAvailableFinishedGoodsLots(
@@ -313,6 +337,8 @@ export async function getAvailableFinishedGoodsLots(
   const lotsByItem: Record<string, AvailableFinishedGoodsLot[]> = {}
   for (const balance of validBalances) {
     const receipt = receiptByLotId.get(balance.lot.id)
+    const qtyStock = Number(balance.qtyAvailable)
+    const qtyReserved = reservedByLot.get(balance.lot.id) ?? 0
     const row: AvailableFinishedGoodsLot = {
       lotId: balance.lot.id,
       lotNo: balance.lot.lotNo,
@@ -321,10 +347,9 @@ export async function getAvailableFinishedGoodsLots(
       warehouseName: balance.warehouse.name,
       locationId: receipt?.locationId ?? null,
       locationName: receipt?.locationName ?? null,
-      qtyAvailable: calculateReservableQty(
-        Number(balance.qtyAvailable),
-        reservedByLot.get(balance.lot.id) ?? 0,
-      ),
+      qtyStock,
+      qtyReserved,
+      qtyAvailable: calculateReservableQty(qtyStock, qtyReserved),
     }
     if (row.qtyAvailable <= 0) continue
     if (!lotsByItem[row.itemId]) lotsByItem[row.itemId] = []
@@ -458,10 +483,10 @@ export async function createShipment(
     throw new Error("FORBIDDEN")
   }
   if (!data.warehouseId) {
-    throw new Error("출하 창고를 선택하세요.")
+    throw new ShipmentPlanError("출하 창고를 선택하세요.")
   }
   if (data.items.length === 0) {
-    throw new Error("출하 품목을 1개 이상 추가하세요.")
+    throw new ShipmentPlanError("출하 품목을 1개 이상 추가하세요.")
   }
   const warehouseId = data.warehouseId
 
@@ -469,7 +494,7 @@ export async function createShipment(
   for (const item of data.items) {
     const key = `${item.salesOrderItemId}:${item.lotId}`
     if (duplicateKeys.has(key)) {
-      throw new Error("같은 수주 품목과 LOT는 한 출하에 중복 등록할 수 없습니다.")
+      throw new ShipmentPlanError("같은 수주 품목과 LOT는 한 출하에 중복 등록할 수 없습니다.")
     }
     duplicateKeys.add(key)
   }
@@ -482,7 +507,7 @@ export async function createShipment(
       select: { id: true, siteId: true },
     })
     if (!warehouse) {
-      throw new Error("선택한 창고를 사용할 수 없습니다.")
+      throw new ShipmentPlanError("선택한 창고를 사용할 수 없습니다.")
     }
 
     const salesOrder = await tx.salesOrder.findFirst({
@@ -490,7 +515,7 @@ export async function createShipment(
       select: { id: true, siteId: true },
     })
     if (!salesOrder) {
-      throw new Error("수주를 찾을 수 없습니다.")
+      throw new ShipmentPlanError("수주를 찾을 수 없습니다.")
     }
 
     const salesOrderItemIds = Array.from(
@@ -500,8 +525,8 @@ export async function createShipment(
 
     // 잠금 이후 수주 상태를 다시 확인한다(수주 취소와 동시에 실행돼도 취소된 수주에 출하가 남지 않는다)
     const lockedSalesOrder = await tx.salesOrder.findFirst({ where: { id: data.salesOrderId, tenantId }, select: { status: true } })
-    if (!lockedSalesOrder) throw new Error("수주를 찾을 수 없습니다.")
-    if (!SHIPPABLE_STATUSES.includes(lockedSalesOrder.status as SalesOrderStatusValue)) throw new Error(salesOrderNotShippableMessage(lockedSalesOrder.status))
+    if (!lockedSalesOrder) throw new ShipmentPlanError("수주를 찾을 수 없습니다.")
+    if (!SHIPPABLE_STATUSES.includes(lockedSalesOrder.status as SalesOrderStatusValue)) throw new ShipmentPlanError(salesOrderNotShippableMessage(lockedSalesOrder.status))
 
     const salesOrderItems = await tx.salesOrderItem.findMany({
       where: {
@@ -522,15 +547,15 @@ export async function createShipment(
 
     for (const item of data.items) {
       if (item.qty <= 0) {
-        throw new Error("출하 수량은 0보다 커야 합니다.")
+        throw new ShipmentPlanError("출하 수량은 0보다 커야 합니다.")
       }
 
       const salesOrderItem = salesOrderItemById.get(item.salesOrderItemId)
       if (!salesOrderItem) {
-        throw new Error("수주 품목을 찾을 수 없습니다.")
+        throw new ShipmentPlanError("수주 품목을 찾을 수 없습니다.")
       }
       if (salesOrderItem.itemId !== item.itemId) {
-        throw new Error("수주 품목과 출하 품목이 일치하지 않습니다.")
+        throw new ShipmentPlanError("수주 품목과 출하 품목이 일치하지 않습니다.")
       }
 
       requestedQtyBySalesOrderItem.set(
@@ -554,13 +579,19 @@ export async function createShipment(
 
     for (const [salesOrderItemId, requestedQty] of Array.from(requestedQtyBySalesOrderItem)) {
       const salesOrderItem = salesOrderItemById.get(salesOrderItemId)!
-      const remainingQty =
-        Number(salesOrderItem.qty) - Number(salesOrderItem.shippedQty) -
-        (reservedBySalesOrderItem.get(salesOrderItemId) ?? 0)
-      if (requestedQty > remainingQty) {
-        throw new Error(
-          `[${salesOrderItem.item.code}] LOT 분할수량 합계(${requestedQty})가 미출하수량(${remainingQty})을 초과합니다.`,
-        )
+      const orderQty = Number(salesOrderItem.qty)
+      const shippedQty = Number(salesOrderItem.shippedQty)
+      const plannedQty = reservedBySalesOrderItem.get(salesOrderItemId) ?? 0
+      const shippableQty = calculateShippableQty(orderQty, shippedQty, plannedQty)
+      if (requestedQty > shippableQty) {
+        throw new ShipmentPlanError(orderShippableExceededMessage({
+          itemCode: salesOrderItem.item.code,
+          orderQty,
+          shippedQty,
+          plannedQty,
+          requestedQty,
+          shippableQty,
+        }))
       }
     }
 
@@ -569,17 +600,17 @@ export async function createShipment(
       const salesOrderItem = salesOrderItemById.get(item.salesOrderItemId)!
       if (salesOrderItem.item.isLotTracked) {
         if (!item.lotId) {
-          throw new Error(`[${salesOrderItem.item.code}] LOT 관리 품목은 LOT를 선택해야 합니다.`)
+          throw new ShipmentPlanError(`[${salesOrderItem.item.code}] LOT 관리 품목은 LOT를 선택해야 합니다.`)
         }
         const lot = await tx.lot.findFirst({
           where: { id: item.lotId, tenantId, status: "ACTIVE" },
           select: { id: true, lotNo: true, itemId: true },
         })
         if (!lot) {
-          throw new Error("출하할 완제품 LOT를 찾을 수 없습니다.")
+          throw new ShipmentPlanError("출하할 완제품 LOT를 찾을 수 없습니다.")
         }
         if (lot.itemId !== item.itemId) {
-          throw new Error(`LOT(${lot.lotNo}) 품목과 출하 품목이 일치하지 않습니다.`)
+          throw new ShipmentPlanError(`LOT(${lot.lotNo}) 품목과 출하 품목이 일치하지 않습니다.`)
         }
         await assertLotQualityReleaseAllowed(tx, { tenantId, lotId: lot.id })
         const balance = await tx.inventoryBalance.findFirst({
@@ -593,7 +624,7 @@ export async function createShipment(
           select: { id: true },
         })
         if (!balance) {
-          throw new Error(`LOT(${lot.lotNo})의 출하 가능 재고가 없습니다.`)
+          throw new ShipmentPlanError(`LOT(${lot.lotNo})의 출하 가능 재고가 없습니다.`)
         }
         balanceIdsToLock.push(balance.id)
       } else {
@@ -608,7 +639,7 @@ export async function createShipment(
           select: { id: true },
         })
         if (!balance) {
-          throw new Error(`[${salesOrderItem.item.code}] 선택한 창고에 출하 가능한 재고가 없습니다.`)
+          throw new ShipmentPlanError(`[${salesOrderItem.item.code}] 선택한 창고에 출하 가능한 재고가 없습니다.`)
         }
         balanceIdsToLock.push(balance.id)
       }
@@ -635,7 +666,7 @@ export async function createShipment(
 
       if (isLotTracked) {
         if (!item.lotId) {
-          throw new Error(`[${salesOrderItem.item.code}] LOT 관리 품목은 LOT를 선택해야 합니다.`)
+          throw new ShipmentPlanError(`[${salesOrderItem.item.code}] LOT 관리 품목은 LOT를 선택해야 합니다.`)
         }
 
         const lot = await tx.lot.findFirst({
@@ -643,10 +674,10 @@ export async function createShipment(
           select: { id: true, lotNo: true, itemId: true },
         })
         if (!lot) {
-          throw new Error("출하할 완제품 LOT를 찾을 수 없습니다.")
+          throw new ShipmentPlanError("출하할 완제품 LOT를 찾을 수 없습니다.")
         }
         if (lot.itemId !== item.itemId) {
-          throw new Error(`LOT(${lot.lotNo}) 품목과 출하 품목이 일치하지 않습니다.`)
+          throw new ShipmentPlanError(`LOT(${lot.lotNo}) 품목과 출하 품목이 일치하지 않습니다.`)
         }
 
         await assertLotQualityReleaseAllowed(tx, { tenantId, lotId: lot.id })
@@ -661,17 +692,22 @@ export async function createShipment(
           },
         })
         if (!balance) {
-          throw new Error(`LOT(${lot.lotNo})의 출하 가능 재고가 없습니다.`)
+          throw new ShipmentPlanError(`LOT(${lot.lotNo})의 출하 가능 재고가 없습니다.`)
         }
         const reserved = await tx.shipmentItem.aggregate({
           where: { itemId: item.itemId, lotId: lot.id, shipmentOrder: { tenantId, siteId: warehouse.siteId, warehouseId, status: "PLANNED" } },
           _sum: { qty: true },
         })
         const reservableQty = calculateReservableQty(Number(balance.qtyAvailable), Number(reserved._sum.qty ?? 0))
-        if (reservableQty < item.qty || Number(balance.qtyOnHand) < item.qty) {
-          throw new Error(
-            `LOT(${lot.lotNo}) 예약 가능 수량(${reservableQty})보다 많은 수량(${item.qty})을 출하할 수 없습니다.`,
-          )
+        if (reservableQty < item.qty) {
+          throw new ShipmentPlanError(lotReservableExceededMessage({
+            lotNo: lot.lotNo,
+            requestedQty: item.qty,
+            reservableQty,
+          }))
+        }
+        if (Number(balance.qtyOnHand) < item.qty) {
+          throw new ShipmentPlanError(`출하예정 등록 불가\nLOT(${lot.lotNo})의 실재고(${Number(balance.qtyOnHand)})가 요청 수량(${item.qty})보다 적습니다.`)
         }
 
         await tx.shipmentItem.create({
@@ -696,7 +732,7 @@ export async function createShipment(
           },
         })
         if (!balance) {
-          throw new Error(`[${salesOrderItem.item.code}] 선택한 창고에 출하 가능한 재고가 없습니다.`)
+          throw new ShipmentPlanError(`[${salesOrderItem.item.code}] 선택한 창고에 출하 가능한 재고가 없습니다.`)
         }
         const qtyAvailable = Number(balance.qtyAvailable)
         const reserved = await tx.shipmentItem.aggregate({
@@ -705,9 +741,11 @@ export async function createShipment(
         })
         const reservableQty = calculateReservableQty(qtyAvailable, Number(reserved._sum.qty ?? 0))
         if (reservableQty < item.qty) {
-          throw new Error(
-            `[${salesOrderItem.item.code}] 예약 가능 수량(${reservableQty})보다 많은 수량(${item.qty})을 출하할 수 없습니다.`,
-          )
+          throw new ShipmentPlanError(stockReservableExceededMessage({
+            itemCode: salesOrderItem.item.code,
+            requestedQty: item.qty,
+            reservableQty,
+          }))
         }
 
         await tx.shipmentItem.create({
@@ -747,6 +785,34 @@ export async function createShipment(
   revalidatePath("/app/mes/inventory")
   revalidatePath("/app/mes/inventory-transactions")
   revalidatePath("/app/mes/manufacturing-traceability")
+}
+
+export type SubmitShipmentPlanResult = { ok: true } | { ok: false; message: string }
+
+/**
+ * 출하예정 등록 화면용 래퍼. 업무 규칙 위반은 ShipmentPlanError 의 한국어 메시지를 값으로 돌려준다.
+ * (운영 빌드에서는 서버 액션이 던진 오류 메시지가 가려지므로 화면이 값으로 받아야 한다.)
+ * 그 밖의 예기치 못한 오류는 서버 로그에만 남기고, 화면에는 내부 정보가 없는 일반 문구만 보낸다.
+ * 재고 차감은 하지 않는다(예약만). createShipment 의 트랜잭션·잠금 로직을 그대로 쓴다.
+ */
+export async function submitShipmentPlan(
+  tenantId: string,
+  data: CreateShipmentInput
+): Promise<SubmitShipmentPlanResult> {
+  try {
+    await createShipment(tenantId, data)
+    return { ok: true }
+  } catch (error) {
+    // name 으로 판별한다: 모듈이 중복 로드되는 환경(테스트 하네스 등)에서도 instanceof 가 깨지지 않게
+    if (error instanceof Error && error.name === "ShipmentPlanError") {
+      return { ok: false, message: error.message }
+    }
+    if (error instanceof Error && error.message === CONCURRENT_QUANTITY_CHANGE_MESSAGE) {
+      return { ok: false, message: CONCURRENT_QUANTITY_CHANGE_MESSAGE }
+    }
+    console.error("[shipment-plan] 출하예정 등록 실패(예상하지 못한 오류):", error)
+    return { ok: false, message: SHIPMENT_PLAN_SYSTEM_ERROR_MESSAGE }
+  }
 }
 
 export async function confirmShipment(id: string) {

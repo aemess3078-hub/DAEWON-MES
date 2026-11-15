@@ -171,6 +171,12 @@ export function SalesOrderDetailSheet({
                 {progress?.customerDeliveryDate ?? toKstDateKey(new Date(salesOrder.deliveryDate))}
               </p>
             </div>
+            <div className="space-y-0.5">
+              <p className="text-[12px] text-muted-foreground uppercase tracking-wide">거래처 발주번호</p>
+              <p className="text-[14px] font-medium font-mono" data-testid="so-detail-po-no">
+                {salesOrder.customerPoNo || "—"}
+              </p>
+            </div>
             {salesOrder.totalAmount && (
               <div className="space-y-0.5">
                 <p className="text-[12px] text-muted-foreground uppercase tracking-wide">총금액</p>

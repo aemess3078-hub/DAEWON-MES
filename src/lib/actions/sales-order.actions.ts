@@ -5,6 +5,7 @@ import { requireRole, requireTenantAccess } from "@/lib/auth"
 import { PlanStatus, Prisma, SalesOrderStatus } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { getErrorMessage } from "@/lib/utils"
+import { normalizeCustomerPoNo } from "@/lib/sales-order-excel"
 import { hasResourcePermission, getCurrentPermissionSnapshot, requireResourcePermission } from "@/lib/auth/role-permissions"
 import { buildAuditChanges, recordAuditLog, summarizeAuditItems } from "@/lib/audit-log"
 import { kstDateParts, withUniqueBusinessNumberRetry } from "@/lib/business-numbering"
@@ -160,6 +161,43 @@ export async function generateSalesOrderNo(tenantId: string): Promise<string> {
   return `${prefix}${String(seq).padStart(3, "0")}`
 }
 
+export type SalesOrderPoDuplicate = {
+  orderNo: string
+  status: string
+  orderDate: string
+  deliveryDate: string
+  customerPoNo: string
+  itemSummary: string
+}
+
+/** 같은 거래처·같은 발주번호(대소문자 무시)로 이미 등록된 수주(취소 제외)를 찾는다. 읽기 전용 — 수주 등록·수정 화면의 중복 안내용. */
+export async function findSalesOrderPoDuplicates(customerId: string, customerPoNo: string, excludeOrderId?: string): Promise<SalesOrderPoDuplicate[]> {
+  await requireResourcePermission("SALES_ORDER", "READ")
+  const actor = await requireRole("VIEWER")
+  const po = normalizeCustomerPoNo(customerPoNo)
+  if (!po || !customerId) return []
+  const rows = await prisma.salesOrder.findMany({
+    where: {
+      tenantId: actor.tenantId,
+      customerId,
+      status: { not: "CANCELLED" },
+      customerPoNo: { equals: po, mode: "insensitive" },
+      ...(excludeOrderId ? { id: { not: excludeOrderId } } : {}),
+    },
+    select: { orderNo: true, status: true, orderDate: true, deliveryDate: true, customerPoNo: true, items: { select: { qty: true, item: { select: { code: true } } } } },
+    orderBy: { createdAt: "desc" },
+    take: 5,
+  })
+  return rows.map((r) => ({
+    orderNo: r.orderNo,
+    status: r.status,
+    orderDate: r.orderDate.toISOString().slice(0, 10),
+    deliveryDate: r.deliveryDate.toISOString().slice(0, 10),
+    customerPoNo: r.customerPoNo ?? po,
+    itemSummary: r.items.map((i) => `${i.item.code} ×${Number(i.qty)}`).join(", "),
+  }))
+}
+
 // ─── CRUD ─────────────────────────────────────────────────────────────────────
 
 export type CreateSalesOrderItemInput = {
@@ -179,6 +217,8 @@ export type CreateSalesOrderInput = {
   totalAmount?: number
   currency?: string
   note?: string
+  /** 거래처(고객사) 발주번호. 선택값 — 문자열 그대로 저장한다 */
+  customerPoNo?: string | null
   items: CreateSalesOrderItemInput[]
 }
 
@@ -190,11 +230,16 @@ export async function createSalesOrder(
   await requireResourcePermission("SALES_ORDER", "CREATE")
   const actor = await requireRole("OPERATOR")
   if (actor.tenantId !== tenantId) throw new Error("FORBIDDEN")
+  // 수량 미입력·0 이하 품목은 저장하지 않는다 (화면 검증과 같은 기준을 서버에서도 다시 확인)
+  if (data.items.some((i) => !(Number.isFinite(Number(i.qty)) && Number(i.qty) > 0))) {
+    throw new Error("수주 수량은 0보다 커야 합니다.")
+  }
   // 신규 수주는 등록 즉시 확정(CONFIRMED)으로 저장한다. 화면이 보낸 상태값과 무관하며 서버가 최종 결정한다.
   // (생산중·부분출하·출하완료는 처리 결과로 자동 변경되고, 완료·취소는 등록 대상이 아니다. 기존 초안 수주는 건드리지 않는다.)
   const resolvedStatus = resolveNewSalesOrderStatus(data.status)
   if (!resolvedStatus.ok) throw new Error(resolvedStatus.error)
   const newStatus = resolvedStatus.status as SalesOrderStatus
+  const customerPoNo = normalizeCustomerPoNo(data.customerPoNo)
   const order = await withUniqueBusinessNumberRetry(async () => {
     const orderNo = await generateSalesOrderNo(tenantId)
     return prisma.$transaction(async (tx) => {
@@ -210,6 +255,7 @@ export async function createSalesOrder(
           totalAmount: data.totalAmount,
           currency: data.currency ?? "KRW",
           note: data.note,
+          customerPoNo,
           items: {
             create: data.items.map((item) => ({
               itemId: item.itemId,
@@ -232,6 +278,7 @@ export async function createSalesOrder(
           siteId,
           customerId: data.customerId,
           status: newStatus,
+          customerPoNo,
           itemCount: data.items.length,
           items: summarizeAuditItems(data.items, ["itemId", "qty", "unitPrice"]),
         },
@@ -252,6 +299,8 @@ export type UpdateSalesOrderInput = {
   totalAmount?: number
   currency?: string
   note?: string
+  /** undefined: 변경 없음 / null 또는 빈 문자열: 발주번호 삭제 */
+  customerPoNo?: string | null
   items?: CreateSalesOrderItemInput[]
 }
 
@@ -339,6 +388,7 @@ export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput):
           ...(data.totalAmount !== undefined && { totalAmount: data.totalAmount }),
           ...(data.currency !== undefined && { currency: data.currency }),
           ...(data.note !== undefined && { note: data.note }),
+          ...(data.customerPoNo !== undefined && { customerPoNo: normalizeCustomerPoNo(data.customerPoNo) }),
         },
         include: { items: true },
       })
@@ -364,6 +414,7 @@ export async function updateSalesOrder(id: string, data: UpdateSalesOrderInput):
             "totalAmount",
             "currency",
             "note",
+            "customerPoNo",
           ]),
           itemCount: updated.items.length,
           ...(applyItems && data.items ? { itemsChanged: true, items: summarizeAuditItems(data.items, ["itemId", "qty", "unitPrice"]) } : {}),
@@ -477,6 +528,7 @@ export type ItemStockStatus = {
   orderedQty: number
   shippedQty: number
   remainingQty: number
+  plannedQty: number       // 기존 출하예정(PLANNED) 예약 수량
   availableStock: number   // 전체 창고 합산 가용재고
   shippableQty: number     // min(remainingQty, availableStock)
   shortageQty: number      // max(0, remainingQty - availableStock)
@@ -507,6 +559,19 @@ export async function checkInventoryForSalesOrder(
     stockMap.set(b.itemId, (stockMap.get(b.itemId) ?? 0) + Number(b.qtyAvailable))
   }
 
+  // 기존 출하예정(PLANNED) 예약 수량 — createShipment 의 수주 품목 한도 계산과 같은 기준(tenant 전체 PLANNED)
+  const plannedRows = await prisma.shipmentItem.groupBy({
+    by: ["salesOrderItemId"],
+    where: {
+      salesOrderItemId: { in: order.items.map((i) => i.id) },
+      shipmentOrder: { tenantId, status: "PLANNED" },
+    },
+    _sum: { qty: true },
+  })
+  const plannedBySalesOrderItem = new Map(
+    plannedRows.map((row) => [row.salesOrderItemId, Number(row._sum.qty ?? 0)]),
+  )
+
   return order.items.map((soi) => {
     const orderedQty = Number(soi.qty)
     const shippedQty = Number(soi.shippedQty ?? 0)
@@ -524,6 +589,8 @@ export async function checkInventoryForSalesOrder(
       orderedQty,
       shippedQty,
       remainingQty,
+      /** 기존 출하예정(PLANNED) 예약 수량 — 추가 출하 가능 = 수주 − 출하완료 − 이 값 */
+      plannedQty: plannedBySalesOrderItem.get(soi.id) ?? 0,
       availableStock,
       shippableQty,
       shortageQty,

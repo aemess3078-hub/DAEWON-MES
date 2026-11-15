@@ -2540,6 +2540,9 @@ model SalesOrder {
   totalAmount  Decimal?         @db.Decimal(18, 2)
   currency     String           @default("KRW")
   note         String?
+  /// 거래처(고객사) 발주번호. 문자열로 저장(앞자리 0·영문 조합 보존). 선택값.
+  /// UNIQUE 로 두지 않는다: 같은 발주번호로 분할 납품·재등록이 가능하며 중복 여부는 등록 시 경고로 확인한다.
+  customerPoNo String?
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
 
@@ -2556,6 +2559,7 @@ model SalesOrder {
   @@index([customerId])
   @@index([status])
   @@index([tenantId, deliveryDate])
+  @@index([tenantId, customerId, customerPoNo])
 }
 
 model SalesOrderItem {

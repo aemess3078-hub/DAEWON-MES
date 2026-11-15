@@ -39,6 +39,8 @@ const lotRow = (l: FakeLot): AvailableFinishedGoodsLot => ({
   warehouseName: WAREHOUSES.find((w) => w.id === l.warehouseId)?.name ?? "",
   locationId: null,
   locationName: null,
+  qtyStock: l.qty,
+  qtyReserved: 0,
   qtyAvailable: l.qty,
 })
 
