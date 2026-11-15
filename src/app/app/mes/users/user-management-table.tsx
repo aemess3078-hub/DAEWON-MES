@@ -498,7 +498,7 @@ export function UserManagementTable({
                   <td className="px-5 py-3 text-[14px] font-mono text-muted-foreground">
                     {user.loginId ?? <span className="text-[12px] italic text-muted-foreground/40">없음</span>}
                   </td>
-                  <td className="px-5 py-3 text-[14px] text-muted-foreground">{user.email}</td>
+                  <td className="px-5 py-3 text-[14px] text-muted-foreground">{user.email?.endsWith("@daewon-mes.internal") ? "" : user.email}</td>
                   <td className="px-5 py-3 text-[14px] text-muted-foreground">
                     <span>{user.department ?? "—"}</span>
                     {user.jobTitle && (
