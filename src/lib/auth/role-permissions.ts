@@ -40,6 +40,7 @@ const MENU_CODE_RESOURCE_MAP: Record<string, string> = {
   "finished-goods-receipt": "WORK_RESULT",
   inventory: "INVENTORY",
   stock: "INVENTORY",
+  "stock-count": "INVENTORY",
   "material-receipt": "PURCHASE_ORDER",
   "material-issue": "PURCHASE_ORDER",
   "material-issue-history": "PURCHASE_ORDER",
