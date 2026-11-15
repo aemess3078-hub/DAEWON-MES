@@ -106,6 +106,9 @@ export function dateKeyDiffDays(a: string, b: string): number {
 /** 시간당 생산량(UPH) KPI 기준공정의 라우팅 공정순서 (NRV: 10 = 가공(HEAD)). 공정별 표준시간이 달라 전 공정을 합산하면 의미가 없다. */
 export const UPH_BASIS_OPERATION_SEQ = 10
 
+/** KPI 대시보드 기본 조회기간(KST). 시연 데이터(NRV) 측정 기간 기준 — 실운영 전환 시 최근 N일로 되돌린다. */
+export const DEFAULT_KPI_PERIOD = { from: "2026-10-01", to: "2026-11-13" } as const
+
 export type ProductionFact = {
   /** ProductionResult.id — 중복 집계 방지 키 */
   id: string

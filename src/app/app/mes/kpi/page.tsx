@@ -1,5 +1,6 @@
 import { getDaewonKpiData, getDaewonKpiFilterOptions } from "@/lib/actions/daewon-kpi.actions"
-import { kstDefaultDateRange, isValidKstDateRange } from "@/lib/date/kst"
+import { isValidKstDateRange } from "@/lib/date/kst"
+import { DEFAULT_KPI_PERIOD } from "@/lib/kpi/daewon-kpi"
 import { DaewonKpiClient } from "./daewon-kpi-client"
 
 export const dynamic = "force-dynamic"
@@ -19,10 +20,10 @@ interface Props {
 
 export default async function KpiDashboardPage({ searchParams }: Props) {
   const params = searchParams ? await searchParams : {}
-  const defaults = kstDefaultDateRange(30)
+  const defaults = DEFAULT_KPI_PERIOD
   const requestedFrom = params.from?.trim()
   const requestedTo = params.to?.trim()
-  // 잘못된 기간(형식 오류·from>to)은 기본 기간(최근 30일, KST)으로 대체한다.
+  // 잘못된 기간(형식 오류·from>to)은 기본 기간(DEFAULT_KPI_PERIOD)으로 대체한다.
   const validRange = !!requestedFrom && !!requestedTo && isValidKstDateRange(requestedFrom, requestedTo)
 
   const [data, filterOptions] = await Promise.all([
