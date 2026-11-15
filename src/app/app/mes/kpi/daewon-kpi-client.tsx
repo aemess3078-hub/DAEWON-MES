@@ -186,12 +186,6 @@ export function DaewonKpiClient({ data, filterOptions, initialKpi }: Props) {
     ppm: data.evaluations.ppm.actual,
     onTime: data.evaluations.onTime.actual,
   }
-  const cardMeta: Record<KpiKey, string> = {
-    uph: prod.uph.validCount > 0 ? `양품 ${fmt(prod.uph.goodQty, 0)}개 ÷ ${fmt(prod.uph.hours, 1)}h` : "작업시간이 기록된 실적 없음",
-    ppm: prod.ppm.totalQty > 0 ? `불량 ${fmt(prod.ppm.defectQty, 0)} ÷ 총 ${fmt(prod.ppm.totalQty, 0)}` : "생산실적 없음",
-    onTime: del.dueCount > 0 ? `납기 내 ${fmt(del.onTimeCount, 0)}건 ÷ 도래 ${fmt(del.dueCount, 0)}건` : "납기 도래 수주품목 없음",
-  }
-
   const selectCls =
     "border border-border rounded-md px-3 py-2 text-[14px] bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring min-w-[180px] disabled:opacity-50 disabled:cursor-not-allowed"
   const labelCls = "text-[13px] font-medium text-muted-foreground"
@@ -335,7 +329,6 @@ export function DaewonKpiClient({ data, filterOptions, initialKpi }: Props) {
                   <span className="text-[18px] text-muted-foreground">데이터 없음</span>
                 )}
               </div>
-              <p className="text-[13px] text-muted-foreground mt-1">현재 MES 실적 · {cardMeta[key]}</p>
               <p className="text-[13px] text-primary mt-3">{active ? "▼ 아래 상세 분석 표시 중" : "클릭하여 상세 분석 보기"}</p>
             </button>
           )
