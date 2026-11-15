@@ -103,6 +103,9 @@ export function dateKeyDiffDays(a: string, b: string): number {
 
 // ─── 생산실적 기반 집계 (UPH / PPM) ───────────────────────────────────────────
 
+/** 시간당 생산량(UPH) KPI 기준공정의 라우팅 공정순서 (NRV: 10 = 가공(HEAD)). 공정별 표준시간이 달라 전 공정을 합산하면 의미가 없다. */
+export const UPH_BASIS_OPERATION_SEQ = 10
+
 export type ProductionFact = {
   /** ProductionResult.id — 중복 집계 방지 키 */
   id: string
@@ -120,6 +123,8 @@ export type ProductionFact = {
   reworkQty: number
   /** 실제 작업시간(h). 시작/종료 미기록 또는 0 이하이면 null */
   hours: number | null
+  /** UPH 기준공정 실적 여부. 기준공정 실적이 하나도 없으면 전체 실적을 기준으로 계산한다. */
+  uphBasis?: boolean
 }
 
 export type UphGroupRow = { key: string; label: string; sub?: string; goodQty: number; hours: number; resultCount: number; uph: number | null }
@@ -175,7 +180,9 @@ export function summarizeProduction(rawFacts: ProductionFact[], granularity: Tre
   }
   const duplicateSkipped = rawFacts.length - facts.length
 
-  const valid = facts.filter((f) => f.hours != null)
+  const hasBasis = facts.some((f) => f.uphBasis)
+  const candidates = hasBasis ? facts.filter((f) => f.uphBasis) : facts
+  const valid = candidates.filter((f) => f.hours != null)
   const uphGood = valid.reduce((s, f) => s + f.goodQty, 0)
   const uphHours = valid.reduce((s, f) => s + (f.hours ?? 0), 0)
 
@@ -247,7 +254,7 @@ export function summarizeProduction(rawFacts: ProductionFact[], granularity: Tre
       goodQty: uphGood,
       hours: uphHours,
       validCount: valid.length,
-      excludedCount: facts.length - valid.length,
+      excludedCount: candidates.length - valid.length,
       byItem: uphGroups(byItem),
       byProcess: uphGroups(byProcess),
       byEquipment: uphGroups(byEquipment),
