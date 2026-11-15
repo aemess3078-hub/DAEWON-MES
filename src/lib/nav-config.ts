@@ -149,6 +149,8 @@ export const MES_NAV: NavItem[] = [
     children: [
       { id: 'nav-lms-status', parentId: 'section-monitoring', label: '현황모니터링', icon: 'Monitor', href: '/app/lms/monitoring/status', displayOrder: 1, children: [] },
       { id: 'nav-lms-analysis', parentId: 'section-monitoring', label: '분석모니터링', icon: 'Activity', href: '/app/mes/equipment-monitor', displayOrder: 2, children: [] },
+      // 스마트공장 KPI(시간당 생산량/공정불량률/납기준수율). 접근 권한은 DASHBOARD(대시보드/KPI) READ.
+      { id: 'nav-kpi-dashboard', parentId: 'section-monitoring', label: 'KPI 대시보드', icon: 'BarChart2', href: '/app/mes/kpi', displayOrder: 3, children: [] },
     ],
   },
 
@@ -208,8 +210,7 @@ export const DAEWON_HIDDEN_NAV: ReadonlyArray<{ id: string; label: string; href:
   { id: 'nav-mold-management', label: '금형·치공구관리', href: '/app/mes/master/molds', reason: '목표 메뉴 외' },
   { id: 'nav-downtime-reasons', label: '비가동사유', href: '/app/mes/master/downtime-reasons', reason: '목표 메뉴 외' },
   { id: 'nav-backups', label: '백업관리', href: '/app/mes/backups', reason: 'Supabase Management 토큰 필요 — 필요 시 재노출' },
-  // KPI / 리포트 / 대시보드
-  { id: 'nav-kpi-dashboard', label: 'KPI 대시보드', href: '/app/mes/kpi', reason: '목표 메뉴 외' },
+  // 리포트 / 대시보드 (KPI 대시보드는 모니터링 메뉴로 노출 — MES_NAV 참고)
   { id: 'nav-production-progress', label: '생산현황', href: '/app/mes/production-progress', reason: 'NewMES 브랜드 전용 화면(NEXT_PUBLIC_BRAND=newmes)' },
   { id: 'nav-report-production-daily', label: '생산일보', href: '/app/mes/reports/production-daily', reason: '목표 메뉴 외' },
   { id: 'nav-report-quality', label: '품질리포트', href: '/app/mes/reports/quality', reason: '목표 메뉴 외' },
