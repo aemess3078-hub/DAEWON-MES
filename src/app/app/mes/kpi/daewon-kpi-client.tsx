@@ -6,14 +6,13 @@ import {
   CartesianGrid,
   Line,
   LineChart,
-  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts"
 import type { DaewonKpiData, DaewonKpiFilterOptions } from "@/lib/actions/daewon-kpi.actions"
-import type { KpiAchievementStatus, KpiKey, TrendPoint } from "@/lib/kpi/daewon-kpi"
+import type { KpiKey, TrendPoint } from "@/lib/kpi/daewon-kpi"
 
 interface Props {
   data: DaewonKpiData
@@ -27,18 +26,6 @@ const nf = (d: number) => new Intl.NumberFormat("ko-KR", { minimumFractionDigits
 
 function fmt(v: number | null | undefined, decimals: number): string {
   return v == null || !Number.isFinite(v) ? "—" : nf(decimals).format(v)
-}
-
-function fmtSigned(v: number | null, decimals = 1): string {
-  if (v == null || !Number.isFinite(v)) return "계산 불가"
-  return `${v > 0 ? "+" : ""}${nf(decimals).format(v)}%`
-}
-
-const STATUS_META: Record<KpiAchievementStatus, { label: string; badge: string; bar: string }> = {
-  EXCEEDED: { label: "초과 달성", badge: "bg-emerald-100 text-emerald-700", bar: "bg-emerald-500" },
-  ACHIEVED: { label: "목표 달성", badge: "bg-emerald-100 text-emerald-700", bar: "bg-emerald-500" },
-  NOT_ACHIEVED: { label: "목표 미달", badge: "bg-amber-100 text-amber-800", bar: "bg-amber-500" },
-  NO_DATA: { label: "데이터 없음", badge: "bg-muted text-muted-foreground", bar: "bg-muted-foreground/40" },
 }
 
 const KPI_ORDER: KpiKey[] = ["uph", "ppm", "onTime"]
@@ -102,15 +89,11 @@ function SubTitle({ children }: { children: React.ReactNode }) {
 function TrendChart({
   title,
   points,
-  baseline,
-  target,
   unit,
   decimals,
 }: {
   title: string
   points: TrendPoint[]
-  baseline: number
-  target: number
   unit: string
   decimals: number
 }) {
@@ -120,14 +103,6 @@ function TrendChart({
     <div className="rounded-lg border border-border bg-card p-4">
       <div className="flex items-center justify-between mb-2">
         <p className="text-[15px] font-semibold text-foreground">{title}</p>
-        <div className="flex items-center gap-3 text-[13px] text-muted-foreground">
-          <span className="inline-flex items-center gap-1">
-            <span className="inline-block w-4 border-t-2 border-dashed border-emerald-500" /> 목표 {fmt(target, decimals)}
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <span className="inline-block w-4 border-t-2 border-dashed border-slate-400" /> 구축 전 {fmt(baseline, decimals)}
-          </span>
-        </div>
       </div>
       {hasData ? (
         <div className="h-[220px]">
@@ -138,15 +113,13 @@ function TrendChart({
               <YAxis
                 tick={{ fontSize: 12 }}
                 width={56}
-                domain={[(min: number) => Math.min(min, baseline, target) * 0.95, (max: number) => Math.max(max, baseline, target) * 1.05]}
+                domain={[(min: number) => min * 0.95, (max: number) => max * 1.05]}
                 tickFormatter={(v: number) => nf(decimals === 0 ? 0 : 0).format(v)}
               />
               <Tooltip
                 formatter={(v: unknown) => [`${fmt(typeof v === "number" ? v : null, decimals)} ${unit}`, title]}
                 contentStyle={{ fontSize: 13 }}
               />
-              <ReferenceLine y={target} stroke="#10b981" strokeDasharray="6 4" />
-              <ReferenceLine y={baseline} stroke="#94a3b8" strokeDasharray="6 4" />
               <Line type="monotone" dataKey="value" stroke="#2563eb" strokeWidth={2} dot={{ r: 3 }} connectNulls={false} />
             </LineChart>
           </ResponsiveContainer>
@@ -336,11 +309,7 @@ export function DaewonKpiClient({ data, filterOptions, initialKpi }: Props) {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {KPI_ORDER.map((key) => {
           const def = t[key]
-          const ev = data.evaluations[key]
-          const st = STATUS_META[ev.status]
           const active = activeKpi === key
-          const ach = ev.achievementRate
-          const barPct = ach == null ? 0 : Math.max(0, Math.min(100, ach))
           return (
             <button
               key={key}
@@ -352,7 +321,6 @@ export function DaewonKpiClient({ data, filterOptions, initialKpi }: Props) {
             >
               <div className="flex items-center justify-between gap-2">
                 <p className="text-[18px] font-semibold text-foreground">{def.label}</p>
-                <span className={`px-2.5 py-0.5 rounded-full text-[13px] font-medium ${st.badge}`}>{st.label}</span>
               </div>
 
               <div className="mt-3 flex items-baseline gap-2">
@@ -368,35 +336,6 @@ export function DaewonKpiClient({ data, filterOptions, initialKpi }: Props) {
                 )}
               </div>
               <p className="text-[13px] text-muted-foreground mt-1">현재 MES 실적 · {cardMeta[key]}</p>
-
-              <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-[14px]">
-                <div>
-                  <p className="text-[13px] text-muted-foreground">구축 전</p>
-                  <p className="tabular-nums text-foreground">
-                    {fmt(def.baseline, def.decimals)} {def.unit}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[13px] text-muted-foreground">목표</p>
-                  <p className="tabular-nums text-foreground">
-                    {fmt(def.target, def.decimals)} {def.unit}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-[13px] text-muted-foreground">구축 전 대비 개선율</p>
-                  <p className="tabular-nums text-foreground">{fmtSigned(ev.improvementRate)}</p>
-                </div>
-                <div>
-                  <p className="text-[13px] text-muted-foreground">목표 달성률</p>
-                  <p className="tabular-nums text-foreground font-medium">
-                    {ach == null ? "계산 불가" : `${nf(1).format(ach)}%`}
-                  </p>
-                </div>
-              </div>
-
-              <div className="mt-3 h-2 rounded-full bg-muted overflow-hidden">
-                <div className={`h-full ${st.bar}`} style={{ width: `${barPct}%` }} />
-              </div>
               <p className="text-[13px] text-primary mt-3">{active ? "▼ 아래 상세 분석 표시 중" : "클릭하여 상세 분석 보기"}</p>
             </button>
           )
@@ -427,9 +366,9 @@ export function DaewonKpiClient({ data, filterOptions, initialKpi }: Props) {
           </div>
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          <TrendChart title="시간당 생산량" points={prod.uph.trend} baseline={t.uph.baseline} target={t.uph.target} unit={t.uph.unit} decimals={t.uph.decimals} />
-          <TrendChart title="공정불량률" points={prod.ppm.trend} baseline={t.ppm.baseline} target={t.ppm.target} unit={t.ppm.unit} decimals={t.ppm.decimals} />
-          <TrendChart title="납기준수율" points={del.trend} baseline={t.onTime.baseline} target={t.onTime.target} unit={t.onTime.unit} decimals={t.onTime.decimals} />
+          <TrendChart title="시간당 생산량" points={prod.uph.trend} unit={t.uph.unit} decimals={t.uph.decimals} />
+          <TrendChart title="공정불량률" points={prod.ppm.trend} unit={t.ppm.unit} decimals={t.ppm.decimals} />
+          <TrendChart title="납기준수율" points={del.trend} unit={t.onTime.unit} decimals={t.onTime.decimals} />
         </div>
         <p className="text-[13px] text-muted-foreground">
           시간당 생산량·공정불량률은 생산실적 일자(KST), 납기준수율은 약속 납기일 기준으로 집계합니다. 월별 값은 해당 월 전체 실적을 합산해 다시 계산한 값입니다.

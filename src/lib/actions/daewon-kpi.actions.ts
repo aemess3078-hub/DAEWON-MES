@@ -11,7 +11,7 @@ import {
   actualProductionEquipmentWhere,
   resolveActualProductionEquipment,
 } from "@/lib/equipment-result-attribution"
-import { kstDateRangeToUtcBounds, kstDefaultDateRange, toKstDateKey } from "@/lib/date/kst"
+import { kstDateRangeToUtcBounds, toKstDateKey } from "@/lib/date/kst"
 import {
   DAEWON_KPI_TARGETS,
   evaluateKpi,
@@ -23,6 +23,7 @@ import {
   type KpiEvaluation,
   type ProductionFact,
   UPH_BASIS_OPERATION_SEQ,
+  DEFAULT_KPI_PERIOD,
   type ProductionKpiSummary,
   type TrendGranularity,
 } from "@/lib/kpi/daewon-kpi"
@@ -308,7 +309,7 @@ async function fetchDeliveryLines(tenantId: string, f: DaewonKpiFilter): Promise
 export async function getDaewonKpiData(filterOverride?: Partial<DaewonKpiFilter>): Promise<DaewonKpiData> {
   await assertKpiAccess()
   const tenantId = await getTenantId()
-  const defaults = kstDefaultDateRange(30)
+  const defaults = DEFAULT_KPI_PERIOD
   const granularity: TrendGranularity = filterOverride?.granularity === "month" ? "month" : "day"
   const filter: DaewonKpiFilter & { granularity: TrendGranularity } = {
     from: filterOverride?.from ?? defaults.from,
