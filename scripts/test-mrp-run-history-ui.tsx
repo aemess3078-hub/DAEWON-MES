@@ -238,7 +238,16 @@ function row(over: Partial<SuggestionTableRow> = {}): SuggestionTableRow {
 }
 const edit = (over: Partial<SuggestionRowEdit> = {}): SuggestionRowEdit => ({ selected: false, qty: "50", supplierId: "sa", requiredDate: "2026-10-20", ...over })
 const renderTable = (rows: SuggestionTableRow[], edits: Record<string, SuggestionRowEdit>) =>
-  renderToStaticMarkup(<PurchaseSuggestionTable rows={rows} edits={edits} priceVisible={false} onChange={() => {}} onToggleAll={() => {}} />)
+  renderToStaticMarkup(
+    <PurchaseSuggestionTable
+      rows={rows}
+      edits={edits}
+      priceVisible={false}
+      onChange={() => {}}
+      onToggleAll={() => {}}
+      defaultExpandedIds={rows.map((r) => r.componentItemId)}
+    />
+  )
 
 {
   const partial = renderTable([row()], { r1: edit() })
@@ -247,12 +256,12 @@ const renderTable = (rows: SuggestionTableRow[], edits: Record<string, Suggestio
   ok(partial.includes("→ MOQ 50"), "표: 남은 20 에 MOQ 50 적용 표시")
   ok(partial.includes("DRAFT 는 입고예정/재고가 아닙니다"), "표: DRAFT 는 입고예정/재고가 아님")
   ok(partial.includes("PO-2026-000012"), "표: 기존 DRAFT 발주번호")
-  ok(partial.includes("기존 DRAFT 일부 충족"), "표: 일부 충족 칩")
+  ok(partial.includes("DRAFT 일부"), "표: 일부 충족 상태")
   ok(!partial.includes("추가 발주 확인"), "추가분이 있으면 override 입력 없음")
 
   const covered = row({ draftCoverageQty: 110, draftOpenQty: 110, draftCoverageBySupplier: { sa: 110 }, remainingRawNeed: 0, additionalQty: 0, coverageStatus: "COVERED" })
   const unselected = renderTable([covered], { r1: edit({ qty: "" }) })
-  ok(unselected.includes("기존 DRAFT 발주로 제안량 충족") && unselected.includes("기존 DRAFT 충족"), "표: 충족 → '기존 DRAFT 발주로 제안량 충족' 상태")
+  ok(unselected.includes("기존 DRAFT 발주로 필요량 충족") && unselected.includes("DRAFT 충족"), "표: 충족 → 'DRAFT 충족' 상태 + 필요량 충족 안내")
   ok(!unselected.includes("추가 발주 사유"), "선택하지 않으면 override 입력 숨김")
   const selected = renderTable([covered], { r1: edit({ qty: "10", selected: true }) })
   ok(selected.includes("추가 발주 확인") && selected.includes("추가 발주 사유"), "충족 품목을 선택하면 확인 + 사유 입력 노출")

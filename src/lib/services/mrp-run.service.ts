@@ -135,7 +135,7 @@ export async function persistMrpRun(
   const run = await tx.mrpRun.create({
     data: {
       tenantId,
-      runType: "ORDER_MRP",
+      runType: built.snapshot.meta.runType,
       mode: "NORMAL",
       status: "SAVED",
       baseDate: dateAt(built.columns.baseDate) as Date,
@@ -189,7 +189,7 @@ export async function persistMrpRun(
       action: "CREATE",
       afterData: {
         source: args.source,
-        runType: "ORDER_MRP",
+        runType: built.snapshot.meta.runType,
         mode: "NORMAL",
         baseDate: built.columns.baseDate,
         from: built.columns.fromDate,

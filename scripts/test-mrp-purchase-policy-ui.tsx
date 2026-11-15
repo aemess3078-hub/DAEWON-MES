@@ -86,7 +86,14 @@ const edit = (over: Partial<SuggestionRowEdit> = {}): SuggestionRowEdit => ({
 })
 const render = (rows: SuggestionTableRow[], edits: Record<string, SuggestionRowEdit>) =>
   renderToStaticMarkup(
-    <PurchaseSuggestionTable rows={rows} edits={edits} priceVisible onChange={() => {}} onToggleAll={() => {}} />
+    <PurchaseSuggestionTable
+      rows={rows}
+      edits={edits}
+      priceVisible
+      onChange={() => {}}
+      onToggleAll={() => {}}
+      defaultExpandedIds={rows.map((r) => r.componentItemId)}
+    />
   )
 
 // U1: 안전재고 부족 + 구매조건 + 발주 필요일
@@ -126,7 +133,7 @@ const render = (rows: SuggestionTableRow[], edits: Record<string, SuggestionRowE
 
   const overdue = render([row({ requiredDate: "2026-10-04" })], { r1: edit({ requiredDate: "2026-10-04" }) })
   ok(overdue.includes("2026-09-27") && overdue.includes("4일 경과"), "U4 발주 필요일 9/27 · 4일 경과")
-  ok(overdue.includes("발주 필요일 경과") && overdue.includes("긴급조달/납기협의"), "U4 발주 필요일 경과 Badge + 긴급조달/납기협의 안내")
+  ok(overdue.includes("발주일 경과"), "U4 발주일 경과 상태 Badge")
 }
 
 // U5: 일시 미달 — 자동 제안 없음
@@ -134,14 +141,14 @@ const render = (rows: SuggestionTableRow[], edits: Record<string, SuggestionRowE
   const r = row({ kind: "SAFETY_STOCK_TEMPORARY", suggestedQty: 0, rawSuggestedQty: 0, finalTargetDeficit: 0, peakTargetDeficit: 10, finalBalance: 40, minProjectedBalance: 10, shortageRecoveredAt: null })
   const html = render([r], { r1: edit({ qty: "" }) })
   ok(html.includes("안전재고 일시 미달"), "U5 상태: 안전재고 일시 미달")
-  ok(html.includes("납기 당김 / 긴급조달 검토") && html.includes("기본 0"), "U5 검토 안내 + 제안수량 기본 0")
+  ok(html.includes("납기 당김 / 긴급조달 검토") && html.includes("기본 발주수량 0"), "U5 검토 안내 + 발주수량 기본 0")
 }
 
 // U6: 안전재고 0 이면 안전재고 컬럼 값이 '-' (5C 의미 유지)
 {
   const r = row({ kind: "FINAL_SHORTAGE", safetyStock: 0, minProjectedBalance: -60, finalBalance: -60, peakShortageQty: 60, finalShortageQty: 60 })
   const html = render([r], { r1: edit() })
-  ok(html.includes("최종 부족"), "U6 안전재고 0: 최종 부족 상태 유지")
+  ok(html.includes('title="부족"'), "U6 안전재고 0: 부족 상태 유지")
 }
 
 console.log(`\n✅ mrp-purchase-policy-ui: ${passed} checks passed`)

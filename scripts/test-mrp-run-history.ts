@@ -873,7 +873,14 @@ async function main() {
     const migs = readdirSync(join(root, "prisma", "migrations")).filter((n) => /^\d{14}_/.test(n)).sort()
     // 이후 migration(예: 자재입고 멱등성)이 추가되어도 Phase 6 migration 이 그대로 존재하면 된다 — "최신" 고정은 새 migration 마다 깨진다
     ok(migs.includes("20261014020000_add_mrp_run_history"), "Phase 6 migration 존재")
-    ok(migs.filter((n) => n > "20261014020000_add_mrp_run_history").every((n) => !/mrp/i.test(read("prisma", "migrations", n, "migration.sql").split("\n").filter((l) => !l.trim().startsWith("--")).join("\n"))), "이후 migration 은 MRP 테이블을 건드리지 않음")
+    // 예외: 생산계획 MRP 발주(PLAN_MRP) 근거 저장을 위해 MrpRun.runType CHECK 만 넓히는 migration 1건(컬럼/데이터 변경 없음)
+    const PLAN_MIG = "20261112000000_mrp_run_type_plan_mrp"
+    ok(migs.filter((n) => n > "20261014020000_add_mrp_run_history" && n !== PLAN_MIG).every((n) => !/mrp/i.test(read("prisma", "migrations", n, "migration.sql").split("\n").filter((l) => !l.trim().startsWith("--")).join("\n"))), "이후 migration 은 MRP 테이블을 건드리지 않음(PLAN_MRP CHECK 확장 1건 제외)")
+    if (migs.includes(PLAN_MIG)) {
+      const sql = read("prisma", "migrations", PLAN_MIG, "migration.sql").split("\n").filter((l) => !l.trim().startsWith("--")).join("\n")
+      ok(/ALTER TABLE "MrpRun" DROP CONSTRAINT IF EXISTS "MrpRun_runType_chk"/.test(sql) && /ADD CONSTRAINT "MrpRun_runType_chk" CHECK \("runType" IN \('ORDER_MRP', 'PLAN_MRP'\)\)/.test(sql), "PLAN_MRP migration 은 runType CHECK 만 변경")
+      ok(!/(ADD COLUMN|DROP COLUMN|DROP TABLE|CREATE TABLE|INSERT|UPDATE|DELETE)/i.test(sql.replace(/ADD CONSTRAINT/gi, "")), "PLAN_MRP migration 에 컬럼/데이터 변경 없음")
+    }
     const sql = read("prisma", "migrations", "20261014020000_add_mrp_run_history", "migration.sql")
       .split("\n")
       .filter((l) => !l.trim().startsWith("--"))

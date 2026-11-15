@@ -219,33 +219,11 @@ export function OrderMrpPanel() {
             hint: "납기순 차감 중 1개 이상 자재가 부족해지는 수주 라인",
             tone: view.kpi.shortageDemandCount > 0 ? "danger" : undefined,
           },
-          {
-            label: "BOM 누락 수주",
-            value: fmt(view.kpi.bomIssueLineCount),
-            hint: "ACTIVE 기본 BOM 이 없거나 오류라 계산에서 제외된 수주 라인",
-            tone: view.kpi.bomIssueLineCount > 0 ? "warn" : undefined,
-          },
-          ...(view.scheduledReceipts.enabled
-            ? [
-                {
-                  label: "일시 결품",
-                  value: fmt(view.kpi.temporaryShortageMaterialCount),
-                  hint: "기간 중 결품이 있었지만 입고예정으로 최종 예상재고가 0 이상으로 회복되는 자재(납기 대응·독촉 필요)",
-                  tone: view.kpi.temporaryShortageMaterialCount > 0 ? ("warn" as const) : undefined,
-                },
-              ]
-            : []),
         ]
       : [
           { label: "대상 기간", value: periodText, hint: "납기 기준, 시작일·종료일 포함" },
           { label: "대상 수주라인", value: fmt(view.kpi.demandLineCount), hint: "기간 내 납기이며 미출하 잔량이 있는 라인" },
-          { label: "대상 제품", value: fmt(view.kpi.productCount), hint: "대상 수주라인의 고유 제품(품목) 수" },
           { label: "필요 자재", value: fmt(view.kpi.requiredMaterialCount), hint: "기간 소요량이 있는 자재 종류" },
-          {
-            label: "소요 라인",
-            value: fmt(view.kpi.requirementLineCount),
-            hint: "수주 라인 × 자재 소요 건수 (단위가 달라 수량은 합산하지 않음)",
-          },
           {
             label: "부족 자재",
             value: fmt(view.kpi.shortageMaterialCount),
@@ -274,13 +252,7 @@ export function OrderMrpPanel() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-[20px] font-semibold">수주기준 자재소요 및 결품예측</h2>
-        <p className="text-[14px] text-muted-foreground mt-1">
-          미출하 수주를 납기순으로 처리하며 자재 가용재고를 순차 차감해 부족 시점과 원인 수주를 확인하고, 기간별 자재 소요량을
-          분석합니다.
-        </p>
-      </div>
+      <h2 className="text-[20px] font-semibold">수주기준 MRP</h2>
 
       {/* 조건 */}
       <div className="rounded-xl border p-4 space-y-4">
@@ -307,13 +279,16 @@ export function OrderMrpPanel() {
             {isPending ? "계산 중..." : "조회 / MRP 실행"}
           </Button>
         </div>
-        <p className="text-[13px] text-muted-foreground">
-          재고 기준 = 가용재고(격리/보류 LOT 제외) · 출하잔량 = 수주수량 − 출하확정수량(계획 출하는 차감하지 않음)
-          {includeReceipts &&
-            " · 입고예정 = 발주완료/부분입고 발주의 미입고 잔량(발주수량 − 입고수량)을 입고예정일 기준으로 반영하며, 같은 날은 입고가 수주보다 먼저입니다. 예정일이 지난 미입고는 반영하지 않습니다."}
-          {selection.mode !== "ALL" &&
-            " · 기간 MRP 는 선택 기간에 납기가 있는 수주만 차감하며, 기간 이전 납기의 미출하 수주는 재고를 선점하지 않습니다."}
-        </p>
+        <details className="text-[14px]">
+          <summary className="cursor-pointer list-none font-medium text-muted-foreground">계산 기준 도움말</summary>
+          <p className="mt-2 text-[14px] leading-relaxed text-muted-foreground">
+            미출하 수주를 납기순으로 처리하며 가용재고(격리/보류 LOT 제외)를 순차 차감해 부족 시점과 원인 수주를 계산합니다. 출하잔량 = 수주수량 − 출하확정수량.
+            {includeReceipts &&
+              " 입고예정 = 발주완료/부분입고 발주의 미입고 잔량이며 입고예정일 기준으로 반영합니다(같은 날은 입고가 먼저, 예정일이 지난 미입고는 반영하지 않음)."}
+            {selection.mode !== "ALL" &&
+              " 기간 MRP 는 선택 기간에 납기가 있는 수주만 차감하며, 기간 이전 납기의 미출하 수주는 재고를 선점하지 않습니다."}
+          </p>
+        </details>
       </div>
 
       {error && (
@@ -352,18 +327,11 @@ export function OrderMrpPanel() {
                 {t.label}
               </Button>
             ))}
-            <span className="text-[13px] text-muted-foreground ml-2">
-              {viewMode === "shortage"
-                ? "재고 대비 부족 시점과 원인 수주"
-                : viewMode === "requirement"
-                  ? "이 기간에 어떤 자재가 얼마나 필요한가"
-                  : "부족 자재를 공급업체별 구매발주(DRAFT)로 변환 — 자동 발주확정 없음"}
-            </span>
           </div>
 
           {viewMode === "purchase" && (
             <PurchaseSuggestionPanel
-              params={{ from: view.params.from, to: view.params.to, includeDraft: view.params.includeDraft }}
+              source={{ kind: "ORDER", params: { from: view.params.from, to: view.params.to, includeDraft: view.params.includeDraft } }}
               refreshKey={payload!.calculatedAt}
             />
           )}
@@ -371,28 +339,23 @@ export function OrderMrpPanel() {
           {viewMode !== "purchase" && (
             <>
           {/* KPI */}
-          <div
-            className={`grid grid-cols-2 gap-4 ${
-              viewMode === "shortage" ? (receiptsOn ? "lg:grid-cols-6" : "lg:grid-cols-5") : "lg:grid-cols-6"
-            }`}
-          >
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {kpis.map((k) => (
               <div
                 key={k.label}
-                className={`rounded-xl border p-4 ${
+                className={`rounded-xl border px-4 py-3 ${
                   k.tone === "danger" ? "bg-red-50/60 border-red-200" : k.tone === "warn" ? "bg-amber-50/60 border-amber-200" : "bg-muted/30"
                 }`}
                 title={k.hint}
               >
                 <p className="text-[13px] text-muted-foreground">{k.label}</p>
                 <p
-                  className={`${k.value.length > 8 ? "text-[18px]" : "text-[28px]"} font-bold leading-tight ${
+                  className={`${k.value.length > 8 ? "text-[18px]" : "text-[26px]"} font-bold leading-tight tabular-nums ${
                     k.tone === "danger" ? "text-red-600" : k.tone === "warn" ? "text-amber-600" : ""
                   }`}
                 >
                   {k.value}
                 </p>
-                <p className="text-[13px] text-muted-foreground leading-snug">{k.hint}</p>
               </div>
             ))}
           </div>

@@ -1,13 +1,7 @@
 "use client"
 
-import { useState, useTransition } from "react"
-import {
-  Calculator,
-  Package,
-  AlertTriangle,
-  CheckCircle,
-  XCircle,
-} from "lucide-react"
+import { useState } from "react"
+import { Calculator } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Select,
@@ -16,10 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { MrpResultTable } from "./mrp-result-table"
-import { runMRP, createPurchaseOrdersFromMRP } from "@/lib/actions/mrp.actions"
-import { MRP_PURCHASE_CREATION_DISABLED_MESSAGE, MRP_PURCHASE_CREATION_ENABLED } from "@/lib/mrp/purchase-creation-policy"
-import type { MRPResult } from "@/lib/services/mrp.service"
+import { PurchaseSuggestionPanel } from "./purchase-suggestion-panel"
 
 type Plan = {
   id: string
@@ -31,126 +22,27 @@ type Plan = {
 
 type Props = {
   plans: Plan[]
-  tenantId: string
-  siteId: string
 }
 
-type SummaryCard = {
-  label: string
-  value: number
-  icon: React.ElementType
-  color: string
-  bg: string
-}
-
-export function MrpDashboard({ plans, tenantId, siteId }: Props) {
+/**
+ * 생산계획 MRP — 계획 선택 → MRP 실행 → 부족 자재 목록(수주기준 MRP 와 같은 발주제안 패널) → DRAFT 구매발주 생성.
+ * 계산은 서버가 기존 생산계획 MRP 로직 그대로 수행하며, 발주 생성도 수주기준과 같은 서버 파이프라인을 쓴다.
+ */
+export function MrpDashboard({ plans }: Props) {
   const [selectedPlanId, setSelectedPlanId] = useState<string>("")
-  const [mrpResult, setMrpResult] = useState<MRPResult | null>(null)
-  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set())
-  const [isPending, startTransition] = useTransition()
-  const [isCreatingPO, setIsCreatingPO] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
+  // MRP 실행을 누른 시점의 계획/실행 키 — 선택만 바꾸고 실행하지 않으면 이전 결과를 그대로 둔다
+  const [run, setRun] = useState<{ planId: string; key: string } | null>(null)
 
   const handleRunMRP = () => {
     if (!selectedPlanId) return
-    startTransition(async () => {
-      try {
-        const result = await runMRP(selectedPlanId)
-        setMrpResult(result)
-        setSelectedItemIds(new Set())
-        setMessage(null)
-      } catch (e) {
-        setMessage(e instanceof Error ? e.message : "MRP 계산 실패")
-      }
-    })
+    setRun({ planId: selectedPlanId, key: String(Date.now()) })
   }
-
-  const handleToggleItem = (itemId: string) => {
-    setSelectedItemIds((prev) => {
-      const next = new Set(prev)
-      if (next.has(itemId)) {
-        next.delete(itemId)
-      } else {
-        next.add(itemId)
-      }
-      return next
-    })
-  }
-
-  const handleToggleAll = () => {
-    if (!mrpResult) return
-    const shortageIds = mrpResult.items
-      .filter((i) => i.status !== "SUFFICIENT")
-      .map((i) => i.itemId)
-    if (selectedItemIds.size === shortageIds.length) {
-      setSelectedItemIds(new Set())
-    } else {
-      setSelectedItemIds(new Set(shortageIds))
-    }
-  }
-
-  const selectedPlan = plans.find((p) => p.id === selectedPlanId)
-
-  const handleBulkOrder = async () => {
-    if (!mrpResult || selectedItemIds.size === 0 || !selectedPlan) return
-    setIsCreatingPO(true)
-    const items = mrpResult.items
-      .filter((i) => selectedItemIds.has(i.itemId))
-      .map((i) => ({ itemId: i.itemId, qty: i.suggestedOrderQty }))
-    const planSiteId = (selectedPlan as any).siteId ?? siteId
-    const result = await createPurchaseOrdersFromMRP(items, tenantId, planSiteId)
-    setIsCreatingPO(false)
-    if (result.success) {
-      setMessage(`발주 생성 완료: ${result.orderNo}`)
-      setSelectedItemIds(new Set())
-    } else {
-      setMessage(`오류: ${result.error}`)
-    }
-  }
-
-  const summaryCards: SummaryCard[] = mrpResult
-    ? [
-        {
-          label: "전체 자재",
-          value: mrpResult.items.length,
-          icon: Package,
-          color: "text-foreground",
-          bg: "bg-muted/30",
-        },
-        {
-          label: "충분",
-          value: mrpResult.totalSufficientItems,
-          icon: CheckCircle,
-          color: "text-emerald-600",
-          bg: "bg-emerald-50",
-        },
-        {
-          label: "부족",
-          value: mrpResult.totalShortageItems,
-          icon: AlertTriangle,
-          color: "text-amber-600",
-          bg: "bg-amber-50",
-        },
-        {
-          label: "긴급",
-          value: mrpResult.totalCriticalItems,
-          icon: XCircle,
-          color: "text-red-600",
-          bg: "bg-red-50",
-        },
-      ]
-    : []
-
-  const isMessageSuccess = message?.startsWith("발주 생성 완료")
 
   return (
-    <div className="space-y-6">
-      {/* 계획 선택 + 실행 */}
+    <div className="space-y-4">
       <div className="flex items-end gap-3">
-        <div className="flex-1 max-w-sm">
-          <label className="text-[13px] font-medium text-muted-foreground mb-1.5 block">
-            생산계획 선택
-          </label>
+        <div className="max-w-md flex-1">
+          <label className="mb-1.5 block text-[13px] font-medium text-muted-foreground">생산계획</label>
           <Select value={selectedPlanId} onValueChange={setSelectedPlanId}>
             <SelectTrigger>
               <SelectValue placeholder="계획을 선택하세요" />
@@ -169,89 +61,13 @@ export function MrpDashboard({ plans, tenantId, siteId }: Props) {
             </SelectContent>
           </Select>
         </div>
-        <Button
-          onClick={handleRunMRP}
-          disabled={!selectedPlanId || isPending}
-          className="gap-2"
-        >
-          <Calculator className="w-4 h-4" />
-          {isPending ? "계산 중..." : "MRP 실행"}
+        <Button onClick={handleRunMRP} disabled={!selectedPlanId} className="gap-2">
+          <Calculator className="h-4 w-4" />
+          MRP 실행
         </Button>
       </div>
 
-      {/* 알림 메시지 */}
-      {message && (
-        <div
-          className={`px-4 py-3 rounded-lg text-[14px] border ${
-            isMessageSuccess
-              ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-              : "bg-red-50 border-red-200 text-red-700"
-          }`}
-        >
-          {message}
-        </div>
-      )}
-
-      {/* 요약 카드 */}
-      {mrpResult && (
-        <div className="grid grid-cols-4 gap-4">
-          {summaryCards.map((card) => (
-            <div key={card.label} className={`rounded-xl border p-4 ${card.bg}`}>
-              <div className="flex items-center gap-2 mb-1">
-                <card.icon className={`w-4 h-4 ${card.color}`} />
-                <span className="text-[13px] text-muted-foreground">{card.label}</span>
-              </div>
-              <p className={`text-[28px] font-bold leading-none ${card.color}`}>
-                {card.value}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* 결과 테이블 */}
-      {mrpResult && mrpResult.items.length > 0 && (
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-[18px] font-semibold">소요량 계산 결과</h2>
-            {selectedItemIds.size > 0 && (
-              <Button
-                onClick={handleBulkOrder}
-                disabled={isCreatingPO || !MRP_PURCHASE_CREATION_ENABLED}
-                size="sm"
-                className="gap-2"
-              >
-                <Package className="w-4 h-4" />
-                {selectedItemIds.size}개 자재 발주 생성
-              </Button>
-            )}
-          </div>
-          {!MRP_PURCHASE_CREATION_ENABLED && (
-            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[14px] text-amber-800">
-              {MRP_PURCHASE_CREATION_DISABLED_MESSAGE}
-            </div>
-          )}
-          <MrpResultTable
-            items={mrpResult.items}
-            selectedIds={selectedItemIds}
-            onToggle={handleToggleItem}
-            onToggleAll={handleToggleAll}
-          />
-          <p className="text-[12px] text-muted-foreground">
-            계산 시각: {mrpResult.calculatedAt.toLocaleString("ko-KR")}
-          </p>
-        </div>
-      )}
-
-      {mrpResult && mrpResult.items.length === 0 && (
-        <div className="text-center py-12 text-muted-foreground border rounded-xl">
-          <Package className="w-12 h-12 mx-auto mb-3 opacity-30" />
-          <p className="text-[15px]">
-            BOM이 등록된 품목이 없어 소요량을 계산할 수 없습니다.
-          </p>
-          <p className="text-[13px] mt-1">BOM에서 자재 구성을 등록해주세요.</p>
-        </div>
-      )}
+      {run && <PurchaseSuggestionPanel source={{ kind: "PLAN", planId: run.planId }} refreshKey={run.key} />}
     </div>
   )
 }

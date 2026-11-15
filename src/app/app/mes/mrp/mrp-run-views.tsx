@@ -18,7 +18,7 @@ const fmtDateTime = (iso: string) => {
   return `${kst.getUTCFullYear()}-${p(kst.getUTCMonth() + 1)}-${p(kst.getUTCDate())} ${p(kst.getUTCHours())}:${p(kst.getUTCMinutes())}`
 }
 
-export const RUN_TYPE_LABEL: Record<string, string> = { ORDER_MRP: "수주기준 MRP" }
+export const RUN_TYPE_LABEL: Record<string, string> = { ORDER_MRP: "수주기준 MRP", PLAN_MRP: "생산계획 MRP" }
 export const RUN_STATUS_LABEL: Record<string, string> = { SAVED: "저장됨" }
 export const PO_STATUS_LABEL: Record<string, string> = {
   DRAFT: "DRAFT(미확정)",

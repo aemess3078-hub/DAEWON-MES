@@ -8,15 +8,16 @@ import { SimulationPanel } from "./simulation-panel"
 
 type Props = {
   plans: React.ComponentProps<typeof MrpDashboard>["plans"]
-  tenantId: string
-  siteId: string
+  /** 호환용(미사용): tenant/사이트는 서버가 인증 컨텍스트와 생산계획에서 결정한다 */
+  tenantId?: string
+  siteId?: string
 }
 
 /**
  * 수주기준 MRP(대원정밀 기본) + 품목 시뮬레이션(What-if, 실제 수주와 독립) + 실행이력(Phase 6 Snapshot) + 기존 생산계획 MRP(그대로 유지).
  * 실행이력 탭은 저장된 결과를 보여 줄 뿐 계산하지 않는다.
  */
-export function MrpTabs({ plans, tenantId, siteId }: Props) {
+export function MrpTabs({ plans }: Props) {
   return (
     <Tabs defaultValue="order" className="space-y-6">
       <TabsList>
@@ -43,13 +44,8 @@ export function MrpTabs({ plans, tenantId, siteId }: Props) {
         <MrpRunHistoryPanel />
       </TabsContent>
       <TabsContent value="plan" className="mt-0 space-y-4">
-        <div>
-          <h2 className="text-[20px] font-semibold">생산계획 기반 자재소요량</h2>
-          <p className="text-[14px] text-muted-foreground mt-1">
-            생산계획 기반 BOM 전개 → 자재 소요량 계산 → 발주 제안
-          </p>
-        </div>
-        <MrpDashboard plans={plans} tenantId={tenantId} siteId={siteId} />
+        <h2 className="text-[20px] font-semibold">생산계획 MRP</h2>
+        <MrpDashboard plans={plans} />
       </TabsContent>
     </Tabs>
   )

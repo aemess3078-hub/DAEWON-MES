@@ -30,7 +30,10 @@
  *    결정적 sha256 = requestHash)이면 새로 만들지 않고 처음 결과를 돌려준다(replayed=true).
  *    같은 키에 **다른 요청**이면 replay 하지 않고 IDEMPOTENCY_KEY_REUSE_MISMATCH 로 거부한다(쓰기 0).
  *    requestHash 는 MrpRunPurchase.result(삽입 시 기록, 불변)에 저장한다 — 별도 컬럼/migration 없음.
- *  - 근거: runId(이미 저장한 실행이력) 또는 mrp 파라미터(생성 시점에 서버가 계산해 Snapshot 을 같은 트랜잭션에서 저장).
+ *  - 근거: runId(이미 저장한 실행이력) 또는 mrp 파라미터(수주기준 — 생성 시점에 서버가 계산해 Snapshot 을 같은 트랜잭션에서 저장)
+ *    또는 planId(생산계획 MRP — 서버가 생산계획을 다시 계산해 PLAN_MRP Snapshot 으로 저장. 같은 파이프라인·같은 Coverage 규칙).
+ *    생산계획 기반은 발주서 사이트를 생산계획의 사이트로 고정한다(클라이언트 siteId 는 같은 값일 때만 허용).
+ *    수주기준/생산계획 어느 쪽에서 만든 DRAFT 든 품목 전체 Coverage 로 같은 소요량 중복 발주가 막힌다.
  *    MrpRunPurchase 가 (실행, 발주, 라인 근거, override)를 연결한다. DRAFT PO 는 입고예정/재고가 아니다.
  */
 
@@ -85,6 +88,8 @@ export type DraftPoInput = {
   runId?: string | null
   /** (Phase 6) runId 가 없을 때 생성 시점에 서버가 MRP 를 계산해 Snapshot 으로 저장할 기준 파라미터 */
   mrp?: { from?: string | null; to?: string | null; includeDraft?: boolean } | null
+  /** 생산계획 MRP 기준 생성: 서버가 생산계획을 다시 계산한다(runId/mrp 와 동시에 쓸 수 없음) */
+  planId?: string | null
   /** (Phase 6) itemId → 기존 DRAFT 가 충족한 필요량을 알면서도 추가 발주하는 사유(필수, 감사 기록) */
   coverageOverrides?: Record<string, string | null | undefined> | null
 }
@@ -118,6 +123,7 @@ export type DraftPoErrorCode =
   | "DUPLICATE_RUN_LINE"
   | "OVERRIDE_REASON_REQUIRED"
   | "RUN_NOT_FOUND"
+  | "PLAN_NOT_FOUND"
   | "IDEMPOTENCY_KEY_REUSE_MISMATCH"
   | "SNAPSHOT_FAILED"
   | "CREATION_DISABLED"
@@ -134,6 +140,7 @@ export const DRAFT_PO_ERROR_MESSAGES: Record<DraftPoErrorCode, string> = {
   DUPLICATE_RUN_LINE: "같은 MRP 실행에서 이미 발주를 생성한 품목·공급업체가 포함되어 있습니다. 의도적인 추가 발주라면 사유를 입력해 주세요.",
   OVERRIDE_REASON_REQUIRED: "추가 발주 사유를 입력해 주세요.",
   RUN_NOT_FOUND: "MRP 실행이력을 찾을 수 없습니다.",
+  PLAN_NOT_FOUND: "생산계획을 찾을 수 없거나 확정된 계획이 아닙니다.",
   IDEMPOTENCY_KEY_REUSE_MISMATCH:
     "같은 요청 키로 이미 다른 내용의 요청이 처리되었습니다. 화면을 새로고침한 뒤 구매발주 목록을 확인하고 다시 시도해 주세요.",
   SNAPSHOT_FAILED: "MRP 실행 Snapshot 을 만들지 못했습니다. 조회 기간을 줄이거나 잠시 후 다시 시도해 주세요.",
@@ -190,6 +197,7 @@ export type NormalizedHistoryInput = {
   requestKey: string | null
   runId: string | null
   mrp: { from: string | null; to: string | null; includeDraft: boolean } | null
+  planId: string | null
   overrides: Map<string, string>
 }
 
@@ -252,6 +260,13 @@ export function normalizeDraftPoInput(input: unknown):
       return { ok: false }
     }
   }
+  let planId: string | null = null
+  if (raw.planId !== undefined && raw.planId !== null) {
+    if (typeof raw.planId !== "string" || raw.planId.length === 0 || raw.planId.length > 100) return { ok: false }
+    planId = raw.planId
+  }
+  // 근거는 실행이력 / 수주기준 파라미터 / 생산계획 중 하나만
+  if ([runId, mrp, planId].filter((v) => v !== null).length > 1) return { ok: false }
   const overrides = new Map<string, string>()
   if (raw.coverageOverrides !== undefined && raw.coverageOverrides !== null) {
     if (typeof raw.coverageOverrides !== "object") return { ok: false }
@@ -263,7 +278,7 @@ export function normalizeDraftPoInput(input: unknown):
       overrides.set(itemId, trimmed)
     }
   }
-  return { ok: true, lines: Array.from(merged.values()), groupDates, siteId, history: { requestKey, runId, mrp, overrides } }
+  return { ok: true, lines: Array.from(merged.values()), groupDates, siteId, history: { requestKey, runId, mrp, planId, overrides } }
 }
 
 /**
@@ -289,6 +304,7 @@ export function computeDraftRequestHash(n: {
       siteId: n.siteId,
       runId: n.history.runId,
       mrp: n.history.mrp,
+      planId: n.history.planId,
       overrides,
     })
   )
@@ -311,6 +327,12 @@ export async function createDraftPurchaseOrdersFromSuggestions(
         params: { from: string | null; to: string | null; includeDraft: boolean },
         now: () => Date
       ) => Promise<BuiltMrpRun>
+      /** 생산계획 MRP: 서버가 계획을 다시 계산해 Snapshot 을 만든다. 계획이 없거나 확정/진행 상태가 아니면 null */
+      loadPlanBuilt?: (
+        tenantId: string,
+        planId: string,
+        now: () => Date
+      ) => Promise<{ built: BuiltMrpRun; siteId: string; planNo: string } | null>
     }
   },
   input: DraftPoInput
@@ -326,7 +348,9 @@ export async function createDraftPurchaseOrdersFromSuggestions(
   const history = deps.history ? normalized.history : null
   if (history) {
     // 서버 액션 경로: 멱등 키와 근거(실행이력 또는 MRP 파라미터)가 반드시 있어야 한다
-    if (history.requestKey === null || (history.runId === null && history.mrp === null)) return fail("INVALID_INPUT")
+    if (history.requestKey === null || (history.runId === null && history.mrp === null && history.planId === null)) {
+      return fail("INVALID_INPUT")
+    }
   }
   const requestHash = history ? computeDraftRequestHash(normalized) : null
   const year = Number(toDateOnly(now).slice(0, 4))
@@ -337,7 +361,23 @@ export async function createDraftPurchaseOrdersFromSuggestions(
   //  - 계산 입력은 기간/DRAFT 수주 포함 여부뿐이며 결과는 클라이언트에서 받지 않는다.
   //  - Coverage 는 이 값과 무관하게 잠금 후 트랜잭션 안에서 다시 읽는다.
   let built: BuiltMrpRun | null = null
-  if (deps.history && history && history.runId === null) {
+  let planSiteId: string | null = null
+  let planNo: string | null = null
+  if (deps.history && history && history.planId !== null) {
+    if (!deps.history.loadPlanBuilt) return fail("INVALID_INPUT")
+    try {
+      const loaded = await deps.history.loadPlanBuilt(tenantId, history.planId, deps.now ?? (() => new Date()))
+      if (!loaded) return fail("PLAN_NOT_FOUND")
+      built = loaded.built
+      planSiteId = loaded.siteId
+      planNo = loaded.planNo
+    } catch (e) {
+      if (!isSnapshotTooLarge(e)) console.error("[createDraftPurchaseOrdersFromSuggestions] plan snapshot build failed:", e)
+      return fail("SNAPSHOT_FAILED")
+    }
+    // 사이트는 생산계획의 사이트로 고정: 클라이언트가 다른 사이트를 보내면 거부(다른 사업장으로 발주 방지)
+    if (normalized.siteId !== null && normalized.siteId !== planSiteId) return fail("INVALID_REFERENCE")
+  } else if (deps.history && history && history.runId === null) {
     try {
       built = await deps.history.loadBuilt(tenantId, history.mrp!, deps.now ?? (() => new Date()))
     } catch (e) {
@@ -421,8 +461,9 @@ export async function createDraftPurchaseOrdersFromSuggestions(
 
       // 3) 사이트(tenant 소유)
       let site: { id: string } | null
-      if (normalized.siteId) {
-        site = await tx.site.findFirst({ where: { id: normalized.siteId, tenantId }, select: { id: true } })
+      const siteIdToUse = planSiteId ?? normalized.siteId
+      if (siteIdToUse) {
+        site = await tx.site.findFirst({ where: { id: siteIdToUse, tenantId }, select: { id: true } })
         if (!site) throw new DraftFailure("INVALID_REFERENCE")
       } else {
         site = await tx.site.findFirst({ where: { tenantId }, orderBy: { name: "asc" }, select: { id: true } })
@@ -598,7 +639,7 @@ export async function createDraftPurchaseOrdersFromSuggestions(
             status: "DRAFT",
             totalAmount,
             currency: g.currency,
-            note: NOTE,
+            note: planNo ? `MRP 발주제안(생산계획 ${planNo})으로 생성된 초안입니다. 단가와 입고예정일을 확인한 뒤 발주확정하세요.` : NOTE,
             items: {
               create: itemRows.map((r) => ({
                 itemId: r.itemId,
