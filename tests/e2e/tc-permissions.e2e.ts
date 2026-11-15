@@ -30,7 +30,10 @@ const ALL_PERM_TCS = loadTcs().filter((t) => t.type === "권한/범위")
 const ONLY = process.env.PERM_ONLY ? new RegExp(process.env.PERM_ONLY) : null
 const MENU_TCS = ALL_PERM_TCS.filter((t) => !["DW-TC-255", "DW-TC-279"].includes(t.id) && (!ONLY || ONLY.test(t.id)))
 const SEC_PATHS = ["/app/mes/customers", "/app/mes/vendors", "/app/mes/items", "/app/mes/sites", "/app/mes/locations", "/app/mes/master/equipment", "/app/mes/work-centers", "/app/mes/master/item-categories", "/app/mes/users", "/app/mes/defects", "/app/mes/quality/work-standards", "/app/mes/sales-orders", "/app/mes/shipments", "/app/mes/purchase-orders", "/app/mes/work-orders", "/app/mes/production-plan", "/app/mes/bom", "/app/mes/ecn", "/app/mes/master/inspection-standards", "/app/mes/material-receipt", "/app/mes/lot"]
-const DEV_ONLY_PATHS = ["/app/mes/gateways", "/app/mes/equipment-connections", "/app/mes/tags", "/app/mes/lot-rules", "/app/mes/features", "/app/mes/common-codes"]
+const DEV_ONLY_PATHS = ["/app/mes/gateways", "/app/mes/equipment-connections", "/app/mes/tags", "/app/mes/features", "/app/mes/common-codes"]
+// 번호 규칙(/app/mes/lot-rules)은 개발자 전용이 아니라 개발자·OWNER·ADMIN 에게 열린 운영 메뉴다(커밋 1c06345 — daewon-scope.ts DAEWON_ADMIN_ROUTES, nav minRole ADMIN, scripts/test-numbering-rule-access.ts, 메뉴구성표 "ADMIN 이상").
+const LOT_RULES_PATH = "/app/mes/lot-rules"
+const LOT_RULES_EXPECTED_STATUS: Record<string, number> = { OWNER: 200, ADMIN: 200, MANAGER: 404, OPERATOR: 404, VIEWER: 404, DEV: 200 }
 const MUTATION_BTN = /(등록|추가|수정|삭제|저장|업로드|확정|승인|취소)/
 
 let actions: ActionInfo[] = []
@@ -260,6 +263,13 @@ test("[SEC-03] 개발자 전용 메뉴: 일반 계정은 직접 URL 이 404 로 
     await r.text()
     out.push(`개발자(test) GET ${p} → ${r.status}`)
     if (r.status >= 400) problems.push(`개발자 ${p} → ${r.status}`)
+  }
+  // 번호 규칙: 정책(개발자·OWNER·ADMIN 만 접근)대로 역할별로 확인한다 — 정책을 넓히거나 좁혀서 통과시키지 않는다.
+  for (const [role, want] of Object.entries(LOT_RULES_EXPECTED_STATUS)) {
+    const r = await fetch(E2E_BASE + LOT_RULES_PATH, { headers: { cookie: cookies[role as keyof typeof cookies]! }, redirect: "manual" })
+    await r.text()
+    out.push(`${role} GET ${LOT_RULES_PATH} → ${r.status} (기대 ${want})`)
+    if (r.status !== want) problems.push(`${role} ${LOT_RULES_PATH} → ${r.status} (${want} 기대)`)
   }
   record({ tcId: "SEC-03", out, problems })
   expect(problems, problems.join("\n")).toEqual([])

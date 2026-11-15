@@ -20,6 +20,7 @@ import { requireResourcePermission } from "@/lib/auth/role-permissions"
 import { recordAuditLog } from "@/lib/audit-log"
 import { assertNoAttachmentsForEntity } from "./attachment.actions"
 import { assertDaewonFeatureScope } from "@/lib/auth/daewon-scope.server"
+import { BusinessRuleError, businessFailure } from "@/lib/business-error.server"
 
 export type { CreateMeasurementInput }
 
@@ -514,6 +515,22 @@ export async function getInspectionSpecs(tenantId: string): Promise<InspectionSp
   return specs.map(serializeInspectionSpec)
 }
 
+/**
+ * 검사표준의 품목과 공정(라우팅)의 정합: 품목 전용(ITEM_SPECIFIC) 라우팅의 공정에는 그 라우팅에 연결된 품목의 검사표준만 만들 수 있다.
+ * 공용(COMMON) 라우팅은 모든 품목에 쓸 수 있다. 작업표준서 매핑(validateRoutingForItemContext)과 같은 규칙이다.
+ */
+async function assertItemLinkedToOperationRouting(tenantId: string, itemId: string, routingOperationId: string) {
+  const op = await prisma.routingOperation.findFirst({
+    where: { id: routingOperationId, routing: { tenantId } },
+    select: { routing: { select: { id: true, scope: true } } },
+  })
+  if (!op || op.routing.scope !== "ITEM_SPECIFIC") return
+  const link = await prisma.itemRouting.findFirst({ where: { tenantId, itemId, routingId: op.routing.id }, select: { id: true } })
+  if (!link) {
+    throw new BusinessRuleError("선택한 공정의 라우팅은 이 품목에 연결되어 있지 않습니다. 품목에 연결된 라우팅의 공정을 선택해 주세요.")
+  }
+}
+
 export async function createInspectionSpec(
   data: CreateInspectionSpecInput,
   tenantId: string
@@ -521,6 +538,8 @@ export async function createInspectionSpec(
   await requireTenantAccess(tenantId)
   await requireResourcePermission("INSPECTION_SPEC", "CREATE")
   await requireRole("OPERATOR")
+  try {
+  await assertItemLinkedToOperationRouting(tenantId, data.itemId, data.routingOperationId)
   const existing = await prisma.inspectionSpec.findFirst({
     where: {
       tenantId,
@@ -544,12 +563,16 @@ export async function createInspectionSpec(
   revalidatePath("/app/mes/measurement")
   revalidatePath("/app/mes/master/inspection-standards")
   return { id: created.id }
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 export async function updateInspectionSpec(id: string, data: UpdateInspectionSpecInput) {
   await requireResourcePermission("INSPECTION_SPEC", "UPDATE")
   await requireRole("OPERATOR")
   const tenantId = await getTenantId()
+  try {
   const ownedSpec = await prisma.inspectionSpec.findFirst({ where: { id: id, tenantId }, select: { id: true } })
   if (!ownedSpec) throw new Error("검사표준을 찾을 수 없습니다.")
   await prisma.inspectionSpec.update({
@@ -561,6 +584,9 @@ export async function updateInspectionSpec(id: string, data: UpdateInspectionSpe
   })
   revalidatePath("/app/mes/measurement")
   revalidatePath("/app/mes/master/inspection-standards")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 export async function deleteInspectionSpec(id: string) {
@@ -591,6 +617,7 @@ export async function upsertInspectionItems(
   await requireResourcePermission("INSPECTION_SPEC", "UPDATE")
   await requireRole("OPERATOR")
   const tenantId = await getTenantId()
+  try {
   const ownedSpec = await prisma.inspectionSpec.findFirst({ where: { id: inspectionSpecId, tenantId }, select: { id: true } })
   if (!ownedSpec) throw new Error("검사표준을 찾을 수 없습니다.")
   const normalized = normalizeInspectionItems(items)
@@ -624,6 +651,9 @@ export async function upsertInspectionItems(
 
   revalidatePath("/app/mes/measurement")
   revalidatePath("/app/mes/master/inspection-standards")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 /**
@@ -638,6 +668,7 @@ export async function createInspectionSpecWithItems(
   await requireTenantAccess(tenantId)
   await requireResourcePermission("INSPECTION_SPEC", "CREATE")
   await requireRole("OPERATOR")
+  try {
   const normalized = normalizeInspectionItems(items)
 
   const [item, operation] = await Promise.all([
@@ -646,6 +677,7 @@ export async function createInspectionSpecWithItems(
   ])
   if (!item) throw new Error("선택한 품목을 찾을 수 없습니다.")
   if (!operation) throw new Error("선택한 공정을 찾을 수 없습니다.")
+  await assertItemLinkedToOperationRouting(tenantId, data.itemId, data.routingOperationId)
 
   const existing = await prisma.inspectionSpec.findFirst({
     where: { tenantId, itemId: data.itemId, routingOperationId: data.routingOperationId, version: data.version },
@@ -676,6 +708,9 @@ export async function createInspectionSpecWithItems(
   revalidatePath("/app/mes/measurement")
   revalidatePath("/app/mes/master/inspection-standards")
   return { id: created.id }
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 /**
@@ -690,6 +725,7 @@ export async function updateInspectionSpecWithItems(
   await requireResourcePermission("INSPECTION_SPEC", "UPDATE")
   await requireRole("OPERATOR")
   const tenantId = await getTenantId()
+  try {
   const normalized = normalizeInspectionItems(items)
 
   await prisma.$transaction(async (tx) => {
@@ -753,6 +789,9 @@ export async function updateInspectionSpecWithItems(
 
   revalidatePath("/app/mes/measurement")
   revalidatePath("/app/mes/master/inspection-standards")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 export async function deleteInspectionItem(id: string) {

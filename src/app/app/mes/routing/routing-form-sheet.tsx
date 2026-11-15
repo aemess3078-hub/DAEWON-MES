@@ -28,6 +28,7 @@ import {
 import { cn } from "@/lib/utils"
 import { routingFormSchema, RoutingFormValues } from "./routing-form-schema"
 import { createRouting, updateRouting, RoutingWithDetails } from "@/lib/actions/routing.actions"
+import { isActionFailure } from "@/lib/action-result"
 import { RoutingStatus, RoutingScope } from "@prisma/client"
 
 interface WorkCenter {
@@ -150,10 +151,16 @@ export function RoutingFormSheet({
         })),
       }
 
+      let result: unknown
       if (mode === "create") {
-        await createRouting(payload, tenantId)
+        result = await createRouting(payload, tenantId)
       } else if (routing) {
-        await updateRouting(routing.id, payload)
+        result = await updateRouting(routing.id, payload)
+      }
+      // 예상 가능한 업무 검증 오류(사용 중 라우팅 공정 변경 등)는 구조화된 결과로 오므로 한글 안내를 그대로 보여 준다.
+      if (isActionFailure(result)) {
+        alert(result.error)
+        return
       }
       onOpenChange(false)
       router.refresh()

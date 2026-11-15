@@ -31,7 +31,33 @@ test.beforeAll(async () => {
   for (const p of ["/app/mes/bom", "/app/mes/ecn"]) { try { await fetch(`${E2E_BASE}${p}`, { headers: { cookie: adminCookie } }) } catch { /* 계속 */ } }
   MAP = buildActionMap()
 })
-test.afterAll(async () => { await db.$disconnect() })
+// 이 파일이 만든 데이터만 정리한다(다음 스펙의 BOM 목록이 이 파일의 BOM 행으로 밀려 첫 페이지에서 사라지는 간섭을 막는다).
+// 대상: 품목 코드 `E2E-BR-ND-${uniq}-` 에 걸린 작업지시·계획·ECN·BOM, 그리고 `E2E-BR-*-${uniq}-` 라우팅. 시드 품목(E2E-BR-FG-001 등)은 건드리지 않는다.
+test.afterAll(async () => {
+  try {
+    const items = await db.item.findMany({ where: { tenantId: D.tenantId, code: { startsWith: `E2E-BR-ND-${uniq}-` } }, select: { id: true } })
+    const itemIds = items.map((i) => i.id)
+    const woIds = (await db.workOrder.findMany({ where: { tenantId: D.tenantId, OR: [{ itemId: { in: itemIds } }, { orderNo: { contains: `-${uniq}-` } }] }, select: { id: true } })).map((w) => w.id)
+    const planIds = (await db.productionPlan.findMany({ where: { tenantId: D.tenantId, OR: [{ planNo: { contains: `-${uniq}-` } }, { items: { some: { itemId: { in: itemIds } } } }] }, select: { id: true } })).map((p) => p.id)
+    const ecnIds = (await db.engineeringChange.findMany({ where: { tenantId: D.tenantId, OR: [{ targetItemId: { in: itemIds } }, { ecnNo: { contains: `-${uniq}-` } }] }, select: { id: true } })).map((e) => e.id)
+    const bomIds = (await db.bOM.findMany({ where: { tenantId: D.tenantId, itemId: { in: itemIds } }, select: { id: true } })).map((b) => b.id)
+    const routingIds = (await db.routing.findMany({ where: { tenantId: D.tenantId, code: { contains: `-${uniq}-` } }, select: { id: true } })).map((r) => r.id)
+    const step = async (fn: () => Promise<unknown>) => { try { await fn() } catch { /* 참조가 남은 행은 그대로 둔다 */ } }
+    await step(() => db.workOrderOperation.deleteMany({ where: { workOrderId: { in: woIds } } }))
+    await step(() => db.workOrder.deleteMany({ where: { id: { in: woIds } } }))
+    await step(() => db.productionPlanItem.deleteMany({ where: { planId: { in: planIds } } }))
+    await step(() => db.productionPlan.deleteMany({ where: { id: { in: planIds } } }))
+    await step(() => db.engineeringChangeDetail.deleteMany({ where: { engineeringChangeId: { in: ecnIds } } }))
+    await step(() => db.engineeringChange.deleteMany({ where: { id: { in: ecnIds } } }))
+    await step(() => db.bOMItem.deleteMany({ where: { bomId: { in: bomIds } } }))
+    await step(() => db.bOM.deleteMany({ where: { id: { in: bomIds } } }))
+    await step(() => db.itemRouting.deleteMany({ where: { routingId: { in: routingIds } } }))
+    await step(() => db.routingOperation.deleteMany({ where: { routingId: { in: routingIds } } }))
+    await step(() => db.routing.deleteMany({ where: { id: { in: routingIds } } }))
+    // 이 파일이 만든 전용 품목(E2E-BR-ND-…)도 지운다 — 남으면 뒤 스펙의 품목 선택 목록이 길어져 목록 스크롤 때문에 선택이 불안정해진다.
+    await step(() => db.item.deleteMany({ where: { id: { in: itemIds } } }))
+  } finally { await db.$disconnect() }
+})
 
 async function run(name: string, fileRe: RegExp, args: unknown[]) {
   const a = MAP.find((x) => x.name === name && x.files.some((f) => fileRe.test(f)))

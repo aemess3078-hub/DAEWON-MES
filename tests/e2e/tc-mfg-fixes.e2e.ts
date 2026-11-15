@@ -186,8 +186,9 @@ test("[N-10b] 측정 화면 경로(upsertInspectionItems 직접 호출)도 하�
   const ok = await post(adminCookie, p, a!, [clean.id, [{ seq: 10, name: "정상", inputType: "NUMERIC", lowerLimit: 1, upperLimit: 2, unit: "mm" }]])
   const items = await db.inspectionItem.findMany({ where: { inspectionSpecId: clean.id } })
   record("MFG-N10b", null, { bad: bad.text.slice(0, 160), dup: dup.text.slice(0, 160), okStatus: ok.status, specIgnored: spec.id })
-  expect(/하한|상한/.test(bad.text) && /\d+:E\{/.test(bad.text), "하한>상한 거부").toBe(true)
-  expect(/중복/.test(dup.text) && /\d+:E\{/.test(dup.text), "순서 중복 거부").toBe(true)
+  // 예상 가능한 업무 검증 오류는 throw 가 아니라 { success:false, error } 로 오고(프로덕션에서도 한글 안내가 가려지지 않음), 시스템 예외 형식(E 행)이 아니어야 한다.
+  expect(/"success":false/.test(bad.text) && /하한|상한/.test(bad.text) && !/\d+:E\{/.test(bad.text), "하한>상한은 구조화된 업무 검증 오류로 거부(한글 안내 포함)").toBe(true)
+  expect(/"success":false/.test(dup.text) && /중복/.test(dup.text) && !/\d+:E\{/.test(dup.text), "순서 중복은 구조화된 업무 검증 오류로 거부(한글 안내 포함)").toBe(true)
   expect(items.map((i) => i.name), "정상 입력만 저장됨(거부된 요청은 항목을 바꾸지 않음)").toEqual(["정상"])
 })
 

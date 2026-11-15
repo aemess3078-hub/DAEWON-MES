@@ -24,6 +24,55 @@ export function roleCreds(role: RoleKey | "T2OWNER") {
 export type ActionInfo = { id: string; name: string; pages: string[]; files: string[] }
 const REPO = process.cwd()
 
+/**
+ * digest 로 가려진 서버 예외 메시지를 서버 에러 로그(E2E_SERVER_ERR_LOG)에서 찾는다.
+ * 로그 형식: "Error: <메시지>\n    at ...\n  digest: '<digest>'" → digest 줄 바로 위의 가장 가까운 "Error:" 줄을 쓴다.
+ * 로그 경로가 없거나 찾지 못하면 null (호출부는 원래 응답을 그대로 쓴다).
+ */
+export function resolveDigestMessage(digest: string): string | null {
+  const logPath = process.env.E2E_SERVER_ERR_LOG
+  if (!logPath || !fs.existsSync(logPath)) return null
+  const lines = fs.readFileSync(logPath, "utf8").split(/\r?\n/)
+  const at = lines.findIndex((l) => l.includes(`digest: '${digest}'`))
+  if (at < 0) return null
+  // 일반 Error 는 "Error: 메시지", 사용자 정의 오류(ShipmentPlanError 등)는 프로덕션 빌드에서 "I [ShipmentPlanError]: 메시지" 처럼 출력된다.
+  // digest 줄 위쪽에서 가장 가까운 오류 머리줄을 쓴다(다른 오류의 메시지를 잘못 집지 않도록 머리줄 형식을 모두 인식한다).
+  for (let i = at; i >= 0 && i > at - 60; i--) {
+    const m = /^(?:[A-Za-z]*Error|[A-Za-z]{1,3} \[[A-Za-z]*Error\]): (.*)$/.exec(lines[i])
+    if (m) return m[1].trim()
+  }
+  return null
+}
+
+let serverFileIndex: Map<string, string[]> | null = null
+/** src 아래 "use server" 파일을 한 번 훑어 export 이름 → 파일 목록(REPO 기준 상대경로) 색인을 만든다 */
+function serverFilesExporting(name: string): string[] {
+  if (!serverFileIndex) {
+    const idx = new Map<string, string[]>()
+    const walkSrc = (d: string) => {
+      for (const f of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, f.name)
+        if (f.isDirectory()) walkSrc(p)
+        else if (/\.tsx?$/.test(f.name)) {
+          const s = fs.readFileSync(p, "utf8")
+          if (!/^\s*(['"])use server\1/.test(s)) continue
+          const rel = path.relative(REPO, p).split("\\").join("/")
+          const re = /export\s+(?:async\s+)?(?:function|const)\s+(\w+)/g
+          let m: RegExpExecArray | null
+          while ((m = re.exec(s))) {
+            const list = idx.get(m[1]) ?? []
+            list.push(rel)
+            idx.set(m[1], list)
+          }
+        }
+      }
+    }
+    walkSrc(path.join(REPO, "src"))
+    serverFileIndex = idx
+  }
+  return serverFileIndex.get(name) ?? []
+}
+
 export function buildActionMap(): ActionInfo[] {
   const manPath = path.join(REPO, ".next/server/server-reference-manifest.json")
   const man = JSON.parse(fs.readFileSync(manPath, "utf8")) as { node: Record<string, { workers: Record<string, string> }> }
@@ -41,6 +90,11 @@ export function buildActionMap(): ActionInfo[] {
             try { Object.assign(names, JSON.parse(t)); break } catch { /* next form */ }
           }
         }
+        // 프로덕션 빌드: 마커 주석 없이 청크 안에 "<id>":()=>…then(e=>e.<exportName>) 형태로 들어 있다 (키 따옴표는 minify 시 생략될 수 있음)
+        const prodRe = /"?([0-9a-f]{40})"?:\(\)=>[^"]{0,200}?\.then\(e=>e\.(\w+)\)/g
+        while ((m = prodRe.exec(s))) {
+          if (!names[m[1]]) names[m[1]] = m[2]
+        }
       }
     }
   }
@@ -56,6 +110,8 @@ export function buildActionMap(): ActionInfo[] {
         for (const [file, ns] of arr) if (ns.includes(names[id])) files.add(path.relative(REPO, file).split("\\").join("/"))
       } catch { /* ignore */ }
     }
+    // 프로덕션 빌드에는 worker 별 actions= 정보가 없으므로, "use server" 파일 중 같은 이름을 export 하는 파일을 소스로 본다
+    if (files.size === 0 && names[id]) for (const f of serverFilesExporting(names[id])) files.add(f)
     out.push({ id, name: names[id] ?? "", pages: Object.keys(e.workers), files: Array.from(files) })
   }
   return out.filter((a) => a.name)
@@ -177,6 +233,9 @@ export async function callAction(cookie: string | null, pagePath: string, a: Act
   if (em) {
     let message = "", stack = ""
     try { const j = JSON.parse(em[1]) as { message?: string; stack?: string }; message = j.message ?? ""; stack = j.stack ?? "" } catch { message = em[1].slice(0, 200) }
+    // 프로덕션 빌드는 메시지 대신 digest 만 보낸다 → 서버 에러 로그에서 실제 메시지를 찾는다 (o2s-lib 의 resolveDigestMessage 와 같은 방식)
+    const digest = /"digest":"(\d+)"/.exec(em[1])?.[1]
+    if (digest && !message) message = resolveDigestMessage(digest) ?? message
     const at = /at (?:async )?(\w+) \(webpack-internal:\/\/\/\(rsc\)\/\.\/(src\/[^:)]+:\d+)/.exec(stack)
     const guard = /(requireResourcePermission|requireRole|requireDeveloper)/.exec(stack)?.[1]
     const stackAt = guard ? `${guard}` + (at ? ` ← ${at[1]} (${at[2]})` : "") : at ? `${at[1]} (${at[2]})` : ""

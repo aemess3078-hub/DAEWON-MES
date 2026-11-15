@@ -18,6 +18,10 @@ export async function middleware(req: NextRequest) {
   // 대원정밀 구축 범위 밖 경로 1차 차단(404). 페이지 이동(RSC)과 서버 액션 POST 모두 이 경로를 거친다.
   // 개발자 예외 판단에 서명 미검증 payload 를 쓰므로, 실제 인가는 app/layout.tsx 와 서버 액션 가드가 서명 검증 후 다시 수행한다.
   if (hasSession && isAppPage && !isRouteAllowed(req.nextUrl.pathname, decodeJwtPayloadUnverified(sessionToken))) {
+    // Server Action POST 는 rewrite 하면 Next 가 자기 서버로 재전송을 반복하므로(자기 프록시 오류, 요청당 약 30초 지연 후 500) 직접 404 로 끝낸다.
+    if (req.headers.has('next-action')) {
+      return new NextResponse(null, { status: 404 });
+    }
     return NextResponse.rewrite(new URL('/__daewon-out-of-scope__', req.url), { status: 404 });
   }
 

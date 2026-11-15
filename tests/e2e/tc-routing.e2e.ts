@@ -44,6 +44,20 @@ async function fillRouting(page: Page, o: { code: string; name: string; version?
 }
 
 test.describe("라우팅관리", () => {
+  // 앞선 검사표준 스펙(tc-inspection-spec)이 FG-001 에 연결해 둔 픽스처 라우팅(…-Q)과 그 검사표준을 정리한다.
+  // 이 파일의 '기존 라우팅 연결은 유지' 검증이 FG-001 의 전체 연결 목록을 보므로, 다른 스펙의 픽스처가 남아 있으면 간섭을 받는다.
+  test.beforeAll(async () => {
+    const step = async (fn: () => Promise<unknown>) => { try { await fn() } catch { /* 참조가 남은 행은 그대로 둔다 */ } }
+    const rt = await db.routing.findFirst({ where: { tenantId: D.tenantId, code: `E2E-BR-RT-${uniq}-Q` }, select: { id: true } })
+    if (!rt) return
+    const opIds = (await db.routingOperation.findMany({ where: { routingId: rt.id }, select: { id: true } })).map((o) => o.id)
+    const specIds = (await db.inspectionSpec.findMany({ where: { tenantId: D.tenantId, routingOperationId: { in: opIds } }, select: { id: true } })).map((s) => s.id)
+    await step(() => db.inspectionItem.deleteMany({ where: { inspectionSpecId: { in: specIds } } }))
+    await step(() => db.inspectionSpec.deleteMany({ where: { id: { in: specIds } } }))
+    await step(() => db.itemRouting.deleteMany({ where: { routingId: rt.id } }))
+    await step(() => db.routingOperation.deleteMany({ where: { routingId: rt.id } }))
+    await step(() => db.routing.deleteMany({ where: { id: rt.id } }))
+  })
   test.afterAll(async () => { await db.$disconnect() })
 
   // ───────── 등록/유지 ─────────

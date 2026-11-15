@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { isActionFailure } from "@/lib/action-result"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { useRouter } from "next/navigation"
@@ -82,13 +83,14 @@ export function SpecFormSheet({
   async function onSubmit(values: InspectionSpecFormValues) {
     setIsLoading(true)
     try {
+      let result: unknown
       if (editingSpec) {
-        await updateInspectionSpec(editingSpec.id, {
+        result = await updateInspectionSpec(editingSpec.id, {
           version: values.version,
           status: values.status,
         })
       } else {
-        await createInspectionSpec(
+        result = await createInspectionSpec(
           {
             itemId: values.itemId,
             routingOperationId: values.routingOperationId,
@@ -97,6 +99,10 @@ export function SpecFormSheet({
           },
           tenantId
         )
+      }
+      if (isActionFailure(result)) {
+        alert(result.error)
+        return
       }
       onOpenChange(false)
       router.refresh()

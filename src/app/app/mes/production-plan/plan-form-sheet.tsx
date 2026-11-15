@@ -38,6 +38,7 @@ import {
   getRoutingsForPlanItem,
   PlanWithDetails,
 } from "@/lib/actions/production-plan.actions"
+import { isActionFailure } from "@/lib/action-result"
 import { PlanType, PlanStatus } from "@prisma/client"
 import type { PlanQuantityView } from "@/lib/production-quantity-model"
 import {
@@ -314,10 +315,16 @@ export function PlanFormSheet({
             : { ...it, allocatedQty: undefined, extraQty: undefined, extraReason: undefined }
         ),
       }
+      let result: unknown
       if (mode === "create") {
-        await createPlan(payload as never, tenantId)
+        result = await createPlan(payload as never, tenantId)
       } else if (plan) {
-        await updatePlan(plan.id, payload as never)
+        result = await updatePlan(plan.id, payload as never)
+      }
+      // 예상 가능한 업무 검증 오류(수주 충당 수량 초과 등)는 구조화된 결과로 오므로 시트를 연 채 한글 안내를 보여 준다.
+      if (isActionFailure(result)) {
+        setServerError(result.error)
+        return
       }
       onOpenChange(false)
       router.refresh()

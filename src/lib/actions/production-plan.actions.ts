@@ -16,6 +16,7 @@ import { allocationIncreaseViolationMessage, findProductionRequestViolation } fr
 import { formatScaledQuantity, toScaledQuantity } from "@/lib/quantity-scale"
 import { keepProductionRequestTag } from "@/lib/production-request-tag"
 import { NEW_PLAN_STATUS, PLAN_NOT_EDITABLE_MESSAGE, validatePlanStatusChange, validatePlanStatusForCreate, type PlanStatusValue } from "@/lib/production-plan-status"
+import { businessFailure } from "@/lib/business-error.server"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -302,6 +303,7 @@ async function generateProductionPlanNoForCreate(tenantId: string, planType: Pla
 export async function createPlan(data: CreatePlanRequest, _tenantId: string) {
   const user = await requireResourcePermission("PRODUCTION_PLAN", "CREATE")
   const tenantId = user.tenantId
+  try {
   // 상태는 서버가 결정한다: 신규 재고 생산계획은 등록 즉시 확정(작업지시 생성 가능). 요청의 status 는 무시한다.
   const { items, startDate, endDate, note, status: requestedStatus, ...headerFields } = data
 
@@ -369,11 +371,15 @@ export async function createPlan(data: CreatePlanRequest, _tenantId: string) {
   }, { fields: ["tenantId", "planNo"], message: "생산계획번호 생성 중 중복이 반복되었습니다. 다시 시도해 주세요." })
 
   revalidatePath("/app/mes/production-plan")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 export async function updatePlan(id: string, data: CreatePlanInput) {
   const user = await requireResourcePermission("PRODUCTION_PLAN", "UPDATE")
   const tenantId = user.tenantId
+  try {
   const { items, startDate, endDate, note, ...headerFields } = data
 
   if (headerFields.status === PlanStatus.CANCELLED) {
@@ -613,6 +619,9 @@ export async function updatePlan(id: string, data: CreatePlanInput) {
   )
 
   revalidatePath("/app/mes/production-plan")
+  } catch (error) {
+    return businessFailure(error)
+  }
 }
 
 export async function cancelProductionPlan(id: string, reason: string) {
