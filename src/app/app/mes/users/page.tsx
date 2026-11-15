@@ -5,14 +5,12 @@ import { ensurePermissionMatrix } from "@/lib/actions/permission.actions"
 import {
   getTenantUsers,
   getLoginHistory,
-  getAuditLogs,
 } from "@/lib/actions/user-management.actions"
 import { getSignupRequests, getPendingSignupCount } from "@/lib/actions/signup-request.actions"
 import { PermissionMatrixTable } from "./permission-matrix"
 import { UserManagementTable } from "./user-management-table"
 import { SignupRequestsTable } from "./signup-requests-table"
 import { LoginHistoryTable } from "./login-history-table"
-import { AuditLogTable } from "./audit-log-table"
 import { requireRole } from "@/lib/auth"
 import { canAccessFullUserManagement } from "@/lib/developer"
 
@@ -38,20 +36,18 @@ export default async function UsersPage() {
   // 서버에서 초기 데이터를 넘겨야 첫 렌더링에서 바로 보인다.
   const emptyLogData = { rows: [], total: 0, page: 1, pageSize: 20 }
 
-  const [matrix, signupRequests, pendingCount, loginHistoryResult, auditLogResult] =
+  const [matrix, signupRequests, pendingCount, loginHistoryResult] =
     fullAccess
       ? await Promise.allSettled([
           ensurePermissionMatrix(tenantId),
           getSignupRequests(),
           getPendingSignupCount(),
           getLoginHistory({ days: 90, page: 1, pageSize: 20 }),
-          getAuditLogs({ days: 90, page: 1, pageSize: 20 }),
         ])
       : [
           { status: "fulfilled" as const, value: {} },
           { status: "fulfilled" as const, value: [] },
           { status: "fulfilled" as const, value: 0 },
-          { status: "fulfilled" as const, value: emptyLogData },
           { status: "fulfilled" as const, value: emptyLogData },
         ]
 
@@ -60,7 +56,6 @@ export default async function UsersPage() {
   const signupData = signupRequests.status === "fulfilled" ? signupRequests.value : []
   const pending = pendingCount.status === "fulfilled" ? pendingCount.value : 0
   const loginHistoryData = loginHistoryResult.status === "fulfilled" ? loginHistoryResult.value : emptyLogData
-  const auditLogData = auditLogResult.status === "fulfilled" ? auditLogResult.value : emptyLogData
   const usersError = usersResult.status === "rejected"
     ? usersResult.reason instanceof Error
       ? usersResult.reason.message
@@ -104,9 +99,6 @@ export default async function UsersPage() {
               <TabsTrigger value="login-history" className="text-[13px]">
                 로그관리
               </TabsTrigger>
-              <TabsTrigger value="audit-log" className="text-[13px]">
-                감사로그
-              </TabsTrigger>
             </>
           )}
         </TabsList>
@@ -147,12 +139,6 @@ export default async function UsersPage() {
           </TabsContent>
         )}
 
-        {/* 이용 로그 (full-access 전용) */}
-        {fullAccess && (
-          <TabsContent value="audit-log" className="mt-4">
-            <AuditLogTable initialData={auditLogData} />
-          </TabsContent>
-        )}
       </Tabs>
     </div>
   )

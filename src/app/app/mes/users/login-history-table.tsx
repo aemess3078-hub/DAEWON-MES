@@ -104,7 +104,7 @@ export function LoginHistoryTable({ initialData }: { initialData: PaginatedResul
         ...allRows.map((r) => [
           formatDateTime(r.createdAt),
           r.name ?? "",
-          r.email ?? "",
+          r.email && !r.email.endsWith("@daewon-mes.internal") ? r.email : "",
           r.loginId,
           EVENT_CONFIG[r.eventType]?.label ?? r.eventType,
           r.failReason ? (FAIL_REASON_LABELS[r.failReason] ?? r.failReason) : "",
@@ -286,7 +286,7 @@ export function LoginHistoryTable({ initialData }: { initialData: PaginatedResul
                           </span>
                         )}
                       </div>
-                      {r.email && <div className="text-[12px] text-muted-foreground">{r.email}</div>}
+                      {r.email && !r.email.endsWith("@daewon-mes.internal") && <div className="text-[12px] text-muted-foreground">{r.email}</div>}
                     </td>
                     <td className="px-4 py-2.5 text-[13px] font-mono text-muted-foreground whitespace-nowrap">
                       {r.loginId}
