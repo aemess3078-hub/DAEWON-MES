@@ -116,12 +116,15 @@ async function main() {
     check("B10", !r10.success && r10.code === "INVALID_REFERENCE", "다른 tenant/없는 품목은 거부", r10)
     // 정책 차단(로컬 플래그 없음): 권한 확인 후 쓰기 0
     const flag = process.env.MRP_PURCHASE_CREATION_LOCAL
+    const explicitFlag = process.env.MRP_PURCHASE_CREATION_ENABLED
     process.env.MRP_PURCHASE_CREATION_LOCAL = ""
+    delete process.env.MRP_PURCHASE_CREATION_ENABLED
     const r11 = await sugg().createDraftPurchaseOrdersFromMrpSuggestions(base([linePipe]))
     check("B11", !r11.success && r11.code === "CREATION_DISABLED", "정책이 꺼진 환경에서는 서버가 생성을 거부", r11)
     const st = await sugg().getMrpPurchaseCreationState()
     check("B12", st.enabled === false, "화면용 정책 상태도 꺼짐으로 응답")
     process.env.MRP_PURCHASE_CREATION_LOCAL = flag
+    if (explicitFlag !== undefined) process.env.MRP_PURCHASE_CREATION_ENABLED = explicitFlag
     // 인증 없음
     logout()
     let denied = false

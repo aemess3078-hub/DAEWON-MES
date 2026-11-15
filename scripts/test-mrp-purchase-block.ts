@@ -3,7 +3,7 @@
  * 서버 액션 실호출 검증은 tests/e2e/tc-mrp-po-block.e2e.ts.
  *
  * 확인 항목
- *  - 정책은 상수가 아니라 환경 판정이다: 로컬 플래그 + 루프백 DB + 비 Vercel 일 때만 켜진다(운영/원격 DB 에서는 켜질 수 없다).
+ *  - 정책은 상수가 아니라 환경 판정이다: 기본 꺼짐. MRP_PURCHASE_CREATION_ENABLED=1 명시(운영 포함) 또는 로컬 플래그 + 루프백 DB + 비 Vercel 일 때만 켜진다.
  *  - 공통 발주 파이프라인(createDraftPurchaseOrdersFromSuggestions)을 쓰는 서버 액션은 1개뿐이고,
  *    정책 판정 차단 분기를 서비스 호출보다 앞에 둔다. 구 방식(createPurchaseOrdersFromMrp: 첫 공급업체/멱등 없음)은 어떤 소스도 import 하지 않는다.
  *  - 그 밖의 "use server" 파일·API 라우트에서 위 서비스를 직접 가져다 쓰지 않는다(우회 진입점 없음).
@@ -48,6 +48,20 @@ ok(
     evaluateMrpPurchaseCreationPolicy({ MRP_PURCHASE_CREATION_LOCAL: "1", DATABASE_URL: "postgresql://u:p@localhost:54329/x" }).enabled,
   "P1 플래그 + 루프백 DB 에서만 켜진다"
 )
+// 명시적 활성화(운영 포함): MRP_PURCHASE_CREATION_ENABLED=1 일 때만 켜지고, 기본은 꺼짐
+const PROD_DB = "postgresql://u:p@db.abcdefgh.supabase.co:5432/postgres"
+ok(!isMrpPurchaseCreationEnabled({ DATABASE_URL: PROD_DB }), "P1b 운영 DB·설정 없음 → 꺼짐(기본값)")
+ok(!isMrpPurchaseCreationEnabled({ DATABASE_URL: PROD_DB, VERCEL: "1", VERCEL_ENV: "production" }), "P1b Vercel Production·설정 없음 → 꺼짐")
+ok(!isMrpPurchaseCreationEnabled({ MRP_PURCHASE_CREATION_LOCAL: "1", DATABASE_URL: PROD_DB, VERCEL_ENV: "production" }), "P1b 로컬 플래그는 운영에서 여전히 무효")
+for (const v of ["", "0", "true", "TRUE", "yes", "on", " 1", "1 ", "2"]) {
+  ok(!isMrpPurchaseCreationEnabled({ MRP_PURCHASE_CREATION_ENABLED: v, DATABASE_URL: PROD_DB, VERCEL_ENV: "production" }), `P1b 활성화 값 "${v}" 는 거부(정확히 "1" 만 허용)`)
+}
+ok(
+  isMrpPurchaseCreationEnabled({ MRP_PURCHASE_CREATION_ENABLED: "1", DATABASE_URL: PROD_DB, VERCEL: "1", VERCEL_ENV: "production" }) &&
+    evaluateMrpPurchaseCreationPolicy({ MRP_PURCHASE_CREATION_ENABLED: "1" }).reason === "ENABLED_EXPLICIT",
+  "P1b 운영(Vercel Production)에서도 MRP_PURCHASE_CREATION_ENABLED=1 로 명시하면 켜진다"
+)
+ok(evaluateMrpPurchaseCreationPolicy({}).reason === "DISABLED", "P1b 기본 판정 사유는 DISABLED")
 const policySrc = text(path.join(SRC, "lib/mrp/purchase-creation-policy.ts"))
 ok(!/export const MRP_PURCHASE_CREATION_ENABLED/.test(policySrc), "P1 정책은 상수 스위치가 아니다")
 ok(/[가-힣]/.test(MRP_PURCHASE_CREATION_DISABLED_MESSAGE) && /구매발주/.test(MRP_PURCHASE_CREATION_DISABLED_MESSAGE) && /발주관리/.test(MRP_PURCHASE_CREATION_DISABLED_MESSAGE) && /조회/.test(MRP_PURCHASE_CREATION_DISABLED_MESSAGE), "P2 안내 문구는 한글이며 구매발주·조회·발주관리 안내를 담는다")

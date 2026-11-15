@@ -3,8 +3,8 @@
  *  정책: 생산계획 기준·수주 기준 MRP 에서 구매발주를 만드는 두 서버 액션은 신규 생성을 막는다.
  *        MRP 계산·조회와 일반 구매발주 등록(발주관리)은 그대로 동작한다.
  *  검증 방식: 서버 액션 HTTP 직접 호출(화면 우회) 전후로 PurchaseOrder/MrpRun/MrpRunPurchase 행 수와 감사 로그를 대조한다.
- *  주의(2026-11-12): 발주 생성 정책은 이제 환경 판정(MRP_PURCHASE_CREATION_LOCAL=1 + 루프백 DB)이다. 이 "차단" 스위트는
- *  그 값을 설정하지 않은 서버(= 운영과 같은 비활성 상태)를 대상으로 실행한다. 활성 상태의 생성 동작은 scripts/db-it/18-mrp-plan-purchase.ts 가 검증한다.
+ *  주의(2026-11-12): 발주 생성 정책은 이제 환경 판정(MRP_PURCHASE_CREATION_ENABLED=1 명시, 또는 로컬 한정 MRP_PURCHASE_CREATION_LOCAL=1 + 루프백 DB)이다. 이 "차단" 스위트는
+ *  그 값들을 설정하지 않은 서버(= 운영과 같은 비활성 상태)를 대상으로 실행한다. 활성 상태의 생성 동작은 scripts/db-it/18-mrp-plan-purchase.ts 가 검증한다.
  */
 import { test, expect } from "@playwright/test"
 import { assertSafeE2eEnvironment, adminCredentials, developerCredentials } from "./guard"
