@@ -78,6 +78,7 @@ export const DAEWON_ALLOWED_ROUTES: readonly string[] = [
   // 모니터링
   "/app/lms/monitoring/status",
   "/app/mes/equipment-monitor",
+  "/app/mes/kpi",
   // POP (관리자 웹 내 작업대기)
   "/app/pop",
 ]
